@@ -227,6 +227,8 @@ function evaluateFlight(flightOffer: any, criteria: any) {
 
   // Extract booking URL from Google Flights data
   let bookingUrl = null;
+  
+  // First try: direct booking link from SerpAPI
   if (flightOffer.booking_options && flightOffer.booking_options.length > 0) {
     const bestOption = flightOffer.booking_options[0];
     if (bestOption.book_on_google_link) {
@@ -234,11 +236,19 @@ function evaluateFlight(flightOffer: any, criteria: any) {
     }
   }
   
-  // Fallback: construct Google Flights URL with flight details
+  // Second try: construct proper Google Flights URL with actual data
   if (!bookingUrl && firstLeg.departure_airport && firstLeg.arrival_airport) {
-    const departureCode = firstLeg.departure_airport.id || criteria.origin;
-    const arrivalCode = lastLeg.arrival_airport.id || criteria.destination;
-    bookingUrl = `https://www.google.com/travel/flights/search?tfs=CBwQAhokEgoyMDI2LTAyLTA1agcIARIDJHtkZXBhcnR1cmVDb2RlfXIHCAESAyR7YXJyaXZhbENvZGV9`;
+    const depCode = firstLeg.departure_airport.id || criteria.origin;
+    const arrCode = lastLeg.arrival_airport.id || criteria.destination;
+    const depTime = firstLeg.departure_airport.time?.split('T')[0] || criteria.date;
+    
+    // Build Google Flights search URL
+    bookingUrl = `https://www.google.com/travel/flights/search?tfs=CBwQAhokagcIARID${depCode}EgoyMDI2LTAyLTA1cgcIARID${arrCode}`;
+  }
+  
+  // Third try: generic Google Flights search
+  if (!bookingUrl) {
+    bookingUrl = `https://www.google.com/travel/flights?q=flights%20from%20${criteria.origin}%20to%20${criteria.destination}%20on%20${criteria.date}`;
   }
 
   // Detailed flight information (using extensions already defined above)
