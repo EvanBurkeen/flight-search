@@ -122,6 +122,14 @@ async function searchGoogleFlights(
     params.return_date = returnDate;
   }
 
+  console.log('🔍 SerpAPI search:', {
+    origin,
+    destination,
+    date,
+    returnDate: returnDate || 'one-way',
+    travelClass,
+  });
+
   if (excludeAirlines && excludeAirlines.length > 0) {
     params.exclude_airlines = excludeAirlines.join(',');
   }
@@ -144,71 +152,63 @@ function evaluateFlight(flightOffer: any, criteria: any) {
     const firstLeg = legs[0];
     const lastLeg = legs[legs.length - 1];
     
-    // Extract flight info - all optional, don't fail if missing
+    // Extract flight info - all optional
     const flightNumber = firstLeg.flight_number || '';
     const carrierCode = extractAirlineCode(flightNumber) || null;
     const airline = firstLeg.airline || 'Unknown';
     const alliance = carrierCode ? mapAirlineToAlliance(carrierCode) : 'Independent';
     
-    // ONLY reject if explicitly excluded
+    // Check if airline is excluded - ONLY hard filter
     if (carrierCode && criteria.exclude_airlines?.includes(carrierCode)) {
-      console.log(`Rejected ${airline} (${carrierCode}) - excluded airline`);
+      console.log(`✗ Filtered out ${airline} (${carrierCode}) - user excluded this airline`);
       return null;
     }
     
-    // ONLY filter alliance if user specified AND we know the alliance
-    if (criteria.alliance_preference && 
-        criteria.alliance_preference !== 'any' && 
-        alliance !== 'Independent' &&
-        alliance !== criteria.alliance_preference) {
-      console.log(`Rejected ${airline} - wrong alliance (${alliance} vs ${criteria.alliance_preference})`);
-      return null;
-    }
-
-    // Extract times - don't fail if missing
     const departureTime = firstLeg.departure_airport?.time || firstLeg.departure_time || null;
     const arrivalTime = lastLeg.arrival_airport?.time || lastLeg.arrival_time || null;
+    const price = flightOffer.price || 0;
+    const aircraft = firstLeg.airplane || 'Unknown';
+    const stops = Math.max(0, legs.length - 1);
+    const totalDuration = flightOffer.total_duration || 0;
 
-    // ONLY filter by time if we have data AND user specified preference
-    if (departureTime && (criteria.departure_time_before || criteria.departure_time_after)) {
+    console.log(`✓ Evaluating: ${airline} (${carrierCode}) - $${price} - ${stops} stops - ${aircraft}`);
+
+    // ALL OTHER CRITERIA ARE PREFERENCES (SCORING ONLY)
+    let score = 50; // Base score
+    const highlights: string[] = [];
+    
+    // Direct flight bonus
+    if (stops === 0) {
+      score += 30;
+    }
+    
+    // Alliance bonus
+    if (alliance !== 'Independent') score += 5;
+    if (criteria.alliance_preference && criteria.alliance_preference === alliance) {
+      score += 15;
+      highlights.push(`✓ ${alliance}`);
+    }
+    
+    // Time preference bonus (not filter!)
+    if (departureTime) {
       try {
         const timeStr = departureTime.includes('T') ? departureTime.split('T')[1] : departureTime;
         const depHour = parseInt(timeStr.split(':')[0]);
         
         if (!isNaN(depHour)) {
-          if (criteria.departure_time_before && depHour >= criteria.departure_time_before) {
-            console.log(`Rejected ${airline} - too late (${depHour} >= ${criteria.departure_time_before})`);
-            return null;
+          if (criteria.departure_time_before && depHour < criteria.departure_time_before) {
+            score += 10;
+            highlights.push(`✓ Early departure (${timeStr.slice(0,5)})`);
           }
-          if (criteria.departure_time_after && depHour < criteria.departure_time_after) {
-            console.log(`Rejected ${airline} - too early (${depHour} < ${criteria.departure_time_after})`);
-            return null;
+          if (criteria.departure_time_after && depHour >= criteria.departure_time_after) {
+            score += 10;
+            highlights.push(`✓ Late departure (${timeStr.slice(0,5)})`);
           }
         }
-      } catch (e) {
-        // Continue if time parsing fails
-      }
+      } catch (e) {}
     }
-
-    const price = flightOffer.price || 0;
-    const aircraft = firstLeg.airplane || 'Unknown';
-    const stops = Math.max(0, legs.length - 1);
-    const totalDuration = flightOffer.total_duration || 0;
     
-    // ONLY filter must_be_direct if explicitly required
-    if (criteria.must_be_direct && stops > 0) {
-      console.log(`Rejected ${airline} - not direct (${stops} stops)`);
-      return null;
-    }
-
-    // Scoring
-    let score = 0;
-    const highlights: string[] = [];
-    
-    if (stops === 0) score += 30;
-    if (alliance !== 'Independent') score += 5;
-    if (criteria.alliance_preference === alliance) score += 15;
-    
+    // Aircraft comfort
     const wideBody = ['787', '789', '777', 'A350', 'A380', 'A330'];
     if (wideBody.some(wb => aircraft.includes(wb))) {
       score += 15;
@@ -217,8 +217,7 @@ function evaluateFlight(flightOffer: any, criteria: any) {
       score += 7;
     }
     
-    score += 15; // Price component
-    
+    // Duration bonus
     if (totalDuration && totalDuration < 300) {
       score += 10;
       highlights.push(`✓ Quick (${Math.floor(totalDuration/60)}h)`);
@@ -226,31 +225,30 @@ function evaluateFlight(flightOffer: any, criteria: any) {
       score += 5;
     }
 
-    // Extensions
+    // Price component
+    score += 15;
+
+    // Refundability
     const extensions = flightOffer.flights?.flatMap((f: any) => f.extensions || []) || [];
     const extText = extensions.join(' ').toLowerCase();
     
     if (extText.includes('refundable') && !extText.includes('non-refundable')) {
       score += 10;
       highlights.push('✓ Refundable');
-    } else if (extText.includes('non-refundable')) {
-      // Only reject if user explicitly said "must be refundable"
-      if (criteria.must_be_refundable === true) {
-        return null;
-      }
     }
 
-    // Build URL
+    // Build booking URL
     const depCode = criteria.origin || '';
     const arrCode = criteria.destination || '';
     const dateStr = criteria.date || '';
     
     const urls: any = {
-      'DL': `https://www.delta.com/flight-search/book-a-flight?origin=${depCode}&destination=${arrCode}&departureDate=${dateStr}`,
+      'DL': `https://www.delta.com`,
       'AA': `https://www.aa.com`,
       'UA': `https://www.united.com`,
       'B6': `https://www.jetblue.com`,
       'NK': `https://www.spirit.com`,
+      'F9': `https://www.flyfrontier.com`,
     };
     
     const bookingUrl = (carrierCode && urls[carrierCode]) || `https://www.google.com/travel/flights?q=${depCode}%20to%20${arrCode}`;
@@ -354,6 +352,10 @@ export async function POST(request: NextRequest) {
     }
 
     console.log(`Found ${flights.length} flights from SerpAPI, evaluating...`);
+    
+    if (flights.length > 0) {
+      console.log('Sample flight data:', JSON.stringify(flights[0], null, 2));
+    }
 
     // Evaluate and rank
     const results = flights
