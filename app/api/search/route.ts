@@ -137,6 +137,18 @@ function evaluateFlight(flightOffer: any, criteria: any) {
 
   const firstLeg = legs[0];
   const lastLeg = legs[legs.length - 1];
+  
+  // Debug: log the entire structure to understand what we're getting
+  console.log('Flight offer structure:', JSON.stringify({
+    flights: legs.map((leg: any) => ({
+      airline: leg.airline,
+      flight_number: leg.flight_number,
+      departure_airport: leg.departure_airport,
+      arrival_airport: leg.arrival_airport,
+      airplane: leg.airplane
+    })),
+    total_duration: flightOffer.total_duration
+  }, null, 2));
 
   const flightNumber = firstLeg.flight_number || '';
   const carrierCode = extractAirlineCode(flightNumber);
@@ -154,10 +166,19 @@ function evaluateFlight(flightOffer: any, criteria: any) {
     return null;
   }
 
+  // Extract times - try multiple possible locations
+  const departureTime = firstLeg.departure_airport?.time || 
+                       firstLeg.departure_time || 
+                       flightOffer.departure_token?.slice(0, 5) || null;
+  const arrivalTime = lastLeg.arrival_airport?.time || 
+                     lastLeg.arrival_time || 
+                     flightOffer.arrival_token?.slice(0, 5) || null;
+  
+  console.log('Extracted times:', { departureTime, arrivalTime });
+
   // Check time preferences
-  if (firstLeg.departure_airport?.time) {
-    const depTime = firstLeg.departure_airport.time;
-    const depHour = parseInt(depTime.split('T')[1]?.split(':')[0] || '0');
+  if (departureTime) {
+    const depHour = parseInt(departureTime.split('T')[1]?.split(':')[0] || departureTime.split(':')[0] || '0');
     
     if (criteria.departure_time_before && depHour >= criteria.departure_time_before) {
       return null; // Too late
@@ -185,7 +206,7 @@ function evaluateFlight(flightOffer: any, criteria: any) {
   // 1. Direct flight bonus (30 points) - Most valuable to travelers
   if (stops === 0) {
     score += 30;
-    highlights.push('✓ Direct flight');
+    // Only highlight if there are non-direct alternatives (will check later)
   } else if (criteria.prefer_direct) {
     warnings.push(`⚠ ${stops} stop(s)`);
   }
@@ -210,9 +231,10 @@ function evaluateFlight(flightOffer: any, criteria: any) {
 
   // 3. Aircraft comfort (15 points)
   const wideBodyAircraft = ['787', '789', '788', '77W', '777', '359', '35K', '351', 'A350', 'A380', 'A330'];
-  if (wideBodyAircraft.some(wb => aircraft.includes(wb))) {
+  const isWideBody = wideBodyAircraft.some(wb => aircraft.includes(wb));
+  if (isWideBody) {
     score += 15;
-    highlights.push(`✓ Excellent comfort (${aircraft})`);
+    highlights.push(`✓ Wide-body aircraft (${aircraft})`);
   } else if (criteria.needs_extra_legroom) {
     score += 7;
     warnings.push(`⚠ Standard aircraft (${aircraft})`);
@@ -220,13 +242,13 @@ function evaluateFlight(flightOffer: any, criteria: any) {
     score += 7;
   }
 
-  // 4. Duration (10 points) - Shorter is better
+  // 4. Duration (10 points) - Only highlight if notably fast
   const avgDuration = 420; // 7 hours average
-  if (totalDuration < avgDuration) {
+  if (totalDuration < avgDuration * 0.8) {
     score += 10;
-    if (totalDuration < 300) {
-      highlights.push('✓ Quick flight');
-    }
+    highlights.push(`✓ Faster than most (${Math.floor(totalDuration / 60)}h ${totalDuration % 60}m)`);
+  } else if (totalDuration < avgDuration) {
+    score += 10;
   } else if (totalDuration > avgDuration * 1.5) {
     warnings.push('⚠ Long travel time');
   }
@@ -373,8 +395,8 @@ function evaluateFlight(flightOffer: any, criteria: any) {
     alliance,
     price,
     aircraft,
-    departure_time: firstLeg.departure_airport?.time,
-    arrival_time: lastLeg.arrival_airport?.time,
+    departure_time: departureTime,
+    arrival_time: arrivalTime,
     duration: totalDuration,
     stops,
     cabin_class: criteria.primary_cabin,
@@ -463,6 +485,34 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({
         message: '❌ No flights match your criteria. Try relaxing some requirements.',
         results: [],
+      });
+    }
+
+    // Add comparative highlights
+    const hasDirectFlights = results.some((r: any) => r.stops === 0);
+    const hasConnectingFlights = results.some((r: any) => r.stops > 0);
+    
+    // Only highlight "Direct flight" if there are also connecting flights to compare
+    if (hasDirectFlights && hasConnectingFlights) {
+      results.forEach((r: any) => {
+        if (r.stops === 0 && !r.highlights.includes('✓ Direct flight')) {
+          r.highlights.unshift('✓ Direct flight');
+        }
+      });
+    }
+    
+    // Find cheapest and most expensive for price comparison
+    const prices = results.map((r: any) => r.price);
+    const minPrice = Math.min(...prices);
+    const maxPrice = Math.max(...prices);
+    const priceRange = maxPrice - minPrice;
+    
+    // Highlight notably cheap flights (bottom 25% of price range)
+    if (priceRange > 50) {
+      results.forEach((r: any) => {
+        if (r.price <= minPrice + (priceRange * 0.25)) {
+          r.highlights.push(`✓ Great price (${priceRange > 100 ? 'saves $' + Math.round(maxPrice - r.price) : 'best deal'})`);
+        }
       });
     }
 
