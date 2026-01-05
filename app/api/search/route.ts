@@ -136,21 +136,40 @@ async function searchGoogleFlights(
 
   const response = await axios.get('https://serpapi.com/search.json', { params });
   
+  console.log('SerpAPI response structure:', {
+    hasBestFlights: !!response.data.best_flights,
+    bestFlightsCount: response.data.best_flights?.length || 0,
+    hasOtherFlights: !!response.data.other_flights,
+    otherFlightsCount: response.data.other_flights?.length || 0,
+    responseKeys: Object.keys(response.data)
+  });
+  
   const flights = [
     ...(response.data.best_flights || []),
     ...(response.data.other_flights || []),
   ];
+
+  console.log(`Returning ${flights.length} total flights`);
 
   return flights;
 }
 
 function evaluateFlight(flightOffer: any, criteria: any) {
   try {
+    console.log('🔵 evaluateFlight called');
+    
     const legs = flightOffer.flights || [];
-    if (legs.length === 0) return null;
+    console.log(`  - legs count: ${legs.length}`);
+    
+    if (legs.length === 0) {
+      console.log('  ❌ No legs, returning null');
+      return null;
+    }
 
     const firstLeg = legs[0];
     const lastLeg = legs[legs.length - 1];
+    
+    console.log('  - Extracting flight info...');
     
     // Extract flight info - all optional
     const flightNumber = firstLeg.flight_number || '';
@@ -158,9 +177,11 @@ function evaluateFlight(flightOffer: any, criteria: any) {
     const airline = firstLeg.airline || 'Unknown';
     const alliance = carrierCode ? mapAirlineToAlliance(carrierCode) : 'Independent';
     
+    console.log(`  - Flight: ${airline} (${carrierCode})`);
+    
     // Check if airline is excluded - ONLY hard filter
     if (carrierCode && criteria.exclude_airlines?.includes(carrierCode)) {
-      console.log(`✗ Filtered out ${airline} (${carrierCode}) - user excluded this airline`);
+      console.log(`  ✗ FILTERED: ${airline} (${carrierCode}) - excluded airline`);
       return null;
     }
     
@@ -171,7 +192,7 @@ function evaluateFlight(flightOffer: any, criteria: any) {
     const stops = Math.max(0, legs.length - 1);
     const totalDuration = flightOffer.total_duration || 0;
 
-    console.log(`✓ Evaluating: ${airline} (${carrierCode}) - $${price} - ${stops} stops - ${aircraft}`);
+    console.log(`  ✓ Accepted: ${airline} - $${price} - ${stops} stops`);
 
     // ALL OTHER CRITERIA ARE PREFERENCES (SCORING ONLY)
     let score = 50; // Base score
@@ -259,6 +280,8 @@ function evaluateFlight(flightOffer: any, criteria: any) {
     if (extText.includes('carry-on')) details.carry_on = 'Included';
     if (extText.includes('checked bag')) details.checked_bags = 'Included';
 
+    console.log(`  ✅ Returning flight with score ${score}`);
+
     return {
       airline,
       airline_code: carrierCode || 'N/A',
@@ -278,7 +301,7 @@ function evaluateFlight(flightOffer: any, criteria: any) {
       raw_extensions: extensions.slice(0, 2),
     };
   } catch (error) {
-    console.error('Flight eval error:', error);
+    console.error('  💥 ERROR in evaluateFlight:', error);
     return null;
   }
 }
@@ -309,20 +332,38 @@ export async function POST(request: NextRequest) {
     // Determine if this is a round trip
     const isRoundTrip = !!criteria.return_date;
     
-    // Determine search parameters based on search type
-    let searchOrigin, searchDestination, searchDate;
+    // For round trips, we search one-way legs separately
+    // For one-way trips, we search normally
+    let searchOrigin, searchDestination, searchDate, shouldSearchReturn;
     
     if (searchType === 'return' && isRoundTrip) {
       // Return flight: reverse direction, use return date
       searchOrigin = criteria.destination;
       searchDestination = criteria.origin;
       searchDate = criteria.return_date;
-    } else {
-      // Outbound or one-way flight
+      shouldSearchReturn = undefined; // One-way search
+    } else if (searchType === 'outbound' || (isRoundTrip && !searchType)) {
+      // Outbound flight only
       searchOrigin = criteria.origin;
       searchDestination = criteria.destination;
       searchDate = criteria.date;
+      shouldSearchReturn = undefined; // One-way search for outbound
+    } else {
+      // One-way trip or default
+      searchOrigin = criteria.origin;
+      searchDestination = criteria.destination;
+      searchDate = criteria.date;
+      shouldSearchReturn = undefined;
     }
+
+    console.log('🔍 Search params:', {
+      searchType: searchType || 'initial',
+      isRoundTrip,
+      searchOrigin,
+      searchDestination,
+      searchDate,
+      searchingOneWay: !shouldSearchReturn
+    });
 
     // Map cabin to code
     const cabinToCode: { [key: string]: number } = {
@@ -354,12 +395,21 @@ export async function POST(request: NextRequest) {
     console.log(`Found ${flights.length} flights from SerpAPI, evaluating...`);
     
     if (flights.length > 0) {
-      console.log('Sample flight data:', JSON.stringify(flights[0], null, 2));
+      console.log('First flight structure:', JSON.stringify({
+        hasFlights: !!flights[0].flights,
+        flightsCount: flights[0].flights?.length,
+        hasPrice: !!flights[0].price,
+        keys: Object.keys(flights[0])
+      }));
     }
 
     // Evaluate and rank
+    console.log('Starting evaluation loop...');
     const results = flights
-      .map((flight: any) => evaluateFlight(flight, criteria))
+      .map((flight: any, index: number) => {
+        console.log(`📌 Map iteration ${index + 1}/${flights.length}`);
+        return evaluateFlight(flight, criteria);
+      })
       .filter((r: any) => r !== null)
       .sort((a: any, b: any) => b.score - a.score);
 
