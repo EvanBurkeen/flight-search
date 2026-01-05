@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/flights/:path*",
+      "destination": "/:path*"
+    }
+  ]
+}

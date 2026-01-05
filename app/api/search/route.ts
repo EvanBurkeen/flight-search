@@ -40,7 +40,8 @@ Return a JSON object with these fields:
   "is_roundtrip": true/false,
   "primary_cabin": "economy/premium_economy/business/first",
   "compare_cabins": ["list of cabins to compare"],
-  "alliance_preference": "SkyTeam/OneWorld/Star Alliance/any",
+  "alliance_preference": "SkyTeam/OneWorld/Star Alliance/any (default: any)",
+  "loyalty_program": "delta/united/american/etc or null (only if user mentions it)",
   "specific_airlines": ["airline codes"],
   "exclude_airlines": ["airline codes to exclude"],
   "departure_time_after": "hour or null",
@@ -49,7 +50,6 @@ Return a JSON object with these fields:
   "must_be_direct": true/false,
   "prefer_direct": true/false,
   "needs_extra_legroom": true/false,
-  "upgrade_potential_important": true/false,
   "price_sensitivity": "very_sensitive/sensitive/moderate/flexible/luxury",
   "confidence": "high/medium/low"
 }
@@ -149,42 +149,96 @@ function evaluateFlight(flightOffer: any, criteria: any) {
 
   const totalDuration = flightOffer.total_duration || 0;
 
-  // Scoring
+  // Scoring (general quality metrics)
   let score = 0;
   const highlights: string[] = [];
   const warnings: string[] = [];
 
-  // Alliance benefits (30 points)
-  if (alliance === 'SkyTeam') {
-    score += 30;
-    highlights.push('✓ SkyTeam - Full Delta Gold benefits');
-  } else if (alliance === 'OneWorld') {
-    score += 10;
-    warnings.push('⚠ OneWorld - Limited benefits');
-  } else if (alliance === 'Star Alliance') {
-    score += 10;
-    warnings.push('⚠ Star Alliance - No benefits');
-  }
-
-  // Direct flight bonus (15 points)
+  // 1. Direct flight bonus (30 points) - Most valuable to travelers
   if (stops === 0) {
-    score += 15;
+    score += 30;
     highlights.push('✓ Direct flight');
   } else if (criteria.prefer_direct) {
     warnings.push(`⚠ ${stops} stop(s)`);
   }
 
-  // Legroom (10 points)
-  const wideBodyAircraft = ['787', '789', '788', '77W', '777', '359', '35K', '351', 'A350', 'A380', 'A330'];
-  if (wideBodyAircraft.some(wb => aircraft.includes(wb))) {
-    score += 10;
-    highlights.push(`✓ Excellent legroom (${aircraft})`);
+  // 2. Alliance/Loyalty (20 points) - Only if user specified
+  if (criteria.alliance_preference && criteria.alliance_preference !== 'any') {
+    if (alliance === criteria.alliance_preference) {
+      score += 20;
+      highlights.push(`✓ ${alliance} alliance`);
+      if (criteria.loyalty_program) {
+        highlights.push(`✓ Your loyalty benefits apply`);
+      }
+    } else {
+      warnings.push(`⚠ ${alliance} - Not your preferred alliance`);
+    }
+  } else {
+    // Give small bonus to major alliances for general quality
+    if (alliance !== 'Independent') {
+      score += 5;
+    }
   }
 
-  // Price scoring (relative, will be adjusted later)
-  score += 10;
+  // 3. Aircraft comfort (15 points)
+  const wideBodyAircraft = ['787', '789', '788', '77W', '777', '359', '35K', '351', 'A350', 'A380', 'A330'];
+  if (wideBodyAircraft.some(wb => aircraft.includes(wb))) {
+    score += 15;
+    highlights.push(`✓ Excellent comfort (${aircraft})`);
+  } else if (criteria.needs_extra_legroom) {
+    score += 7;
+    warnings.push(`⚠ Standard aircraft (${aircraft})`);
+  } else {
+    score += 7;
+  }
 
-  const finalScore = (score / 65) * 100; // Normalize to 100
+  // 4. Duration (10 points) - Shorter is better
+  const avgDuration = 420; // 7 hours average
+  if (totalDuration < avgDuration) {
+    score += 10;
+    if (totalDuration < 300) {
+      highlights.push('✓ Quick flight');
+    }
+  } else if (totalDuration > avgDuration * 1.5) {
+    warnings.push('⚠ Long travel time');
+  }
+
+  // 5. Price scoring (15 points) - Will be adjusted relative to other flights
+  score += 15;
+
+  // 6. Refundability (10 points)
+  // Check extensions for refundability info
+  const extensions = flightOffer.flights?.flatMap((f: any) => f.extensions || []) || [];
+  const extensionsText = extensions.join(' ').toLowerCase();
+  
+  if (extensionsText.includes('refundable') && !extensionsText.includes('non-refundable')) {
+    score += 10;
+    highlights.push('✓ Refundable');
+  } else if (extensionsText.includes('non-refundable')) {
+    if (criteria.must_be_refundable) {
+      return null; // Filter out non-refundable if required
+    }
+    if (criteria.prefer_refundable) {
+      warnings.push('⚠ Non-refundable');
+    }
+  }
+
+  const finalScore = score; // Out of 100
+
+  // Extract booking URL from Google Flights data
+  let bookingUrl = null;
+  if (flightOffer.booking_options && flightOffer.booking_options.length > 0) {
+    const bestOption = flightOffer.booking_options[0];
+    if (bestOption.book_on_google_link) {
+      bookingUrl = bestOption.book_on_google_link;
+    }
+  }
+  
+  // Fallback: construct Google Flights URL
+  if (!bookingUrl) {
+    const googleFlightsUrl = `https://www.google.com/travel/flights/booking?`;
+    bookingUrl = googleFlightsUrl;
+  }
 
   return {
     airline,
@@ -200,6 +254,7 @@ function evaluateFlight(flightOffer: any, criteria: any) {
     score: finalScore,
     highlights,
     warnings,
+    booking_url: bookingUrl,
   };
 }
 
@@ -279,7 +334,7 @@ export async function POST(request: NextRequest) {
     if (criteria.exclude_airlines && criteria.exclude_airlines.length > 0) {
       message += `**Excluded:** ${criteria.exclude_airlines.join(', ')}\n`;
     }
-    message += `\n**Top ${Math.min(5, results.length)} options** ranked by your Delta Gold status:`;
+    message += `\n**Top ${Math.min(5, results.length)} options** ranked by quality and value:`;
 
     return NextResponse.json({
       message,
