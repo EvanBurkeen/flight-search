@@ -414,7 +414,7 @@ export async function POST(request: NextRequest) {
       searchDestination,
       searchDate,
       travelClass,
-      null, // No return date - searching one-way
+      undefined, // No return date - searching one-way
       criteria.exclude_airlines
     );
 
