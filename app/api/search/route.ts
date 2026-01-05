@@ -234,10 +234,67 @@ function evaluateFlight(flightOffer: any, criteria: any) {
     }
   }
   
-  // Fallback: construct Google Flights URL
-  if (!bookingUrl) {
-    const googleFlightsUrl = `https://www.google.com/travel/flights/booking?`;
-    bookingUrl = googleFlightsUrl;
+  // Fallback: construct Google Flights URL with flight details
+  if (!bookingUrl && firstLeg.departure_airport && firstLeg.arrival_airport) {
+    const departureCode = firstLeg.departure_airport.id || criteria.origin;
+    const arrivalCode = lastLeg.arrival_airport.id || criteria.destination;
+    bookingUrl = `https://www.google.com/travel/flights/search?tfs=CBwQAhokEgoyMDI2LTAyLTA1agcIARIDJHtkZXBhcnR1cmVDb2RlfXIHCAESAyR7YXJyaXZhbENvZGV9`;
+  }
+
+  // Extract additional details from extensions
+  const extensions = flightOffer.flights?.flatMap((f: any) => f.extensions || []) || [];
+  const extensionsText = extensions.join(' ').toLowerCase();
+  
+  // Detailed flight information
+  const flightDetails: any = {
+    refundable: null,
+    change_fee: null,
+    checked_bags: null,
+    carry_on: null,
+    seat_selection: null,
+    fare_class: null,
+  };
+
+  // Parse refundability
+  if (extensionsText.includes('free cancellation')) {
+    flightDetails.refundable = 'Free cancellation';
+  } else if (extensionsText.includes('refundable')) {
+    flightDetails.refundable = 'Refundable';
+  } else if (extensionsText.includes('non-refundable')) {
+    flightDetails.refundable = 'Non-refundable';
+  }
+
+  // Parse baggage
+  if (extensionsText.includes('checked bag') || extensionsText.includes('1 checked bag')) {
+    flightDetails.checked_bags = 'Included';
+  } else if (extensionsText.includes('no checked bag')) {
+    flightDetails.checked_bags = 'Not included';
+  }
+
+  if (extensionsText.includes('carry-on') || extensionsText.includes('personal item')) {
+    flightDetails.carry_on = 'Included';
+  } else if (extensionsText.includes('no carry-on')) {
+    flightDetails.carry_on = 'Not included';
+  }
+
+  // Parse change fees
+  if (extensionsText.includes('free changes') || extensionsText.includes('no change fee')) {
+    flightDetails.change_fee = 'Free changes';
+  } else if (extensionsText.includes('change fee')) {
+    flightDetails.change_fee = 'Change fee applies';
+  }
+
+  // Parse seat selection
+  if (extensionsText.includes('free seat selection')) {
+    flightDetails.seat_selection = 'Free';
+  } else if (extensionsText.includes('seat selection')) {
+    flightDetails.seat_selection = 'Available for fee';
+  }
+
+  // Parse fare class
+  const fareMatch = extensionsText.match(/(basic economy|economy|premium economy|business|first class)/i);
+  if (fareMatch) {
+    flightDetails.fare_class = fareMatch[1];
   }
 
   return {
@@ -255,6 +312,8 @@ function evaluateFlight(flightOffer: any, criteria: any) {
     highlights,
     warnings,
     booking_url: bookingUrl,
+    details: flightDetails,
+    raw_extensions: extensions.slice(0, 5), // Include raw extensions for display
   };
 }
 
@@ -320,21 +379,21 @@ export async function POST(request: NextRequest) {
     }
 
     // Build response message
-    let message = `✓ Found ${results.length} flights!\n\n`;
-    message += `**Route:** ${criteria.origin} → ${criteria.destination}\n`;
+    let message = `Found ${results.length} flights\n\n`;
+    message += `Route: ${criteria.origin} → ${criteria.destination}\n`;
     if (criteria.return_date) {
-      message += `**Outbound:** ${criteria.date}\n**Return:** ${criteria.return_date}\n`;
+      message += `Outbound: ${criteria.date}\nReturn: ${criteria.return_date}\n`;
     } else {
-      message += `**Date:** ${criteria.date}\n`;
+      message += `Date: ${criteria.date}\n`;
     }
-    message += `**Cabin:** ${criteria.primary_cabin.replace('_', ' ')}\n`;
+    message += `Cabin: ${criteria.primary_cabin.replace('_', ' ')}\n`;
     if (criteria.alliance_preference && criteria.alliance_preference !== 'any') {
-      message += `**Alliance:** ${criteria.alliance_preference}\n`;
+      message += `Alliance: ${criteria.alliance_preference}\n`;
     }
     if (criteria.exclude_airlines && criteria.exclude_airlines.length > 0) {
-      message += `**Excluded:** ${criteria.exclude_airlines.join(', ')}\n`;
+      message += `Excluded: ${criteria.exclude_airlines.join(', ')}\n`;
     }
-    message += `\n**Top ${Math.min(5, results.length)} options** ranked by quality and value:`;
+    message += `\nTop ${Math.min(5, results.length)} options ranked by quality and value`;
 
     return NextResponse.json({
       message,

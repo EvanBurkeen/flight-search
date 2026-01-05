@@ -76,7 +76,7 @@ export default function Home() {
             Flight Search
           </h1>
           <p className="text-gray-500 text-sm font-light">
-            AI-powered • Natural language
+            AI-powered
           </p>
         </div>
 
@@ -164,6 +164,44 @@ export default function Home() {
                                   {h}
                                 </div>
                               ))}
+                            </div>
+                          )}
+
+                          {/* Flight Details */}
+                          {flight.details && (
+                            <div className="mb-3 space-y-0.5 border-t border-gray-100 pt-2">
+                              {flight.details.refundable && (
+                                <div className="text-xs text-gray-600 font-light">
+                                  {flight.details.refundable}
+                                </div>
+                              )}
+                              {flight.details.carry_on && (
+                                <div className="text-xs text-gray-600 font-light">
+                                  Carry-on: {flight.details.carry_on}
+                                </div>
+                              )}
+                              {flight.details.checked_bags && (
+                                <div className="text-xs text-gray-600 font-light">
+                                  Checked bag: {flight.details.checked_bags}
+                                </div>
+                              )}
+                              {flight.details.change_fee && (
+                                <div className="text-xs text-gray-600 font-light">
+                                  {flight.details.change_fee}
+                                </div>
+                              )}
+                              {flight.details.seat_selection && (
+                                <div className="text-xs text-gray-600 font-light">
+                                  Seat selection: {flight.details.seat_selection}
+                                </div>
+                              )}
+                              {flight.raw_extensions && flight.raw_extensions.length > 0 && (
+                                flight.raw_extensions.map((ext: string, i: number) => (
+                                  <div key={i} className="text-xs text-gray-500 font-light">
+                                    {ext}
+                                  </div>
+                                ))
+                              )}
                             </div>
                           )}
 
