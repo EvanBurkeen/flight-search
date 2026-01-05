@@ -71,6 +71,12 @@ export default function Home() {
     setSelectedOutbound(flight);
     setIsLoading(true);
 
+    // Add loading message
+    setMessages(prev => [...prev, {
+      role: 'assistant',
+      content: 'Searching return flights...'
+    }]);
+
     try {
       const response = await axios.post('/api/search', {
         query: originalQuery,
@@ -78,18 +84,25 @@ export default function Home() {
         selectedOutbound: flight
       });
 
-      setMessages(prev => [...prev, {
-        role: 'assistant',
-        content: response.data.message,
-        results: response.data.results,
-        isReturn: true,
-        selectedOutbound: flight
-      }]);
+      // Remove loading message and add actual results
+      setMessages(prev => [
+        ...prev.slice(0, -1), // Remove "Searching..." message
+        {
+          role: 'assistant',
+          content: response.data.message,
+          results: response.data.results,
+          isReturn: true,
+          selectedOutbound: flight
+        }
+      ]);
     } catch (error: any) {
-      setMessages(prev => [...prev, {
-        role: 'assistant',
-        content: `Error: ${error.response?.data?.error || error.message}`
-      }]);
+      setMessages(prev => [
+        ...prev.slice(0, -1), // Remove "Searching..." message
+        {
+          role: 'assistant',
+          content: `Error: ${error.response?.data?.error || error.message}`
+        }
+      ]);
     } finally {
       setIsLoading(false);
     }
@@ -151,7 +164,20 @@ export default function Home() {
                         {message.selectedOutbound.airline} ({message.selectedOutbound.airline_code}) · {formatPrice(message.selectedOutbound.price)}
                       </div>
                       <div className="text-xs" style={{ opacity: 0.72 }}>
-                        {message.selectedOutbound.departure_time?.split('T')[1]?.slice(0, 5)} → {message.selectedOutbound.arrival_time?.split('T')[1]?.slice(0, 5)}
+                        {message.selectedOutbound.departure_time ? (
+                          <>
+                            {message.selectedOutbound.departure_time.includes('T')
+                              ? message.selectedOutbound.departure_time.split('T')[1]?.slice(0, 5)
+                              : message.selectedOutbound.departure_time.slice(0, 5)
+                            }
+                            {' → '}
+                            {message.selectedOutbound.arrival_time ? (
+                              message.selectedOutbound.arrival_time.includes('T')
+                                ? message.selectedOutbound.arrival_time.split('T')[1]?.slice(0, 5)
+                                : message.selectedOutbound.arrival_time.slice(0, 5)
+                            ) : '—'}
+                          </>
+                        ) : 'Times not available'}
                         {' · '}
                         {message.selectedOutbound.stops === 0 ? 'Direct' : `${message.selectedOutbound.stops} stop(s)`}
                       </div>
@@ -190,7 +216,20 @@ export default function Home() {
                           {/* Flight Details */}
                           <div className="text-xs mb-2 space-y-0.5" style={{ opacity: 0.78 }}>
                             <div>
-                              {flight.departure_time?.split('T')[1]?.slice(0, 5)} → {flight.arrival_time?.split('T')[1]?.slice(0, 5)}
+                              {flight.departure_time ? (
+                                <>
+                                  {flight.departure_time.includes('T') 
+                                    ? flight.departure_time.split('T')[1]?.slice(0, 5)
+                                    : flight.departure_time.slice(0, 5)
+                                  }
+                                  {' → '}
+                                  {flight.arrival_time ? (
+                                    flight.arrival_time.includes('T')
+                                      ? flight.arrival_time.split('T')[1]?.slice(0, 5)
+                                      : flight.arrival_time.slice(0, 5)
+                                  ) : '—'}
+                                </>
+                              ) : 'Times not available'}
                               {' · '}
                               {flight.duration ? `${Math.floor(flight.duration / 60)}h ${flight.duration % 60}m` : 'N/A'}
                               {' · '}

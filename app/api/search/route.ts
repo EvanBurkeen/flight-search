@@ -31,9 +31,20 @@ IMPORTANT: Today's date is January 5, 2026. When parsing dates:
 - If a date like "2/5" is mentioned, assume it means 2026-02-05 (February 5, 2026)
 - Always output dates in YYYY-MM-DD format
 
+MULTIPLE AIRPORTS:
+- If user mentions "JFK/EWR" or "JFK or EWR", use the FIRST one as origin (JFK)
+- Note the alternative in special_instructions
+
+TIME PREFERENCES:
+- "early" flight = departure before 10am
+- "late" flight = departure after 6pm
+- "morning" = before 12pm
+- "afternoon" = 12pm-6pm
+- "evening" = after 6pm
+
 Return a JSON object with these fields:
 {
-  "origin": "3-letter airport code",
+  "origin": "3-letter airport code (first if multiple mentioned)",
   "destination": "3-letter airport code",
   "date": "YYYY-MM-DD",
   "return_date": "YYYY-MM-DD or null",
@@ -44,13 +55,17 @@ Return a JSON object with these fields:
   "loyalty_program": "delta/united/american/etc or null (only if user mentions it)",
   "specific_airlines": ["airline codes"],
   "exclude_airlines": ["airline codes to exclude"],
-  "departure_time_after": "hour or null",
+  "departure_time_after": "hour or null (e.g., 18 for after 6pm)",
+  "departure_time_before": "hour or null (e.g., 10 for before 10am)",
+  "return_time_after": "hour or null (for return flight)",
+  "return_time_before": "hour or null (for return flight)",
   "must_be_refundable": true/false,
   "prefer_refundable": true/false,
   "must_be_direct": true/false,
   "prefer_direct": true/false,
   "needs_extra_legroom": true/false,
   "price_sensitivity": "very_sensitive/sensitive/moderate/flexible/luxury",
+  "special_instructions": "any other notes like alternative airports",
   "confidence": "high/medium/low"
 }
 
@@ -137,6 +152,19 @@ function evaluateFlight(flightOffer: any, criteria: any) {
   // Check excluded airlines
   if (criteria.exclude_airlines && criteria.exclude_airlines.includes(carrierCode)) {
     return null;
+  }
+
+  // Check time preferences
+  if (firstLeg.departure_airport?.time) {
+    const depTime = firstLeg.departure_airport.time;
+    const depHour = parseInt(depTime.split('T')[1]?.split(':')[0] || '0');
+    
+    if (criteria.departure_time_before && depHour >= criteria.departure_time_before) {
+      return null; // Too late
+    }
+    if (criteria.departure_time_after && depHour < criteria.departure_time_after) {
+      return null; // Too early
+    }
   }
 
   const airline = firstLeg.airline || 'Unknown';
@@ -448,7 +476,10 @@ export async function POST(request: NextRequest) {
     } else if (isRoundTrip) {
       message = `Outbound flights ${searchOrigin} → ${searchDestination}\n`;
       message += `Date: ${searchDate}\n`;
-      message += `\nSelect your outbound flight, then I'll show return options:`;
+      if (criteria.special_instructions) {
+        message += `Note: ${criteria.special_instructions}\n`;
+      }
+      message += `\nSelect your outbound flight. After you select, I'll search return flights (takes a few seconds):`;
     } else {
       message = `Found ${results.length} flights\n\n`;
       message += `Route: ${searchOrigin} → ${searchDestination}\n`;
@@ -459,6 +490,9 @@ export async function POST(request: NextRequest) {
       }
       if (criteria.exclude_airlines && criteria.exclude_airlines.length > 0) {
         message += `Excluded: ${criteria.exclude_airlines.join(', ')}\n`;
+      }
+      if (criteria.special_instructions) {
+        message += `Note: ${criteria.special_instructions}\n`;
       }
       message += `\nTop ${Math.min(5, results.length)} options ranked by quality and value`;
     }
