@@ -36,11 +36,16 @@ MULTIPLE AIRPORTS:
 - Note the alternative in special_instructions
 
 TIME PREFERENCES:
-- "early" flight = departure before 10am
-- "late" flight = departure after 6pm
+- "early" flight = departure before 10am (departure_time_before: 10)
+- "late" flight = departure after 6pm (departure_time_after: 18)
 - "morning" = before 12pm
 - "afternoon" = 12pm-6pm
 - "evening" = after 6pm
+
+REFUNDABILITY:
+- "must be refundable" or "needs to be refundable" → must_be_refundable: true
+- "show me refundable" or "prefer refundable" → prefer_refundable: true
+- Default: prefer_refundable: false, must_be_refundable: false
 
 Return a JSON object with these fields:
 {
@@ -147,6 +152,7 @@ function evaluateFlight(flightOffer: any, criteria: any) {
     
     // ONLY reject if explicitly excluded
     if (carrierCode && criteria.exclude_airlines?.includes(carrierCode)) {
+      console.log(`Rejected ${airline} (${carrierCode}) - excluded airline`);
       return null;
     }
     
@@ -155,6 +161,7 @@ function evaluateFlight(flightOffer: any, criteria: any) {
         criteria.alliance_preference !== 'any' && 
         alliance !== 'Independent' &&
         alliance !== criteria.alliance_preference) {
+      console.log(`Rejected ${airline} - wrong alliance (${alliance} vs ${criteria.alliance_preference})`);
       return null;
     }
 
@@ -169,8 +176,14 @@ function evaluateFlight(flightOffer: any, criteria: any) {
         const depHour = parseInt(timeStr.split(':')[0]);
         
         if (!isNaN(depHour)) {
-          if (criteria.departure_time_before && depHour >= criteria.departure_time_before) return null;
-          if (criteria.departure_time_after && depHour < criteria.departure_time_after) return null;
+          if (criteria.departure_time_before && depHour >= criteria.departure_time_before) {
+            console.log(`Rejected ${airline} - too late (${depHour} >= ${criteria.departure_time_before})`);
+            return null;
+          }
+          if (criteria.departure_time_after && depHour < criteria.departure_time_after) {
+            console.log(`Rejected ${airline} - too early (${depHour} < ${criteria.departure_time_after})`);
+            return null;
+          }
         }
       } catch (e) {
         // Continue if time parsing fails
@@ -183,7 +196,10 @@ function evaluateFlight(flightOffer: any, criteria: any) {
     const totalDuration = flightOffer.total_duration || 0;
     
     // ONLY filter must_be_direct if explicitly required
-    if (criteria.must_be_direct && stops > 0) return null;
+    if (criteria.must_be_direct && stops > 0) {
+      console.log(`Rejected ${airline} - not direct (${stops} stops)`);
+      return null;
+    }
 
     // Scoring
     let score = 0;
@@ -217,8 +233,11 @@ function evaluateFlight(flightOffer: any, criteria: any) {
     if (extText.includes('refundable') && !extText.includes('non-refundable')) {
       score += 10;
       highlights.push('✓ Refundable');
-    } else if (extText.includes('non-refundable') && criteria.must_be_refundable) {
-      return null;
+    } else if (extText.includes('non-refundable')) {
+      // Only reject if user explicitly said "must be refundable"
+      if (criteria.must_be_refundable === true) {
+        return null;
+      }
     }
 
     // Build URL
@@ -276,6 +295,8 @@ export async function POST(request: NextRequest) {
 
     // Parse query with LLM
     const criteria = await parseQueryWithLLM(query);
+    
+    console.log('Parsed criteria:', JSON.stringify(criteria, null, 2));
 
     if (!criteria.origin || !criteria.destination || !criteria.date) {
       return NextResponse.json(
@@ -332,11 +353,15 @@ export async function POST(request: NextRequest) {
       });
     }
 
+    console.log(`Found ${flights.length} flights from SerpAPI, evaluating...`);
+
     // Evaluate and rank
     const results = flights
       .map((flight: any) => evaluateFlight(flight, criteria))
       .filter((r: any) => r !== null)
       .sort((a: any, b: any) => b.score - a.score);
+
+    console.log(`After filtering: ${results.length} flights remain`);
 
     if (results.length === 0) {
       return NextResponse.json({
