@@ -241,11 +241,7 @@ function evaluateFlight(flightOffer: any, criteria: any) {
     bookingUrl = `https://www.google.com/travel/flights/search?tfs=CBwQAhokEgoyMDI2LTAyLTA1agcIARIDJHtkZXBhcnR1cmVDb2RlfXIHCAESAyR7YXJyaXZhbENvZGV9`;
   }
 
-  // Extract additional details from extensions
-  const extensions = flightOffer.flights?.flatMap((f: any) => f.extensions || []) || [];
-  const extensionsText = extensions.join(' ').toLowerCase();
-  
-  // Detailed flight information
+  // Detailed flight information (using extensions already defined above)
   const flightDetails: any = {
     refundable: null,
     change_fee: null,
