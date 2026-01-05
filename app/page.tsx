@@ -7,6 +7,9 @@ interface Message {
   role: 'user' | 'assistant' | 'system';
   content: string;
   results?: any;
+  isOutbound?: boolean;
+  isReturn?: boolean;
+  selectedOutbound?: any;
 }
 
 export default function Home() {
@@ -18,6 +21,8 @@ export default function Home() {
   ]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [selectedOutbound, setSelectedOutbound] = useState<any>(null);
+  const [originalQuery, setOriginalQuery] = useState<string>('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
@@ -34,19 +39,51 @@ export default function Home() {
 
     const userMessage = input.trim();
     setInput('');
+    setOriginalQuery(userMessage);
+    setSelectedOutbound(null);
     
     setMessages(prev => [...prev, { role: 'user', content: userMessage }]);
     setIsLoading(true);
 
     try {
       const response = await axios.post('/api/search', {
-        query: userMessage
+        query: userMessage,
+        searchType: 'outbound'
       });
 
       setMessages(prev => [...prev, {
         role: 'assistant',
         content: response.data.message,
-        results: response.data.results
+        results: response.data.results,
+        isOutbound: response.data.isRoundTrip
+      }]);
+    } catch (error: any) {
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: `Error: ${error.response?.data?.error || error.message}`
+      }]);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleSelectOutbound = async (flight: any) => {
+    setSelectedOutbound(flight);
+    setIsLoading(true);
+
+    try {
+      const response = await axios.post('/api/search', {
+        query: originalQuery,
+        searchType: 'return',
+        selectedOutbound: flight
+      });
+
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: response.data.message,
+        results: response.data.results,
+        isReturn: true,
+        selectedOutbound: flight
       }]);
     } catch (error: any) {
       setMessages(prev => [...prev, {
@@ -103,6 +140,23 @@ export default function Home() {
                   <div className="text-sm leading-relaxed whitespace-pre-line" style={{ opacity: 0.90 }}>
                     {message.content}
                   </div>
+                  
+                  {/* Selected Outbound Summary */}
+                  {message.isReturn && message.selectedOutbound && (
+                    <div className="p-4 border border-black mb-4" style={{ borderColor: 'rgba(0,0,0,0.20)', backgroundColor: 'rgba(0,0,0,0.03)' }}>
+                      <div className="text-xs mb-1" style={{ opacity: 0.60, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                        Selected Outbound
+                      </div>
+                      <div className="text-sm font-medium">
+                        {message.selectedOutbound.airline} ({message.selectedOutbound.airline_code}) · {formatPrice(message.selectedOutbound.price)}
+                      </div>
+                      <div className="text-xs" style={{ opacity: 0.72 }}>
+                        {message.selectedOutbound.departure_time?.split('T')[1]?.slice(0, 5)} → {message.selectedOutbound.arrival_time?.split('T')[1]?.slice(0, 5)}
+                        {' · '}
+                        {message.selectedOutbound.stops === 0 ? 'Direct' : `${message.selectedOutbound.stops} stop(s)`}
+                      </div>
+                    </div>
+                  )}
                   
                   {/* Flight Results */}
                   {message.results && message.results.length > 0 && (
@@ -186,28 +240,22 @@ export default function Home() {
                                   Checked bag: {flight.details.checked_bags}
                                 </div>
                               )}
-                              {flight.details.change_fee && (
-                                <div className="text-xs" style={{ opacity: 0.72 }}>
-                                  {flight.details.change_fee}
-                                </div>
-                              )}
-                              {flight.details.seat_selection && (
-                                <div className="text-xs" style={{ opacity: 0.72 }}>
-                                  Seat selection: {flight.details.seat_selection}
-                                </div>
-                              )}
-                              {flight.raw_extensions && flight.raw_extensions.length > 0 && (
-                                flight.raw_extensions.map((ext: string, i: number) => (
-                                  <div key={i} className="text-xs" style={{ opacity: 0.60 }}>
-                                    {ext}
-                                  </div>
-                                ))
-                              )}
                             </div>
                           )}
 
-                          {/* Book Button */}
-                          {flight.booking_url && (
+                          {/* Action Button */}
+                          {message.isOutbound ? (
+                            <button
+                              onClick={() => handleSelectOutbound(flight)}
+                              className="block w-full text-center text-xs py-2 border border-black hover:bg-black hover:text-white transition-all"
+                              style={{ 
+                                letterSpacing: '0.08em',
+                                textTransform: 'uppercase'
+                              }}
+                            >
+                              Select Outbound
+                            </button>
+                          ) : message.isReturn && message.selectedOutbound ? (
                             <a
                               href={flight.booking_url}
                               target="_blank"
@@ -218,7 +266,20 @@ export default function Home() {
                                 textTransform: 'uppercase'
                               }}
                             >
-                              Book Flight
+                              Book Round Trip · {formatPrice(message.selectedOutbound.price + flight.price)}
+                            </a>
+                          ) : (
+                            <a
+                              href={flight.booking_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="block text-center text-xs py-2 border border-black hover:bg-black hover:text-white transition-all"
+                              style={{ 
+                                letterSpacing: '0.08em',
+                                textTransform: 'uppercase'
+                              }}
+                            >
+                              Book on {flight.airline_code}
                             </a>
                           )}
                         </div>

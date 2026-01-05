@@ -225,30 +225,66 @@ function evaluateFlight(flightOffer: any, criteria: any) {
 
   const finalScore = score; // Out of 100
 
-  // Extract booking URL from Google Flights data
+  // Build direct airline booking URL
   let bookingUrl = null;
+  const depCode = criteria.origin;
+  const arrCode = criteria.destination;
+  const dateStr = criteria.date;
+  const returnDateStr = criteria.return_date || '';
   
-  // First try: direct booking link from SerpAPI
-  if (flightOffer.booking_options && flightOffer.booking_options.length > 0) {
-    const bestOption = flightOffer.booking_options[0];
-    if (bestOption.book_on_google_link) {
-      bookingUrl = bestOption.book_on_google_link;
-    }
-  }
-  
-  // Second try: construct proper Google Flights URL with actual data
-  if (!bookingUrl && firstLeg.departure_airport && firstLeg.arrival_airport) {
-    const depCode = firstLeg.departure_airport.id || criteria.origin;
-    const arrCode = lastLeg.arrival_airport.id || criteria.destination;
-    const depTime = firstLeg.departure_airport.time?.split('T')[0] || criteria.date;
+  // Airline-specific booking URLs
+  const airlineBookingUrls: { [key: string]: string } = {
+    // Major US carriers
+    'DL': `https://www.delta.com/flight-search/book-a-flight?origin=${depCode}&destination=${arrCode}&departureDate=${dateStr}&returnDate=${returnDateStr}`,
+    'AA': `https://www.aa.com/booking/search?locale=en_US&origin=${depCode}&destination=${arrCode}&departDate=${dateStr}&returnDate=${returnDateStr}`,
+    'UA': `https://www.united.com/en/us/fsr/choose-flights?f=${depCode}&t=${arrCode}&d=${dateStr}&r=${returnDateStr}`,
+    'WN': `https://www.southwest.com/air/booking/select.html?originationAirportCode=${depCode}&destinationAirportCode=${arrCode}&departureDate=${dateStr}&returnDate=${returnDateStr}`,
+    'B6': `https://www.jetblue.com/booking/flights?from=${depCode}&to=${arrCode}&depart=${dateStr}&return=${returnDateStr}`,
+    'AS': `https://www.alaskaair.com/shopping/flights?fromLocation=${depCode}&toLocation=${arrCode}&departureDate=${dateStr}&returnDate=${returnDateStr}`,
     
-    // Build Google Flights search URL
-    bookingUrl = `https://www.google.com/travel/flights/search?tfs=CBwQAhokagcIARID${depCode}EgoyMDI2LTAyLTA1cgcIARID${arrCode}`;
+    // Budget carriers
+    'NK': `https://book.spirit.com/Flight/Select?culture=en-US&dep=${depCode}&arr=${arrCode}&date=${dateStr}&ret=${returnDateStr}`,
+    'F9': `https://www.flyfrontier.com/travel/flight-search/?departureDate=${dateStr}&destinationCode=${arrCode}&numAdults=1&originCode=${depCode}&returnDate=${returnDateStr}`,
+    'G4': `https://www.allegiantair.com/booking/flights?dep=${depCode}&arr=${arrCode}&date=${dateStr}`,
+    
+    // International carriers (major ones)
+    'BA': `https://www.britishairways.com/travel/book/public/en_us?eId=106019&bookingFor=ECONOMY&from=${depCode}&to=${arrCode}&departureDate=${dateStr}&returnDate=${returnDateStr}`,
+    'AF': `https://wwws.airfrance.us/search/offers?connections=1&activeConnection=0&cabinClass=ECONOMY&adults=1&origin=${depCode}&destination=${arrCode}&departureDate=${dateStr}&returnDate=${returnDateStr}`,
+    'KL': `https://www.klm.com/search/offers?origin=${depCode}&destination=${arrCode}&departureDate=${dateStr}&returnDate=${returnDateStr}`,
+    'LH': `https://www.lufthansa.com/us/en/flight-search?origin=${depCode}&destination=${arrCode}&outbound-date=${dateStr}&return-date=${returnDateStr}`,
+    'VS': `https://flywith.virginatlantic.com/en-us/book/flights?origin=${depCode}&destination=${arrCode}&departureDate=${dateStr}&returnDate=${returnDateStr}`,
+    'AC': `https://www.aircanada.com/us/en/aco/home/book/search-book.html?org0=${depCode}&dest0=${arrCode}&date0=${dateStr}&date1=${returnDateStr}`,
+    'QR': `https://www.qatarairways.com/en-us/booking.html?origin=${depCode}&destination=${arrCode}&departingDate=${dateStr}&returningDate=${returnDateStr}`,
+    'EK': `https://www.emirates.com/us/english/search/?orig=${depCode}&dest=${arrCode}&date1=${dateStr}&date2=${returnDateStr}`,
+  };
+  
+  // Try to get airline-specific URL
+  if (carrierCode && airlineBookingUrls[carrierCode]) {
+    bookingUrl = airlineBookingUrls[carrierCode];
   }
   
-  // Third try: generic Google Flights search
+  // Fallback: generic airline website
   if (!bookingUrl) {
-    bookingUrl = `https://www.google.com/travel/flights?q=flights%20from%20${criteria.origin}%20to%20${criteria.destination}%20on%20${criteria.date}`;
+    const airlineWebsites: { [key: string]: string } = {
+      'DL': 'https://www.delta.com',
+      'AA': 'https://www.aa.com',
+      'UA': 'https://www.united.com',
+      'WN': 'https://www.southwest.com',
+      'B6': 'https://www.jetblue.com',
+      'AS': 'https://www.alaskaair.com',
+      'NK': 'https://www.spirit.com',
+      'F9': 'https://www.flyfrontier.com',
+      'BA': 'https://www.britishairways.com',
+      'AF': 'https://www.airfrance.us',
+      'KL': 'https://www.klm.com',
+      'LH': 'https://www.lufthansa.com',
+      'VS': 'https://www.virginatlantic.com',
+      'AC': 'https://www.aircanada.com',
+      'QR': 'https://www.qatarairways.com',
+      'EK': 'https://www.emirates.com',
+    };
+    
+    bookingUrl = airlineWebsites[carrierCode] || `https://www.google.com/search?q=${airline}+flights+${depCode}+to+${arrCode}`;
   }
 
   // Detailed flight information (using extensions already defined above)
@@ -325,7 +361,7 @@ function evaluateFlight(flightOffer: any, criteria: any) {
 
 export async function POST(request: NextRequest) {
   try {
-    const { query } = await request.json();
+    const { query, searchType, selectedOutbound } = await request.json();
 
     if (!query) {
       return NextResponse.json({ error: 'Query is required' }, { status: 400 });
@@ -344,6 +380,24 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Determine if this is a round trip
+    const isRoundTrip = !!criteria.return_date;
+    
+    // Determine search parameters based on search type
+    let searchOrigin, searchDestination, searchDate;
+    
+    if (searchType === 'return' && isRoundTrip) {
+      // Return flight: reverse direction, use return date
+      searchOrigin = criteria.destination;
+      searchDestination = criteria.origin;
+      searchDate = criteria.return_date;
+    } else {
+      // Outbound or one-way flight
+      searchOrigin = criteria.origin;
+      searchDestination = criteria.destination;
+      searchDate = criteria.date;
+    }
+
     // Map cabin to code
     const cabinToCode: { [key: string]: number } = {
       economy: 1,
@@ -354,13 +408,13 @@ export async function POST(request: NextRequest) {
 
     const travelClass = cabinToCode[criteria.primary_cabin] || 1;
 
-    // Search flights
+    // Search flights (always one-way for multi-step)
     const flights = await searchGoogleFlights(
-      criteria.origin,
-      criteria.destination,
-      criteria.date,
+      searchOrigin,
+      searchDestination,
+      searchDate,
       travelClass,
-      criteria.return_date,
+      null, // No return date - searching one-way
       criteria.exclude_airlines
     );
 
@@ -385,25 +439,34 @@ export async function POST(request: NextRequest) {
     }
 
     // Build response message
-    let message = `Found ${results.length} flights\n\n`;
-    message += `Route: ${criteria.origin} → ${criteria.destination}\n`;
-    if (criteria.return_date) {
-      message += `Outbound: ${criteria.date}\nReturn: ${criteria.return_date}\n`;
+    let message = '';
+    
+    if (searchType === 'return') {
+      message = `Return flights ${searchOrigin} → ${searchDestination}\n`;
+      message += `Date: ${searchDate}\n`;
+      message += `\nSelect your return flight (prices below are one-way):`;
+    } else if (isRoundTrip) {
+      message = `Outbound flights ${searchOrigin} → ${searchDestination}\n`;
+      message += `Date: ${searchDate}\n`;
+      message += `\nSelect your outbound flight, then I'll show return options:`;
     } else {
-      message += `Date: ${criteria.date}\n`;
+      message = `Found ${results.length} flights\n\n`;
+      message += `Route: ${searchOrigin} → ${searchDestination}\n`;
+      message += `Date: ${searchDate}\n`;
+      message += `Cabin: ${criteria.primary_cabin.replace('_', ' ')}\n`;
+      if (criteria.alliance_preference && criteria.alliance_preference !== 'any') {
+        message += `Alliance: ${criteria.alliance_preference}\n`;
+      }
+      if (criteria.exclude_airlines && criteria.exclude_airlines.length > 0) {
+        message += `Excluded: ${criteria.exclude_airlines.join(', ')}\n`;
+      }
+      message += `\nTop ${Math.min(5, results.length)} options ranked by quality and value`;
     }
-    message += `Cabin: ${criteria.primary_cabin.replace('_', ' ')}\n`;
-    if (criteria.alliance_preference && criteria.alliance_preference !== 'any') {
-      message += `Alliance: ${criteria.alliance_preference}\n`;
-    }
-    if (criteria.exclude_airlines && criteria.exclude_airlines.length > 0) {
-      message += `Excluded: ${criteria.exclude_airlines.join(', ')}\n`;
-    }
-    message += `\nTop ${Math.min(5, results.length)} options ranked by quality and value`;
 
     return NextResponse.json({
       message,
       results: results.slice(0, 10),
+      isRoundTrip: isRoundTrip && searchType !== 'return',
     });
   } catch (error: any) {
     console.error('Search error:', error);
