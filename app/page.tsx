@@ -170,16 +170,28 @@ export default function Home() {
       const response = await axios.get(`/api/booking?token=${encodeURIComponent(bookingToken)}`);
       
       if (response.data.url) {
-        console.log('Opening booking URL:', response.data.url);
+        console.log('Opening booking URL');
+        
+        // Show warning if present
+        if (response.data.warning) {
+          console.warn(response.data.warning);
+        }
+        
         window.open(response.data.url, '_blank');
       } else {
         console.error('No URL in response:', response.data);
-        alert("Booking link unavailable. Please try another flight.");
+        alert("Booking link unavailable. Please try searching again.");
       }
     } catch (error: any) {
       console.error("Booking Error:", error);
-      const errorMsg = error.response?.data?.error || error.message || 'Unknown error';
-      alert(`Booking failed: ${errorMsg}`);
+      
+      // If we got a URL even with an error, use it
+      if (error.response?.data?.url) {
+        window.open(error.response.data.url, '_blank');
+      } else {
+        const errorMsg = error.response?.data?.error || error.message || 'Unknown error';
+        alert(`Booking failed: ${errorMsg}`);
+      }
     } finally {
       setIsBooking(false);
     }
