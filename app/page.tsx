@@ -112,6 +112,10 @@ export default function Home() {
         if (hasRoundTrips) {
           setOutboundFlights(results);
           setViewMode('outbound');
+        } else {
+          // One-way flights - display directly
+          setOutboundFlights(results);
+          setViewMode('outbound');
         }
       }
       else if (mode === 'error') {
@@ -290,9 +294,15 @@ export default function Home() {
         {/* Outbound Flights */}
         {viewMode === 'outbound' && outboundFlights.length > 0 && (
           <div className="mb-8">
-            <h2 className="text-xl font-bold mb-4">Select Outbound Flight</h2>
+            <h2 className="text-xl font-bold mb-4">
+              {outboundFlights[0]?.is_round_trip ? 'Select Outbound Flight' : 'Select Flight'}
+            </h2>
             {outboundFlights.map((flight, idx) => 
-              renderFlight(flight, 'Select →', () => handleSelectOutbound(flight))
+              renderFlight(
+                flight, 
+                flight.is_round_trip ? 'Select →' : `Book Flight · ${formatPrice(flight.price)}`,
+                () => flight.is_round_trip ? handleSelectOutbound(flight) : handleBookFlight(flight)
+              )
             )}
           </div>
         )}
