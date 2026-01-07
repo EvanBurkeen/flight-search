@@ -34,6 +34,48 @@ async function searchFlights(origin: string, destination: string, date: string, 
   return [...(data.best_flights || []), ...(data.other_flights || [])];
 }
 
+// Helper to search multiple destinations and find cheapest
+async function searchMultipleDestinations(
+  origin: string,
+  destinations: string[],
+  date: string,
+  returnDate?: string,
+  maxToSearch: number = 15 // Default to 15 for speed
+): Promise<{ destination: string; flights: any[]; price: number }[]> {
+  const results = [];
+  const destinationsToSearch = destinations.slice(0, maxToSearch);
+  
+  console.log(`🌍 Searching ${destinationsToSearch.length} destinations...`);
+  
+  for (const dest of destinationsToSearch) {
+    try {
+      console.log(`🔍 Checking ${origin} → ${dest}...`);
+      const flights = await searchFlights(origin, dest, date, returnDate);
+      
+      if (flights && flights.length > 0) {
+        const cheapestPrice = Math.min(...flights.map((f: any) => f.price || Infinity));
+        results.push({
+          destination: dest,
+          flights,
+          price: cheapestPrice
+        });
+        console.log(`  ✓ ${dest}: $${cheapestPrice}`);
+      }
+    } catch (error) {
+      console.log(`  ✗ ${dest}: No flights`);
+    }
+  }
+  
+  if (results.length === 0) {
+    console.log('❌ No flights found across any destination');
+  } else {
+    console.log(`✅ Found flights to ${results.length} destinations`);
+  }
+  
+  // Sort by price
+  return results.sort((a, b) => a.price - b.price);
+}
+
 export async function POST(request: Request) {
   try {
     const body = await request.json();
@@ -47,7 +89,7 @@ export async function POST(request: Request) {
       .map((msg: any) => `${msg.role}: ${msg.content}`)
       .join('\n');
 
-    const systemPrompt = `You are an intelligent flight search assistant.
+    const systemPrompt = `You are an intelligent flight search assistant with deep knowledge of airports and geography.
 
 TODAY'S DATE: January 6, 2026
 
@@ -60,28 +102,88 @@ ROUND TRIP DETECTION:
 Look for: "round trip", "return", "coming back", two dates (2/5-2/8), date ranges
 If detected → set BOTH "date" AND "return_date"
 
-CITY MAPPINGS:
+GEOGRAPHIC SEARCH INTELLIGENCE:
+When user asks about REGIONS (not specific cities), search MULTIPLE major airports:
+
+EUROPE (50+ airports - Tier 2 coverage):
+Primary Hubs: CDG, ORY (Paris), LHR, LGW, STN (London), AMS (Amsterdam), FRA (Frankfurt), MUC (Munich), MAD, BCN (Spain), FCO, MXP (Italy), VIE (Vienna), ZRH, GVA (Switzerland), CPH (Copenhagen), ARN (Stockholm), OSL (Oslo), HEL (Helsinki), DUB (Dublin), BRU (Brussels)
+Secondary Hubs: ATH (Athens), LIS, OPO (Portugal), BUD (Budapest), PRG (Prague), WAW (Warsaw), KRK (Krakow), IST (Istanbul), BER, HAM (Germany), VCE, NAP, BGY, BLQ (Italy), NCE, LYS, MRS (France), BIO, SVQ, AGP, VLC (Spain), EDI, MAN, BHX (UK), BRN (Switzerland), SOF (Bulgaria), OTP (Romania), RIX (Riga), TLL (Tallinn), VNO (Vilnius)
+
+LATIN AMERICA (40+ airports - Tier 2 coverage):
+Primary Hubs: GRU, GIG (Brazil - São Paulo, Rio), MEX (Mexico City), BOG (Bogotá), LIM (Lima), SCL (Santiago), EZE (Buenos Aires), PTY (Panama City), UIO (Quito), CUN (Cancún)
+Secondary Hubs: BSB, CNF, FOR, SSA, POA, REC (Brazil), GDL, MTY, TIJ (Mexico), MDE, CTG, CLO (Colombia), CUZ (Peru), GYE (Ecuador), MVD (Montevideo), ASU (Asunción), SJO (San José), SDQ (Santo Domingo), HAV (Havana), SJU (San Juan), CCS (Caracas), MIA, FLL, IAH, DFW (US gateways to LATAM)
+
+ASIA (50+ airports - Tier 2 coverage):
+Primary Hubs: NRT, HND (Tokyo), ICN (Seoul), PVG, PEK, CAN, SZX (China), HKG (Hong Kong), TPE (Taipei), SIN (Singapore), BKK, DMK (Bangkok), KUL (Kuala Lumpur), CGK (Jakarta), MNL (Manila), HAN, SGN (Vietnam), DXB, AUH (UAE), DOH (Doha), KWI (Kuwait)
+Secondary Hubs: DEL, BOM, BLR, MAA, HYD, CCU (India), CMB (Sri Lanka), KTM (Kathmandu), DAC (Dhaka), RGN (Yangon), PNH (Phnom Penh), VTE (Vientiane), USM (Samui), CNX (Chiang Mai), DPS (Bali), SUB (Surabaya), IST (Turkey/Asia gateway), TLV (Tel Aviv), AMM (Amman), MCT (Muscat), BAH (Bahrain), ULN (Ulaanbaatar), TAS (Tashkent), ALA (Almaty)
+
+For broad queries like "cheapest to Europe" or "anywhere in Asia":
+1. Search 10-15 PRIMARY hubs for the region (balance speed vs coverage)
+2. Return the cheapest option found
+3. TELL THE USER which airports you checked and which was cheapest
+4. Offer to check MORE if they want (secondary hubs)
+
+Example responses:
+- "I checked Paris CDG, London LHR, Amsterdam AMS... [10 total]. Paris was cheapest at $520."
+- "Searched Tokyo HND, Seoul ICN, Bangkok BKK... [12 total]. Bangkok had the best deal at $680. Want me to check more Asian cities?"
+
+REGIONAL QUERY EXAMPLES:
+
+"Cheapest to Europe" → destination: ["CDG", "LHR", "AMS", "FRA", "MAD", "BCN", "FCO", "MXP", "VIE", "ZRH", "CPH", "DUB", "BRU", "ATH", "LIS"]
+
+"Anywhere in Asia" → destination: ["HND", "ICN", "SIN", "BKK", "HKG", "TPE", "KUL", "PVG", "DEL", "BOM", "DXB", "DOH", "MNL", "CGK", "HAN"]
+
+"Latin America or South America" → destination: ["GRU", "GIG", "MEX", "BOG", "LIM", "SCL", "EZE", "PTY", "UIO", "CUN", "MDE", "BSB", "GDL", "MVD", "SJO"]
+
+"Southeast Asia" → destination: ["BKK", "SIN", "KUL", "CGK", "MNL", "HAN", "SGN", "PNH", "RGN", "DPS"]
+
+"Mediterranean" → destination: ["FCO", "ATH", "BCN", "MAD", "LIS", "IST", "TLV", "VCE", "NAP", "NCE"]
+
+CITY MAPPINGS (for specific cities):
 New York → JFK,EWR,LGA | Paris → CDG,ORY | London → LHR,LGW,STN,LTN
 San Francisco → SFO,OAK,SJC | Washington → DCA,IAD,BWI | Miami → MIA,FLL
+Los Angeles → LAX,BUR,ONT | Chicago → ORD,MDW | Boston → BOS
+Seattle → SEA | Denver → DEN | Atlanta → ATL | Dallas → DFW
 
-OUTPUT:
+CONVERSATIONAL INTELLIGENCE:
+- If user asks about your search process (e.g., "what airports did you check?" "why CDG?" "what about other cities?"), use CLARIFY mode to explain
+- Look at the conversation history - if you just searched multiple airports, reference those in your response
+- If user is dissatisfied with results, offer to search more airports or different dates
+- Be helpful and explanatory, not just transactional
+- If search fails, explain why and suggest alternatives
+- ALWAYS respond conversationally to questions about your process - never just error out
 
-SEARCH:
+OUTPUT MODES:
+
+1) SEARCH - Perform actual flight search:
 {
   "action": "search",
-  "search_type": "standard",
+  "search_type": "multi_airport" (for regions) OR "standard" (for specific routes),
   "origin": "JFK",
-  "destination": "CDG",
+  "destination": "CDG",  // or array ["CDG", "LHR", "AMS"] for multi-airport
   "date": "2026-02-05",
   "return_date": "2026-02-08" (or null for one-way),
-  "exclude_airlines": []
+  "exclude_airlines": [],
+  "checked_airports": ["CDG", "LHR", "AMS", "FCO", "MAD"]  // for explaining to user
 }
 
-CLARIFY:
+2) CLARIFY - Need more info OR respond conversationally:
 {
   "action": "clarify",
-  "message": "When would you like to fly?"
+  "message": "I searched Paris CDG, London LHR, Amsterdam AMS, Rome FCO, and Madrid MAD. Paris CDG had the cheapest option at $450. Would you like me to check other European cities like Frankfurt, Munich, or Barcelona?"
 }
+
+3) ERROR - When something is unclear:
+{
+  "action": "error",
+  "message": "I need more information about..."
+}
+
+KEY RULES:
+- For "cheapest to [region]", search multiple airports and find the best
+- Always tell the user which airports you checked
+- Respond conversationally to follow-up questions
+- Be helpful and transparent about your search process
 
 Return ONLY valid JSON, no markdown.`;
 
@@ -129,12 +231,48 @@ Return ONLY valid JSON, no markdown.`;
       console.log(`🔄 Round trip: ${criteria.origin} → ${criteria.destination} (${criteria.date} to ${criteria.return_date})`);
 
       try {
-        const packages = await searchFlights(
-          criteria.origin,
-          criteria.destination,
-          criteria.date,
-          criteria.return_date
-        );
+        let packages;
+        let searchedDestinations: string[] = [];
+        
+        // Check if destination is array for multi-airport search
+        const destinations = Array.isArray(criteria.destination) 
+          ? criteria.destination 
+          : [criteria.destination];
+        
+        if (destinations.length > 1) {
+          // MULTI-AIRPORT SEARCH
+          console.log(`🌍 Multi-airport search: checking ${destinations.length} destinations`);
+          const multiResults = await searchMultipleDestinations(
+            criteria.origin,
+            destinations,
+            criteria.date,
+            criteria.return_date
+          );
+          
+          if (multiResults.length === 0) {
+            return NextResponse.json({
+              mode: 'clarify',
+              message: `I checked ${destinations.join(', ')} but couldn't find any flights. Would you like to try different dates or destinations?`,
+            });
+          }
+          
+          // Use the cheapest destination's flights
+          const cheapest = multiResults[0];
+          packages = cheapest.flights;
+          searchedDestinations = multiResults.map(r => `${r.destination} ($${r.price})`);
+          criteria.destination = cheapest.destination; // Update to actual destination used
+          
+          console.log(`✅ Cheapest: ${cheapest.destination} at $${cheapest.price}`);
+          console.log(`📊 Also checked: ${searchedDestinations.join(', ')}`);
+        } else {
+          // STANDARD SINGLE DESTINATION SEARCH
+          packages = await searchFlights(
+            criteria.origin,
+            criteria.destination,
+            criteria.date,
+            criteria.return_date
+          );
+        }
 
         if (!packages || packages.length === 0) {
           return NextResponse.json({
@@ -189,11 +327,22 @@ Return ONLY valid JSON, no markdown.`;
 
         console.log(`✅ Returning ${results.length} round-trip packages`);
 
+        // Build message with airport search info
+        let message = `Round trip flights\n${criteria.origin} → ${criteria.destination}\nOutbound: ${criteria.date} | Return: ${criteria.return_date}`;
+        
+        if (searchedDestinations.length > 1) {
+          message += `\n\n🔍 Searched ${searchedDestinations.length} airports: ${searchedDestinations.slice(0, 8).join(', ')}${searchedDestinations.length > 8 ? ` +${searchedDestinations.length - 8} more` : ''}`;
+          message += `\n💰 Best deal: ${criteria.destination}`;
+        }
+        
+        message += `\n\nComplete packages (price includes return):`;
+
         return NextResponse.json({
           mode: 'search',
-          message: `Round trip flights\n${criteria.origin} → ${criteria.destination}\nOutbound: ${criteria.date} | Return: ${criteria.return_date}\n\nComplete packages (price includes return):`,
+          message,
           results: results.slice(0, 10),
           searchCriteria: criteria,
+          searchedAirports: searchedDestinations.length > 0 ? searchedDestinations : undefined,
         });
 
       } catch (error: any) {

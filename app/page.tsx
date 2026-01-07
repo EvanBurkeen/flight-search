@@ -98,8 +98,15 @@ export default function Home() {
         setConversationHistory(prev => [...prev, { role: 'assistant', content: responseMsg }]);
       } 
       else if (mode === 'search') {
+        // Add message to display
         setMessages(prev => [...prev, { role: 'assistant', content: responseMsg }]);
-        setConversationHistory(prev => [...prev, { role: 'assistant', content: responseMsg }]);
+        
+        // Add search context to conversation history for follow-up questions
+        let contextMsg = responseMsg;
+        if (response.data.searchedAirports && response.data.searchedAirports.length > 0) {
+          contextMsg += `\n[Searched: ${response.data.searchedAirports.join(', ')}]`;
+        }
+        setConversationHistory(prev => [...prev, { role: 'assistant', content: contextMsg }]);
 
         const hasRoundTrips = results.some((f: any) => f.is_round_trip);
         if (hasRoundTrips) {
