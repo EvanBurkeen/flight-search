@@ -256,14 +256,28 @@ Return ONLY valid JSON, no markdown.`;
             });
           }
           
-          // Use the cheapest destination's flights
-          const cheapest = multiResults[0];
-          packages = cheapest.flights;
-          searchedDestinations = multiResults.map(r => `${r.destination} ($${r.price})`);
-          criteria.destination = cheapest.destination; // Update to actual destination used
+          // MERGE packages from ALL destinations and sort by price
+          const allPackages: any[] = [];
+          const destinationPrices: string[] = [];
           
-          console.log(`✅ Cheapest: ${cheapest.destination} at $${cheapest.price}`);
-          console.log(`📊 Also checked: ${searchedDestinations.join(', ')}`);
+          for (const result of multiResults) {
+            destinationPrices.push(`${result.destination} ($${result.price})`);
+            
+            // Add destination info to each package
+            result.flights.forEach((pkg: any) => {
+              allPackages.push({
+                ...pkg,
+                _destination: result.destination
+              });
+            });
+          }
+          
+          // Sort all packages by price
+          packages = allPackages.sort((a, b) => (a.price || 0) - (b.price || 0));
+          searchedDestinations = destinationPrices;
+          
+          console.log(`✅ Found ${packages.length} total packages across ${multiResults.length} destinations`);
+          console.log(`💰 Price range: $${packages[0]?.price} - $${packages[packages.length - 1]?.price}`);
         } else {
           // STANDARD SINGLE DESTINATION SEARCH
           packages = await searchFlights(
@@ -312,10 +326,10 @@ Return ONLY valid JSON, no markdown.`;
               departure_time: outboundFlight?.departure_airport?.time || '',
               arrival_time: lastOutboundLeg?.arrival_airport?.time || '',
               departure_airport: outboundFlight?.departure_airport?.id || criteria.origin,
-              arrival_airport: lastOutboundLeg?.arrival_airport?.id || criteria.destination,
+              arrival_airport: lastOutboundLeg?.arrival_airport?.id || pkg._destination || 'Unknown',
               booking_token: pkg.departure_token, // Round trips use departure_token
               departure_id: criteria.origin, // Use original search criteria for return flight API
-              arrival_id: criteria.destination, // Use original search criteria for return flight API
+              arrival_id: lastOutboundLeg?.arrival_airport?.id || pkg._destination || 'Unknown', // Use actual destination
               outbound_date: criteria.date,
               return_date: criteria.return_date,
               is_round_trip: true,
@@ -327,12 +341,12 @@ Return ONLY valid JSON, no markdown.`;
 
         console.log(`✅ Returning ${results.length} round-trip packages`);
 
-        // Build message with airport search info
-        let message = `Round trip flights\n${criteria.origin} → ${criteria.destination}\nOutbound: ${criteria.date} | Return: ${criteria.return_date}`;
-        
+        // Build message - for multi-airport, don't specify single destination
+        let message;
         if (searchedDestinations.length > 1) {
-          message += `\n\n🔍 Searched ${searchedDestinations.length} airports: ${searchedDestinations.slice(0, 8).join(', ')}${searchedDestinations.length > 8 ? ` +${searchedDestinations.length - 8} more` : ''}`;
-          message += `\n💰 Best deal: ${criteria.destination}`;
+          message = `Round trip flights: ${criteria.origin} → Europe\nOutbound: ${criteria.date} | Return: ${criteria.return_date}\n\n🔍 Searched ${searchedDestinations.length} airports: ${searchedDestinations.slice(0, 8).join(', ')}${searchedDestinations.length > 8 ? ` +${searchedDestinations.length - 8} more` : ''}`;
+        } else {
+          message = `Round trip flights\n${criteria.origin} → ${criteria.destination}\nOutbound: ${criteria.date} | Return: ${criteria.return_date}`;
         }
         
         message += `\n\nComplete packages (price includes return):`;
@@ -383,14 +397,28 @@ Return ONLY valid JSON, no markdown.`;
           });
         }
         
-        // Use the cheapest destination's flights
-        const cheapest = multiResults[0];
-        flights = cheapest.flights;
-        searchedDestinations = multiResults.map(r => `${r.destination} ($${r.price})`);
-        criteria.destination = cheapest.destination; // Update to actual destination used
+        // MERGE flights from ALL destinations and sort by price
+        const allFlights: any[] = [];
+        const destinationPrices: string[] = [];
         
-        console.log(`✅ Cheapest one-way: ${cheapest.destination} at $${cheapest.price}`);
-        console.log(`📊 Also checked: ${searchedDestinations.join(', ')}`);
+        for (const result of multiResults) {
+          destinationPrices.push(`${result.destination} ($${result.price})`);
+          
+          // Add destination info to each flight
+          result.flights.forEach((flight: any) => {
+            allFlights.push({
+              ...flight,
+              _destination: result.destination
+            });
+          });
+        }
+        
+        // Sort all flights by price
+        flights = allFlights.sort((a, b) => (a.price || 0) - (b.price || 0));
+        searchedDestinations = destinationPrices;
+        
+        console.log(`✅ Found ${flights.length} total flights across ${multiResults.length} destinations`);
+        console.log(`💰 Price range: $${flights[0]?.price} - $${flights[flights.length - 1]?.price}`);
       } else {
         // STANDARD SINGLE DESTINATION SEARCH
         flights = await searchFlights(criteria.origin, criteria.destination, criteria.date);
@@ -418,10 +446,10 @@ Return ONLY valid JSON, no markdown.`;
           departure_time: leg.departure_airport?.time,
           arrival_time: lastLeg.arrival_airport?.time,
           departure_airport: leg.departure_airport?.id || criteria.origin,
-          arrival_airport: lastLeg.arrival_airport?.id || criteria.destination,
+          arrival_airport: lastLeg.arrival_airport?.id || flight._destination || 'Unknown',
           booking_token: flight.booking_token,
           departure_id: leg.departure_airport?.id || criteria.origin,
-          arrival_id: lastLeg.arrival_airport?.id || criteria.destination,
+          arrival_id: lastLeg.arrival_airport?.id || flight._destination || 'Unknown',
           outbound_date: criteria.date,
           aircraft: leg.airplane,
         };
@@ -430,12 +458,12 @@ Return ONLY valid JSON, no markdown.`;
 
       console.log(`✅ Returning ${results.length} one-way flights`);
 
-      // Build message with airport search info
-      let message = `One-way flights: ${criteria.origin} → ${criteria.destination} on ${criteria.date}`;
-      
+      // Build message - for multi-airport, don't specify single destination
+      let message;
       if (searchedDestinations.length > 1) {
-        message += `\n\n🔍 Searched ${searchedDestinations.length} airports: ${searchedDestinations.slice(0, 8).join(', ')}${searchedDestinations.length > 8 ? ` +${searchedDestinations.length - 8} more` : ''}`;
-        message += `\n💰 Best deal: ${criteria.destination}`;
+        message = `One-way flights: ${criteria.origin} → Europe on ${criteria.date}\n\n🔍 Searched ${searchedDestinations.length} airports: ${searchedDestinations.slice(0, 8).join(', ')}${searchedDestinations.length > 8 ? ` +${searchedDestinations.length - 8} more` : ''}`;
+      } else {
+        message = `One-way flights: ${criteria.origin} → ${criteria.destination} on ${criteria.date}`;
       }
 
       return NextResponse.json({
