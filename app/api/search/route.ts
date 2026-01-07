@@ -163,8 +163,8 @@ Return ONLY valid JSON, no markdown.`;
             departure_airport: outboundFlight.departure_airport?.id || criteria.origin,
             arrival_airport: lastOutboundLeg.arrival_airport?.id || criteria.destination,
             booking_token: pkg.departure_token, // Round trips use departure_token
-            departure_id: outboundFlight.departure_airport?.id || criteria.origin,
-            arrival_id: lastOutboundLeg.arrival_airport?.id || criteria.destination,
+            departure_id: criteria.origin, // Use original search criteria for return flight API
+            arrival_id: criteria.destination, // Use original search criteria for return flight API
             outbound_date: criteria.date,
             return_date: criteria.return_date,
             is_round_trip: true,

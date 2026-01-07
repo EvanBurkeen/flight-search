@@ -3,20 +3,24 @@ import { NextResponse } from 'next/server';
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { departure_token } = body;
+    const { departure_token, departure_id, arrival_id } = body;
 
-    if (!departure_token) {
-      return NextResponse.json({ error: 'departure_token is required' }, { status: 400 });
+    if (!departure_token || !departure_id || !arrival_id) {
+      return NextResponse.json({ 
+        error: 'departure_token, departure_id, and arrival_id are required' 
+      }, { status: 400 });
     }
 
     const apiKey = process.env.SERP_API_KEY;
 
     console.log('🔄 Fetching return flights with departure_token');
 
-    // Call SerpAPI with departure_token to get return flight options
+    // Call SerpAPI with departure_token AND required IDs
     const params = new URLSearchParams({
       engine: "google_flights",
       departure_token,
+      departure_id,
+      arrival_id,
       api_key: apiKey || '',
       currency: "USD",
       hl: "en",

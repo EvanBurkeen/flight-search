@@ -128,7 +128,9 @@ export default function Home() {
 
     try {
       const response = await axios.post('/api/return-flights', {
-        departure_token: flight.booking_token
+        departure_token: flight.booking_token,
+        departure_id: flight.departure_id,
+        arrival_id: flight.arrival_id
       });
 
       setReturnFlights(response.data.results || []);
@@ -138,7 +140,7 @@ export default function Home() {
         content: response.data.message || 'Select your return flight:' 
       }]);
     } catch (error: any) {
-      alert('Failed to load return flights');
+      alert('Failed to load return flights: ' + (error.response?.data?.error || error.message));
     } finally {
       setIsLoading(false);
     }
