@@ -3,11 +3,12 @@ import { NextResponse } from 'next/server';
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { departure_token, departure_id, arrival_id } = body;
+    const { departure_token, departure_id, arrival_id, outbound_date, return_date } = body;
 
-    if (!departure_token || !departure_id || !arrival_id) {
+    if (!departure_token || !departure_id || !arrival_id || !outbound_date || !return_date) {
+      console.error('Missing parameters:', { departure_token: !!departure_token, departure_id, arrival_id, outbound_date, return_date });
       return NextResponse.json({ 
-        error: 'departure_token, departure_id, and arrival_id are required' 
+        error: 'departure_token, departure_id, arrival_id, outbound_date, and return_date are required' 
       }, { status: 400 });
     }
 
@@ -15,12 +16,14 @@ export async function POST(request: Request) {
 
     console.log('🔄 Fetching return flights with departure_token');
 
-    // Call SerpAPI with departure_token AND required IDs
+    // Call SerpAPI with ALL required parameters
     const params = new URLSearchParams({
       engine: "google_flights",
       departure_token,
       departure_id,
       arrival_id,
+      outbound_date,
+      return_date,
       api_key: apiKey || '',
       currency: "USD",
       hl: "en",
@@ -42,27 +45,35 @@ export async function POST(request: Request) {
 
     console.log(`✅ Found ${returnFlights.length} return flight options`);
 
+    if (returnFlights.length === 0) {
+      return NextResponse.json({
+        mode: 'return_selection',
+        results: [],
+        message: 'No return flights available for this route.',
+      });
+    }
+
     // Transform return flights
     const results = returnFlights.map((flight: any) => {
       const firstLeg = flight.flights[0];
       const lastLeg = flight.flights[flight.flights.length - 1];
 
       return {
-        airline: firstLeg.airline,
-        airline_code: firstLeg.airline_logo?.match(/airlines\/(\w{2})/)?.[1] || '',
-        price: flight.price, // This is the TOTAL round trip price
-        duration: flight.total_duration,
+        airline: firstLeg?.airline || 'Unknown',
+        airline_code: firstLeg?.airline_logo?.match(/airlines\/(\w{2})/)?.[1] || '',
+        price: flight.price || 0,
+        duration: flight.total_duration || 0,
         stops: (flight.layovers?.length || 0),
         layovers: flight.layovers || [],
-        departure_time: firstLeg.departure_airport?.time,
-        arrival_time: lastLeg.arrival_airport?.time,
-        departure_airport: firstLeg.departure_airport?.id,
-        arrival_airport: lastLeg.arrival_airport?.id,
-        booking_token: flight.booking_token, // Final booking token
+        departure_time: firstLeg?.departure_airport?.time || '',
+        arrival_time: lastLeg?.arrival_airport?.time || '',
+        departure_airport: firstLeg?.departure_airport?.id || arrival_id,
+        arrival_airport: lastLeg?.arrival_airport?.id || departure_id,
+        booking_token: flight.booking_token || '',
         is_round_trip: true,
-        aircraft: firstLeg.airplane,
+        aircraft: firstLeg?.airplane || '',
       };
-    });
+    }).filter(f => f.booking_token); // Only include flights with valid booking tokens
 
     return NextResponse.json({
       mode: 'return_selection',

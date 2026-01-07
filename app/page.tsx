@@ -123,6 +123,12 @@ export default function Home() {
       return;
     }
 
+    if (!flight.departure_id || !flight.arrival_id || !flight.outbound_date || !flight.return_date) {
+      alert('Missing flight information');
+      console.error('Flight data:', flight);
+      return;
+    }
+
     setSelectedOutbound(flight);
     setIsLoading(true);
 
@@ -130,7 +136,9 @@ export default function Home() {
       const response = await axios.post('/api/return-flights', {
         departure_token: flight.booking_token,
         departure_id: flight.departure_id,
-        arrival_id: flight.arrival_id
+        arrival_id: flight.arrival_id,
+        outbound_date: flight.outbound_date,
+        return_date: flight.return_date
       });
 
       setReturnFlights(response.data.results || []);
@@ -140,23 +148,38 @@ export default function Home() {
         content: response.data.message || 'Select your return flight:' 
       }]);
     } catch (error: any) {
+      console.error('Return flights error:', error);
       alert('Failed to load return flights: ' + (error.response?.data?.error || error.message));
+      setViewMode('chat'); // Go back to chat on error
     } finally {
       setIsLoading(false);
     }
   };
 
   const handleBookFlight = async (bookingToken: string) => {
+    if (!bookingToken) {
+      alert("Missing booking token");
+      console.error('No booking token provided');
+      return;
+    }
+
+    console.log('Booking with token:', bookingToken.substring(0, 30) + '...');
     setIsBooking(true);
+
     try {
       const response = await axios.get(`/api/booking?token=${encodeURIComponent(bookingToken)}`);
+      
       if (response.data.url) {
+        console.log('Opening booking URL:', response.data.url);
         window.open(response.data.url, '_blank');
       } else {
-        alert("Booking link unavailable");
+        console.error('No URL in response:', response.data);
+        alert("Booking link unavailable. Please try another flight.");
       }
-    } catch (error) {
-      alert("Booking error");
+    } catch (error: any) {
+      console.error("Booking Error:", error);
+      const errorMsg = error.response?.data?.error || error.message || 'Unknown error';
+      alert(`Booking failed: ${errorMsg}`);
     } finally {
       setIsBooking(false);
     }
@@ -245,14 +268,20 @@ export default function Home() {
         )}
 
         {/* Return Flights */}
-        {viewMode === 'return' && returnFlights.length > 0 && (
+        {viewMode === 'return' && (
           <div className="mb-8">
             <h2 className="text-xl font-bold mb-4">Select Return Flight</h2>
             <p className="text-sm mb-4" style={{ opacity: 0.72 }}>
               Outbound: {selectedOutbound?.departure_airport} → {selectedOutbound?.arrival_airport} on {formatDate(selectedOutbound?.departure_time)}
             </p>
-            {returnFlights.map((flight, idx) => 
-              renderFlight(flight, `Book Round Trip · ${formatPrice(flight.price)}`, () => handleBookFlight(flight.booking_token))
+            {returnFlights.length > 0 ? (
+              returnFlights.map((flight, idx) => 
+                renderFlight(flight, `Book Round Trip · ${formatPrice(flight.price)}`, () => handleBookFlight(flight.booking_token))
+              )
+            ) : (
+              <div className="text-sm" style={{ opacity: 0.72 }}>
+                No return flights available. Please try a different outbound flight.
+              </div>
             )}
           </div>
         )}

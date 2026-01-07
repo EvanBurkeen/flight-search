@@ -146,32 +146,46 @@ Return ONLY valid JSON, no markdown.`;
 
         console.log(`📦 Found ${packages.length} round-trip packages`);
 
-        // Transform round-trip packages into bookable results
-        const results = packages.map((pkg: any) => {
-          const outboundFlight = pkg.flights[0]; // First flight leg
-          const lastOutboundLeg = pkg.flights[pkg.flights.length - 1]; // Last leg to get final destination
-          
-          return {
-            airline: outboundFlight.airline,
-            airline_code: outboundFlight.airline_logo?.match(/airlines\/(\w{2})/)?.[1] || '',
-            price: pkg.price,
-            duration: pkg.total_duration || outboundFlight.duration,
-            stops: (pkg.layovers?.length || 0),
-            layovers: pkg.layovers || [],
-            departure_time: outboundFlight.departure_airport?.time,
-            arrival_time: lastOutboundLeg.arrival_airport?.time,
-            departure_airport: outboundFlight.departure_airport?.id || criteria.origin,
-            arrival_airport: lastOutboundLeg.arrival_airport?.id || criteria.destination,
-            booking_token: pkg.departure_token, // Round trips use departure_token
-            departure_id: criteria.origin, // Use original search criteria for return flight API
-            arrival_id: criteria.destination, // Use original search criteria for return flight API
-            outbound_date: criteria.date,
-            return_date: criteria.return_date,
-            is_round_trip: true,
-            aircraft: outboundFlight.airplane,
-          };
-        })
-        .sort((a, b) => a.price - b.price);
+        // Transform round-trip packages into bookable results with comprehensive null checks
+        const results = packages
+          .map((pkg: any) => {
+            // Validate package has required data
+            if (!pkg.flights || pkg.flights.length === 0) {
+              console.warn('Package missing flights:', pkg);
+              return null;
+            }
+
+            const outboundFlight = pkg.flights[0]; // First flight leg
+            const lastOutboundLeg = pkg.flights[pkg.flights.length - 1]; // Last leg to get final destination
+            
+            // Validate we have departure_token (required for return flight lookup)
+            if (!pkg.departure_token) {
+              console.warn('Package missing departure_token:', pkg);
+              return null;
+            }
+
+            return {
+              airline: outboundFlight?.airline || 'Unknown',
+              airline_code: outboundFlight?.airline_logo?.match(/airlines\/(\w{2})/)?.[1] || '',
+              price: pkg.price || 0,
+              duration: pkg.total_duration || outboundFlight?.duration || 0,
+              stops: (pkg.layovers?.length || 0),
+              layovers: pkg.layovers || [],
+              departure_time: outboundFlight?.departure_airport?.time || '',
+              arrival_time: lastOutboundLeg?.arrival_airport?.time || '',
+              departure_airport: outboundFlight?.departure_airport?.id || criteria.origin,
+              arrival_airport: lastOutboundLeg?.arrival_airport?.id || criteria.destination,
+              booking_token: pkg.departure_token, // Round trips use departure_token
+              departure_id: criteria.origin, // Use original search criteria for return flight API
+              arrival_id: criteria.destination, // Use original search criteria for return flight API
+              outbound_date: criteria.date,
+              return_date: criteria.return_date,
+              is_round_trip: true,
+              aircraft: outboundFlight?.airplane || '',
+            };
+          })
+          .filter((result): result is NonNullable<typeof result> => result !== null) // Remove null entries
+          .sort((a, b) => a.price - b.price);
 
         console.log(`✅ Returning ${results.length} round-trip packages`);
 
