@@ -445,8 +445,6 @@ Return ONLY valid JSON, no markdown.`;
         searchCriteria: criteria,
         searchedAirports: searchedDestinations.length > 0 ? searchedDestinations : undefined,
       });
-        searchCriteria: criteria,
-      });
 
     } catch (error: any) {
       return NextResponse.json({
