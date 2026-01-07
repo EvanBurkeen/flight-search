@@ -105,13 +105,18 @@ If detected → set BOTH "date" AND "return_date"
 DATE-FLEXIBLE SEARCHES:
 When user asks "when", "cheapest time", "best time", "this month/spring/summer":
 - Set search_type: "date_flexible"
-- Set date_range: e.g., ["2026-03-15", "2026-03-22", "2026-03-29", "2026-04-05", "2026-04-12"] (sample 5-7 dates)
+- Set date_range with appropriate sampling:
+  * Seasons (3 months): 12-15 dates (weekly sampling for good coverage)
+  * Single month: 8-10 dates (every 3-4 days)
+  * "This week" or narrow range: 7 dates (daily)
 - Search multiple dates and return cheapest options with dates shown
 
 Examples:
-- "when can I fly cheapest to Paris this spring?" → date_range: [3/20, 3/27, 4/3, 4/10, 4/17, 4/24, 5/1]
-- "cheapest time to go to Europe in April?" → date_range: [4/5, 4/12, 4/19, 4/26]
-- "best prices to Tokyo this month?" → date_range: [current week, +1 week, +2 weeks, +3 weeks]
+- "when can I fly cheapest to Paris this spring?" → date_range: [3/20, 3/27, 4/3, 4/10, 4/17, 4/24, 5/1, 5/8, 5/15, 5/22, 5/29, 6/5, 6/12] (13 dates across spring)
+- "cheapest time to go to Europe in April?" → date_range: [4/3, 4/7, 4/11, 4/15, 4/19, 4/23, 4/27] (8 dates)
+- "best prices to Tokyo this month?" → date_range: [every 3-4 days through current month]
+
+IMPORTANT: More samples = better chance of finding actual cheapest dates. Don't undersample long periods.
 
 Seasons:
 - Spring: March 20 - June 20
@@ -247,6 +252,7 @@ Return ONLY valid JSON, no markdown.`;
     // DATE-FLEXIBLE SEARCH (when user asks "when" or "cheapest time")
     if (criteria.date_range && criteria.date_range.length > 1) {
       console.log(`📅 Date-flexible search: checking ${criteria.date_range.length} dates`);
+      console.log(`📍 Dates to check: ${criteria.date_range.join(', ')}`);
       
       try {
         const dateResults: any[] = [];
@@ -263,35 +269,45 @@ Return ONLY valid JSON, no markdown.`;
             );
             
             if (flights && flights.length > 0) {
-              const cheapestPrice = Math.min(...flights.map((f: any) => f.price || Infinity));
+              // Get the ABSOLUTE cheapest price from this date
+              const sortedByPrice = flights.sort((a: any, b: any) => (a.price || Infinity) - (b.price || Infinity));
+              const cheapestPrice = sortedByPrice[0]?.price || Infinity;
+              
               dateResults.push({
                 date,
-                flights,
+                flights: sortedByPrice, // Keep them sorted
                 price: cheapestPrice
               });
-              console.log(`  ✓ ${date}: $${cheapestPrice}`);
+              console.log(`  ✓ ${date}: $${cheapestPrice} (${flights.length} flights found)`);
+            } else {
+              console.log(`  ✗ ${date}: No flights`);
             }
           } catch (error) {
-            console.log(`  ✗ ${date}: No flights`);
+            console.log(`  ✗ ${date}: Search error - ${error}`);
           }
         }
         
         if (dateResults.length === 0) {
           return NextResponse.json({
             mode: 'clarify',
-            message: `I checked ${criteria.date_range.length} dates but couldn't find any flights. Would you like to try different dates or routes?`,
+            message: `I checked ${criteria.date_range.length} dates (${criteria.date_range[0]} to ${criteria.date_range[criteria.date_range.length-1]}) but couldn't find any flights. Would you like to try different dates or routes?`,
           });
         }
         
         // Sort by price to find cheapest dates
         dateResults.sort((a, b) => a.price - b.price);
         
-        // Merge flights from cheapest 3 dates and show which dates they're from
-        const topDates = dateResults.slice(0, 3);
+        console.log(`💰 Price range found: $${dateResults[0].price} (${dateResults[0].date}) to $${dateResults[dateResults.length-1].price} (${dateResults[dateResults.length-1].date})`);
+        
+        // Take more dates if available - top 5 cheapest dates for variety
+        const topDates = dateResults.slice(0, Math.min(5, dateResults.length));
         const allFlights: any[] = [];
         
         for (const dateResult of topDates) {
-          dateResult.flights.forEach((flight: any) => {
+          // Take top 3-5 flights from each date to give variety
+          const topFlightsFromDate = dateResult.flights.slice(0, 5);
+          
+          topFlightsFromDate.forEach((flight: any) => {
             allFlights.push({
               ...flight,
               _date: dateResult.date,
@@ -300,7 +316,7 @@ Return ONLY valid JSON, no markdown.`;
           });
         }
         
-        // Sort by price
+        // Sort all flights by price across all dates
         const sortedFlights = allFlights.sort((a, b) => (a.price || 0) - (b.price || 0));
         
         // Transform results
@@ -332,14 +348,22 @@ Return ONLY valid JSON, no markdown.`;
         
         console.log(`✅ Found ${results.length} flights across ${topDates.length} dates`);
         
-        // Build message showing best dates
-        const dateInfo = topDates.map(d => {
+        // Build comprehensive message showing all dates checked
+        const allDatePrices = dateResults.slice(0, 10).map(d => {
+          const date = new Date(d.date);
+          const monthDay = `${date.getMonth() + 1}/${date.getDate()}`;
+          return `${monthDay} ($${d.price})`;
+        });
+        
+        const cheapestDateInfo = topDates.slice(0, 3).map(d => {
           const date = new Date(d.date);
           const monthDay = `${date.getMonth() + 1}/${date.getDate()}`;
           return `${monthDay} ($${d.price})`;
         }).join(', ');
         
-        const message = `${criteria.return_date ? 'Round trip' : 'One-way'} flights: ${criteria.origin} → ${criteria.destination}\n\n📅 Cheapest dates: ${dateInfo}\n\nShowing best prices:`;
+        const dateRangeDisplay = `${criteria.date_range[0]} to ${criteria.date_range[criteria.date_range.length - 1]}`;
+        
+        const message = `${criteria.return_date ? 'Round trip' : 'One-way'} flights: ${criteria.origin} → ${criteria.destination}\n\n📅 Searched ${dateResults.length} dates (${dateRangeDisplay})\n💰 Cheapest: ${cheapestDateInfo}\n📊 All prices: ${allDatePrices.join(', ')}${dateResults.length > 10 ? ` +${dateResults.length - 10} more` : ''}\n\nShowing best prices:`;
         
         return NextResponse.json({
           mode: 'search',
