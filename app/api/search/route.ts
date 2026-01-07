@@ -148,21 +148,23 @@ Return ONLY valid JSON, no markdown.`;
 
         // Transform round-trip packages into bookable results
         const results = packages.map((pkg: any) => {
-          const outboundFlight = pkg.flights[0]; // First flight (outbound)
+          const outboundFlight = pkg.flights[0]; // First flight leg
+          const lastOutboundLeg = pkg.flights[pkg.flights.length - 1]; // Last leg to get final destination
           
           return {
             airline: outboundFlight.airline,
             airline_code: outboundFlight.airline_logo?.match(/airlines\/(\w{2})/)?.[1] || '',
             price: pkg.price,
             duration: pkg.total_duration || outboundFlight.duration,
-            stops: pkg.flights.length - 1,
+            stops: (pkg.layovers?.length || 0),
+            layovers: pkg.layovers || [],
             departure_time: outboundFlight.departure_airport?.time,
-            arrival_time: outboundFlight.arrival_airport?.time,
+            arrival_time: lastOutboundLeg.arrival_airport?.time,
             departure_airport: outboundFlight.departure_airport?.id || criteria.origin,
-            arrival_airport: outboundFlight.arrival_airport?.id || criteria.destination,
-            booking_token: pkg.booking_token, // Use booking_token for direct round trip booking
+            arrival_airport: lastOutboundLeg.arrival_airport?.id || criteria.destination, // Use last leg's arrival
+            booking_token: pkg.booking_token,
             departure_id: outboundFlight.departure_airport?.id || criteria.origin,
-            arrival_id: outboundFlight.arrival_airport?.id || criteria.destination,
+            arrival_id: lastOutboundLeg.arrival_airport?.id || criteria.destination,
             outbound_date: criteria.date,
             return_date: criteria.return_date,
             is_round_trip: true,

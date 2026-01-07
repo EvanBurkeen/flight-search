@@ -61,6 +61,11 @@ export default function Home() {
         setConversationHistory(prev => [...prev, clarifyMessage]);
       } 
       else if (mode === 'search') {
+        console.log('Search results received:', results);
+        if (results && results.length > 0) {
+          console.log('First flight sample:', results[0]);
+        }
+        
         const searchMessage: Message = {
           role: 'assistant',
           content: responseMsg,
@@ -88,10 +93,14 @@ export default function Home() {
   };
 
   const handleBookFlight = async (token: string, departureId: string, arrivalId: string, outboundDate: string, returnDate?: string) => {
+    console.log('Booking with:', { token, departureId, arrivalId, outboundDate, returnDate });
+    
     if (!token || !departureId || !arrivalId || !outboundDate) {
-      alert("Missing required flight data for booking.");
+      console.error('Missing data:', { token: !!token, departureId: !!departureId, arrivalId: !!arrivalId, outboundDate: !!outboundDate });
+      alert(`Missing required flight data for booking.\nToken: ${!!token}\nDeparture: ${!!departureId}\nArrival: ${!!arrivalId}\nDate: ${!!outboundDate}`);
       return;
     }
+    
     setIsBooking(true);
     try {
       const params = new URLSearchParams({
@@ -192,11 +201,18 @@ export default function Home() {
                           </div>
 
                           <div className="text-xs font-medium mb-1" style={{ opacity: 0.85, letterSpacing: '0.05em' }}>
-                            {flight.departure_airport} → {flight.arrival_airport}
+                            {flight.departure_airport} → {flight.layovers && flight.layovers.length > 0 
+                              ? flight.layovers.map((l: any) => l.id).join(' → ') + ' → ' 
+                              : ''}{flight.arrival_airport}
                           </div>
 
                           <div className="text-xs mb-3" style={{ opacity: 0.78 }}>
                             {flight.departure_time} → {flight.arrival_time} · {flight.duration ? `${Math.floor(flight.duration / 60)}h ${flight.duration % 60}m · ` : ''} {flight.stops === 0 ? 'Direct' : `${flight.stops} stop(s)`}
+                            {flight.layovers && flight.layovers.length > 0 && (
+                              <span className="block mt-1 text-xs" style={{ opacity: 0.60 }}>
+                                via {flight.layovers.map((l: any) => `${l.name} (${Math.floor(l.duration / 60)}h ${l.duration % 60}m)`).join(', ')}
+                              </span>
+                            )}
                           </div>
 
                           <button
