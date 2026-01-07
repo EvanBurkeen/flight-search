@@ -228,6 +228,9 @@ export default function Home() {
             {flight.is_round_trip && (
               <span className="text-xs px-2 py-0.5 bg-black text-white">↔ ROUND TRIP</span>
             )}
+            {flight.display_date && (
+              <span className="text-xs px-2 py-0.5 bg-gray-200 text-black">{formatDate(flight.display_date)}</span>
+            )}
           </div>
         </div>
         <div className="text-xl font-normal">{formatPrice(flight.price)}</div>

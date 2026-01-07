@@ -102,6 +102,23 @@ ROUND TRIP DETECTION:
 Look for: "round trip", "return", "coming back", two dates (2/5-2/8), date ranges
 If detected → set BOTH "date" AND "return_date"
 
+DATE-FLEXIBLE SEARCHES:
+When user asks "when", "cheapest time", "best time", "this month/spring/summer":
+- Set search_type: "date_flexible"
+- Set date_range: e.g., ["2026-03-15", "2026-03-22", "2026-03-29", "2026-04-05", "2026-04-12"] (sample 5-7 dates)
+- Search multiple dates and return cheapest options with dates shown
+
+Examples:
+- "when can I fly cheapest to Paris this spring?" → date_range: [3/20, 3/27, 4/3, 4/10, 4/17, 4/24, 5/1]
+- "cheapest time to go to Europe in April?" → date_range: [4/5, 4/12, 4/19, 4/26]
+- "best prices to Tokyo this month?" → date_range: [current week, +1 week, +2 weeks, +3 weeks]
+
+Seasons:
+- Spring: March 20 - June 20
+- Summer: June 21 - September 20  
+- Fall: September 21 - December 20
+- Winter: December 21 - March 19
+
 GEOGRAPHIC SEARCH INTELLIGENCE:
 When user asks about REGIONS (not specific cities), search MULTIPLE major airports:
 
@@ -158,10 +175,11 @@ OUTPUT MODES:
 1) SEARCH - Perform actual flight search:
 {
   "action": "search",
-  "search_type": "multi_airport" (for regions) OR "standard" (for specific routes),
+  "search_type": "multi_airport" (for regions) OR "standard" (for specific routes) OR "date_flexible" (for when/cheapest time queries),
   "origin": "JFK",
   "destination": "CDG",  // or array ["CDG", "LHR", "AMS"] for multi-airport
-  "date": "2026-02-05",
+  "date": "2026-02-05",  // single date OR first date in range
+  "date_range": ["2026-03-15", "2026-03-22", "2026-03-29", "2026-04-05"],  // for date_flexible only
   "return_date": "2026-02-08" (or null for one-way),
   "exclude_airlines": [],
   "checked_airports": ["CDG", "LHR", "AMS", "FCO", "MAD"]  // for explaining to user
@@ -224,6 +242,122 @@ Return ONLY valid JSON, no markdown.`;
       const tomorrow = new Date();
       tomorrow.setDate(tomorrow.getDate() + 1);
       criteria.date = tomorrow.toISOString().split('T')[0];
+    }
+
+    // DATE-FLEXIBLE SEARCH (when user asks "when" or "cheapest time")
+    if (criteria.date_range && criteria.date_range.length > 1) {
+      console.log(`📅 Date-flexible search: checking ${criteria.date_range.length} dates`);
+      
+      try {
+        const dateResults: any[] = [];
+        
+        for (const date of criteria.date_range) {
+          console.log(`🔍 Checking ${criteria.origin} → ${criteria.destination} on ${date}...`);
+          
+          try {
+            const flights = await searchFlights(
+              criteria.origin,
+              criteria.destination,
+              date,
+              criteria.return_date ? date : undefined // If round trip, adjust return date too
+            );
+            
+            if (flights && flights.length > 0) {
+              const cheapestPrice = Math.min(...flights.map((f: any) => f.price || Infinity));
+              dateResults.push({
+                date,
+                flights,
+                price: cheapestPrice
+              });
+              console.log(`  ✓ ${date}: $${cheapestPrice}`);
+            }
+          } catch (error) {
+            console.log(`  ✗ ${date}: No flights`);
+          }
+        }
+        
+        if (dateResults.length === 0) {
+          return NextResponse.json({
+            mode: 'clarify',
+            message: `I checked ${criteria.date_range.length} dates but couldn't find any flights. Would you like to try different dates or routes?`,
+          });
+        }
+        
+        // Sort by price to find cheapest dates
+        dateResults.sort((a, b) => a.price - b.price);
+        
+        // Merge flights from cheapest 3 dates and show which dates they're from
+        const topDates = dateResults.slice(0, 3);
+        const allFlights: any[] = [];
+        
+        for (const dateResult of topDates) {
+          dateResult.flights.forEach((flight: any) => {
+            allFlights.push({
+              ...flight,
+              _date: dateResult.date,
+              _isDateFlexible: true
+            });
+          });
+        }
+        
+        // Sort by price
+        const sortedFlights = allFlights.sort((a, b) => (a.price || 0) - (b.price || 0));
+        
+        // Transform results
+        const results = sortedFlights.slice(0, 10).map((flight: any) => {
+          const leg = flight.flights?.[0] || flight;
+          const lastLeg = flight.flights?.[flight.flights?.length - 1] || flight;
+          
+          return {
+            airline: leg.airline || 'Unknown',
+            airline_code: leg.airline_logo?.match(/airlines\/(\w{2})/)?.[1] || '',
+            price: flight.price || 0,
+            duration: flight.total_duration || flight.duration || 0,
+            stops: flight.layovers?.length || 0,
+            layovers: flight.layovers || [],
+            departure_time: leg.departure_airport?.time || '',
+            arrival_time: lastLeg.arrival_airport?.time || '',
+            departure_airport: leg.departure_airport?.id || criteria.origin,
+            arrival_airport: lastLeg.arrival_airport?.id || criteria.destination,
+            booking_token: flight.booking_token || flight.departure_token || '',
+            departure_id: leg.departure_airport?.id || criteria.origin,
+            arrival_id: lastLeg.arrival_airport?.id || criteria.destination,
+            outbound_date: flight._date, // Use the actual date searched
+            return_date: criteria.return_date,
+            is_round_trip: !!criteria.return_date,
+            aircraft: leg.airplane || '',
+            display_date: flight._date, // For showing in UI
+          };
+        });
+        
+        console.log(`✅ Found ${results.length} flights across ${topDates.length} dates`);
+        
+        // Build message showing best dates
+        const dateInfo = topDates.map(d => {
+          const date = new Date(d.date);
+          const monthDay = `${date.getMonth() + 1}/${date.getDate()}`;
+          return `${monthDay} ($${d.price})`;
+        }).join(', ');
+        
+        const message = `${criteria.return_date ? 'Round trip' : 'One-way'} flights: ${criteria.origin} → ${criteria.destination}\n\n📅 Cheapest dates: ${dateInfo}\n\nShowing best prices:`;
+        
+        return NextResponse.json({
+          mode: 'search',
+          message,
+          results,
+          searchCriteria: criteria,
+          dateFlexible: true,
+          checkedDates: dateResults.map(d => `${d.date} ($${d.price})`),
+        });
+        
+      } catch (error: any) {
+        console.error('Date-flexible search error:', error);
+        return NextResponse.json({
+          mode: 'error',
+          message: `Search failed: ${error.message}`,
+          results: [],
+        });
+      }
     }
 
     // ROUND TRIP SEARCH
