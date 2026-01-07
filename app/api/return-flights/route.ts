@@ -70,6 +70,11 @@ export async function POST(request: Request) {
         departure_airport: firstLeg?.departure_airport?.id || arrival_id,
         arrival_airport: lastLeg?.arrival_airport?.id || departure_id,
         booking_token: flight.booking_token || '',
+        // Include route context for booking
+        departure_id,
+        arrival_id,
+        outbound_date,
+        return_date,
         is_round_trip: true,
         aircraft: firstLeg?.airplane || '',
       };

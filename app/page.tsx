@@ -156,18 +156,29 @@ export default function Home() {
     }
   };
 
-  const handleBookFlight = async (bookingToken: string) => {
-    if (!bookingToken) {
+  const handleBookFlight = async (flight: any) => {
+    if (!flight.booking_token) {
       alert("Missing booking token");
       console.error('No booking token provided');
       return;
     }
 
-    console.log('Booking with token:', bookingToken.substring(0, 30) + '...');
+    console.log('Booking flight:', flight);
     setIsBooking(true);
 
     try {
-      const response = await axios.get(`/api/booking?token=${encodeURIComponent(bookingToken)}`);
+      // Build query params with route context
+      const params = new URLSearchParams({
+        token: flight.booking_token,
+      });
+      
+      // Add route context if available (required for round trips)
+      if (flight.departure_id) params.append('departure_id', flight.departure_id);
+      if (flight.arrival_id) params.append('arrival_id', flight.arrival_id);
+      if (flight.outbound_date) params.append('outbound_date', flight.outbound_date);
+      if (flight.return_date) params.append('return_date', flight.return_date);
+
+      const response = await axios.get(`/api/booking?${params.toString()}`);
       
       if (response.data.url) {
         console.log('Opening booking URL');
@@ -231,7 +242,7 @@ export default function Home() {
         disabled={isBooking || isLoading}
         className="block w-full text-center text-xs py-2 border border-black hover:bg-black hover:text-white transition-all disabled:opacity-50"
       >
-        {buttonText}
+        {isBooking ? 'Booking...' : buttonText}
       </button>
     </div>
   );
@@ -288,7 +299,7 @@ export default function Home() {
             </p>
             {returnFlights.length > 0 ? (
               returnFlights.map((flight, idx) => 
-                renderFlight(flight, `Book Round Trip · ${formatPrice(flight.price)}`, () => handleBookFlight(flight.booking_token))
+                renderFlight(flight, `Book Round Trip · ${formatPrice(flight.price)}`, () => handleBookFlight(flight))
               )
             ) : (
               <div className="text-sm" style={{ opacity: 0.72 }}>

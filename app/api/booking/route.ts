@@ -3,6 +3,10 @@ import { NextResponse } from 'next/server';
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const token = searchParams.get('token');
+  const departureId = searchParams.get('departure_id');
+  const arrivalId = searchParams.get('arrival_id');
+  const outboundDate = searchParams.get('outbound_date');
+  const returnDate = searchParams.get('return_date');
   const apiKey = process.env.SERP_API_KEY;
 
   if (!token) {
@@ -12,17 +16,26 @@ export async function GET(request: Request) {
 
   try {
     console.log('📝 Booking with token:', token.substring(0, 30) + '...');
+    console.log('📍 Route:', departureId, '→', arrivalId, outboundDate, returnDate);
 
-    const params = new URLSearchParams({
+    // Build params - include route context if provided
+    const params: Record<string, string> = {
       engine: "google_flights",
       booking_token: token,
       api_key: apiKey || '',
       currency: "USD",
       hl: "en",
       gl: "us"
-    });
+    };
 
-    const url = `https://serpapi.com/search.json?${params.toString()}`;
+    // Add route context if available (required for round trips)
+    if (departureId) params.departure_id = departureId;
+    if (arrivalId) params.arrival_id = arrivalId;
+    if (outboundDate) params.outbound_date = outboundDate;
+    if (returnDate) params.return_date = returnDate;
+
+    const urlParams = new URLSearchParams(params);
+    const url = `https://serpapi.com/search.json?${urlParams.toString()}`;
     const response = await fetch(url);
     
     // Get response text first to log it if there's an error
