@@ -161,8 +161,8 @@ Return ONLY valid JSON, no markdown.`;
             departure_time: outboundFlight.departure_airport?.time,
             arrival_time: lastOutboundLeg.arrival_airport?.time,
             departure_airport: outboundFlight.departure_airport?.id || criteria.origin,
-            arrival_airport: lastOutboundLeg.arrival_airport?.id || criteria.destination, // Use last leg's arrival
-            booking_token: pkg.booking_token,
+            arrival_airport: lastOutboundLeg.arrival_airport?.id || criteria.destination,
+            booking_token: pkg.departure_token, // Round trips use departure_token
             departure_id: outboundFlight.departure_airport?.id || criteria.origin,
             arrival_id: lastOutboundLeg.arrival_airport?.id || criteria.destination,
             outbound_date: criteria.date,
