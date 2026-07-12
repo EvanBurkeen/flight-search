@@ -7,6 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fraunces:ital,wght@0,600;1,600&display=swap" rel="stylesheet" />
+  <script src="/world.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
   <style>
     :root {
@@ -119,6 +120,12 @@
       font-size: 0.8rem; color: var(--accent);
     }
     .route-meta { font-size: 0.68rem; opacity: 0.70; margin-top: 0.3rem; }
+
+    .route-map {
+      margin: 0.5rem 0 0.25rem; border: 1px solid var(--line); border-radius: 5px;
+      overflow: hidden; background: #f0e6c8;
+    }
+    .route-map svg { display: block; width: 100%; height: 7rem; }
 
     .leg-label {
       display: inline-block; font-size: 0.62rem; font-weight: 700;
@@ -238,7 +245,7 @@
           <div x-show="msg.role === 'user'" class="msg-user" x-text="msg.content"></div>
 
           <div x-show="msg.role === 'assistant'" class="msg-assistant">
-            <div class="msg-text" x-text="msg.content"></div>
+            <div class="msg-text" x-html="renderText(msg.content)"></div>
 
             <template x-for="(sec, si) in (msg.sections || [])" :key="si">
               <div>
@@ -279,8 +286,8 @@
                         <template x-for="(lo, k) in (f.layovers || [])" :key="k">
                           <div class="leg-detail" x-text="layoverText(lo)"></div>
                         </template>
-                        <div class="leg-detail" x-show="f.legs[0].aircraft || f.legs[0].legroom"
-                             x-text="[f.legs[0].aircraft, f.legs[0].legroom ? f.legs[0].legroom + ' legroom' : null].filter(Boolean).join(' · ')"></div>
+                        <div class="leg-detail" x-show="aircraftText(f)" x-text="aircraftText(f)"></div>
+                        <div class="route-map" x-show="(f.route_points || []).length > 1" x-html="mapSvg(f.route_points)"></div>
                         <div class="badges" x-show="(f.highlights || []).length">
                           <template x-for="(h, k) in f.highlights" :key="k">
                             <span class="badge" :class="badgeClass(h)" x-text="h"></span>
@@ -332,6 +339,7 @@
                           <template x-for="(lo, k) in (it.outbound.layovers || [])" :key="'o'+k">
                             <div class="leg-detail" x-text="layoverText(lo)"></div>
                           </template>
+                          <div class="leg-detail" x-show="aircraftText(it.outbound)" x-text="aircraftText(it.outbound)"></div>
                         </div>
                         <div style="margin-top: 0.5rem;">
                           <span class="leg-label" style="background: var(--warn-bg); color: var(--warn);">Return</span>
@@ -352,7 +360,9 @@
                           <template x-for="(lo, k) in (it.return.layovers || [])" :key="'r'+k">
                             <div class="leg-detail" x-text="layoverText(lo)"></div>
                           </template>
+                          <div class="leg-detail" x-show="aircraftText(it.return)" x-text="aircraftText(it.return)"></div>
                         </div>
+                        <div class="route-map" x-show="(it.outbound.route_points || []).length > 1" x-html="mapSvg(it.outbound.route_points, it.return.route_points)"></div>
                         <div class="badges" x-show="it.outbound.stops === 0 && it.return.stops === 0">
                           <span class="badge badge-direct">Direct both ways</span>
                         </div>
@@ -419,13 +429,7 @@
   <script>
     function flightApp() {
       return {
-        messages: [
-          {
-            role: 'assistant',
-            content: "Hi — I'm your flight assistant. Describe any trip, however vague, and I'll pull live Google Flights data to figure it out. Ask me to compare options and I'll run the numbers.",
-            sections: [],
-          }
-        ],
+        messages: [],
         exampleChips: [
           "JFK to London in March, direct, SkyTeam preferred",
           "NYC to Tokyo round trip, a week in mid-October, business",
@@ -518,6 +522,63 @@
         sectionLabel(sec) {
           const msg = sec.message || '';
           return msg.split('\n')[0];
+        },
+
+        renderText(t) {
+          const esc = (t || '')
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+          return esc.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+        },
+
+        aircraftText(f) {
+          const legs = f.legs || [];
+          const craft = [...new Set(legs.map(l => l.aircraft).filter(Boolean))].join(' + ');
+          const legroom = legs[0] && legs[0].legroom ? legs[0].legroom + ' legroom' : null;
+          return [craft, legroom].filter(Boolean).join(' · ');
+        },
+
+        mapSvg(points, returnPoints) {
+          const pts = (points || []).filter(p => p && p.lat != null);
+          if (pts.length < 2) return '';
+          // equirectangular, same frame as WORLD_PATH: x = lon+180, y = 90-lat
+          let xs = pts.map(p => p.lon + 180);
+          const span = Math.max(...xs) - Math.min(...xs);
+          if (span > 180) xs = xs.map(x => (x < 180 ? x + 360 : x)); // antimeridian wrap
+          const ys = pts.map(p => 90 - p.lat);
+          const P = pts.map((p, i) => ({ x: xs[i], y: ys[i], code: p.code }));
+
+          let minX = Math.min(...xs), maxX = Math.max(...xs);
+          let minY = Math.min(...ys), maxY = Math.max(...ys);
+          const padX = Math.max((maxX - minX) * 0.35, 6);
+          const padY = Math.max((maxY - minY) * 0.5, 5);
+          minX -= padX; maxX += padX; minY -= padY; maxY += padY;
+          // widen to a pleasant aspect ratio (~3:1)
+          const w = maxX - minX, h = maxY - minY;
+          if (w / h < 2.6) { const extra = (h * 2.6 - w) / 2; minX -= extra; maxX += extra; }
+          else if (w / h > 4.5) { const extra = (w / 4.5 - h) / 2; minY -= extra; maxY += extra; }
+
+          const vb = `${minX.toFixed(1)} ${minY.toFixed(1)} ${(maxX - minX).toFixed(1)} ${(maxY - minY).toFixed(1)}`;
+          const sw = (maxX - minX) / 300; // stroke scale
+          const arc = (a, b, lift) => {
+            const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+            const dx = b.x - a.x, dy = b.y - a.y;
+            const len = Math.hypot(dx, dy) || 1;
+            const k = lift * Math.min(len * 0.18, 6);
+            return `M${a.x} ${a.y} Q${mx - dy / len * k} ${my - dx / len * -k} ${b.x} ${b.y}`;
+          };
+          let route = '';
+          for (let i = 0; i < P.length - 1; i++) route += `<path d="${arc(P[i], P[i+1], 1)}" fill="none" stroke="#b1471f" stroke-width="${sw * 2}"/>`;
+          const dots = P.map((p, i) => {
+            const end = i === 0 || i === P.length - 1;
+            const nearTop = p.y < minY + (maxY - minY) * 0.24;
+            const labelY = nearTop ? p.y + sw * 12 : p.y - sw * 5;
+            return `<circle cx="${p.x}" cy="${p.y}" r="${sw * (end ? 3.2 : 2.2)}" fill="${end ? '#1c1a15' : '#b1471f'}"/>` +
+                   `<text x="${p.x}" y="${labelY}" font-size="${sw * 9}" text-anchor="middle" fill="#1c1a15" font-family="Inter, sans-serif" font-weight="600">${p.code}</text>`;
+          }).join('');
+          return `<svg viewBox="${vb}" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg">` +
+            `<path d="${WORLD_PATH}" fill="#e3d5ae" stroke="#cbb987" stroke-width="${sw * 0.6}"/>` +
+            `<path d="${WORLD_PATH}" transform="translate(360,0)" fill="#e3d5ae" stroke="#cbb987" stroke-width="${sw * 0.6}"/>` +
+            route + dots + `</svg>`;
         },
 
         airlineColor(code) {

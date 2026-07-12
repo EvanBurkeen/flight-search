@@ -2,6 +2,7 @@ import json
 import os
 import time
 from datetime import datetime
+from functools import lru_cache
 from urllib.parse import quote
 
 import anthropic
@@ -183,7 +184,8 @@ Answering:
 - The user sees result cards for every search you run, so don't recite every flight. Lead with your recommendation and the key numbers (totals for multi-leg plans, including a note that hotels/ground costs aren't included), then the trade-offs that matter.
 - Mention real caveats from the data: nothing arrives before X, prices are one-way vs round-trip totals, self-transfer risks, tight or overnight layovers.
 - If a search fails or is rate-limited, say so plainly and suggest trying again in a moment.
-- Keep responses short and conversational — a few sentences, not a report."""
+- Keep responses short and conversational — a few sentences, not a report.
+- Formatting: you may use **bold** sparingly for the key number or verdict (it renders properly). No other markdown — no headers, no bullet syntax, no italics-by-asterisk."""
 
 
 def compact_for_model(payload: dict) -> str:
@@ -393,6 +395,26 @@ def booking_url(origins: list, destinations: list, spec: dict) -> str:
     return f"https://www.google.com/travel/flights?q={quote(q)}"
 
 
+@lru_cache(maxsize=1)
+def airport_coords() -> dict:
+    import airportsdata
+    return airportsdata.load("IATA")
+
+
+def coords_for(code: str) -> dict | None:
+    a = airport_coords().get(code)
+    return {"code": code, "lat": a["lat"], "lon": a["lon"]} if a else None
+
+
+def route_points(result) -> list[dict]:
+    codes = []
+    for leg in result.legs or []:
+        for code in (leg.departure_airport.name, leg.arrival_airport.name):
+            if not codes or codes[-1] != code:
+                codes.append(code)
+    return [p for p in (coords_for(c) for c in codes) if p]
+
+
 def serialize_leg(leg) -> dict:
     return {
         "airline": leg.airline.value,
@@ -444,6 +466,7 @@ def serialize_flight(result, url: str) -> dict:
         "warnings": warnings,
         "highlights": [],
         "booking_url": url,
+        "route_points": route_points(result),
     }
 
 
