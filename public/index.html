@@ -306,14 +306,28 @@
             // keep history short: last 3 exchanges
             this.history = this.history.slice(-6);
 
-            this.messages.push({
-              role: 'assistant',
-              content: data.message,
-              type: data.type,
-              results: data.results,
-              dates: data.dates,
-              assumptions: data.assumptions,
-            });
+            if (data.type === 'comparison') {
+              this.messages.push({ role: 'assistant', content: data.message, type: 'clarify' });
+              (data.sections || []).forEach(sec => {
+                this.messages.push({
+                  role: 'assistant',
+                  content: sec.message,
+                  type: sec.type,
+                  results: sec.results,
+                  dates: sec.dates,
+                  assumptions: sec.assumptions,
+                });
+              });
+            } else {
+              this.messages.push({
+                role: 'assistant',
+                content: data.message,
+                type: data.type,
+                results: data.results,
+                dates: data.dates,
+                assumptions: data.assumptions,
+              });
+            }
           } catch (err) {
             this.messages.push({ role: 'assistant', content: `Error: ${err.message}` });
           } finally {

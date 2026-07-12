@@ -124,9 +124,25 @@ SEARCH_TOOL = {
                     "latest": {"type": ["integer", "null"]},
                 },
             },
+            "arrival_time": {
+                "type": ["object", "null"],
+                "description": "Outbound ARRIVAL window at the destination, hours 0-23. Use this (not departure_time) for 'arrive by / be there by X': 'by Thursday morning' -> latest 12.",
+                "properties": {
+                    "earliest": {"type": ["integer", "null"]},
+                    "latest": {"type": ["integer", "null"]},
+                },
+            },
             "return_time": {
                 "type": ["object", "null"],
                 "description": "Return departure window in hours 0-23.",
+                "properties": {
+                    "earliest": {"type": ["integer", "null"]},
+                    "latest": {"type": ["integer", "null"]},
+                },
+            },
+            "return_arrival_time": {
+                "type": ["object", "null"],
+                "description": "Return ARRIVAL window, hours 0-23.",
                 "properties": {
                     "earliest": {"type": ["integer", "null"]},
                     "latest": {"type": ["integer", "null"]},
@@ -171,12 +187,19 @@ def parse_query(query: str, history: list | None = None) -> dict:
     system_prompt = f"""You are the query parser for a flight search engine backed by live Google Flights data.
 Today is {today}. All dates you output must be in the future; a month/day with no year means the nearest future occurrence.
 
-Turn the user's natural-language request into one search_flights call. The user may be vague — that is fine:
+Turn the user's natural-language request into search_flights calls. The user may be vague — that is fine:
 - Cities or regions become lists of major airport codes.
 - "next weekend", "mid September", "sometime this fall", "cheapest time to go" -> use flexible_dates with a sensible window.
 - Loyalty or alliance hints map to airline/alliance filters.
 - "cheap"/"budget" -> sort cheapest; "quickest"/"shortest" -> sort fastest; otherwise best.
+- "arrive by / be there by X" is an ARRIVAL constraint -> arrival_time, never departure_time.
 - Record every leap of inference in assumptions so the user can correct you.
+
+COMPARISONS: when the user asks to compare strategies (different routings, dates, or a
+self-arranged overnight stopover vs a same-day trip), emit MULTIPLE search_flights calls in
+the same response — one per option, at most 4 — each with a summary that names the option
+("Option A: nonstop Thursday", "Option B leg 1: ORF->FLL Wednesday evening"). A self-arranged
+stopover plan needs one call per leg, with the correct date on each leg.
 
 Only use clarify when origin or destination is truly unknowable from the query."""
 
@@ -192,8 +215,11 @@ Only use clarify when origin or destination is truly unknowable from the query."
         messages=messages,
     )
 
-    tool_use = next(b for b in response.content if b.type == "tool_use")
-    return {"tool": tool_use.name, "input": tool_use.input}
+    return [
+        {"tool": b.name, "input": b.input}
+        for b in response.content
+        if b.type == "tool_use"
+    ]
 
 
 def resolve_airports(codes: list[str]) -> tuple[list, list[str]]:
@@ -213,13 +239,16 @@ def resolve_airlines(codes: list[str] | None) -> list:
     return resolved
 
 
-def time_restrictions(window: dict | None) -> TimeRestrictions | None:
-    if not window:
+def time_restrictions(departure: dict | None, arrival: dict | None = None) -> TimeRestrictions | None:
+    fields = {
+        "earliest_departure": (departure or {}).get("earliest"),
+        "latest_departure": (departure or {}).get("latest"),
+        "earliest_arrival": (arrival or {}).get("earliest"),
+        "latest_arrival": (arrival or {}).get("latest"),
+    }
+    if all(v is None for v in fields.values()):
         return None
-    earliest, latest = window.get("earliest"), window.get("latest")
-    if earliest is None and latest is None:
-        return None
-    return TimeRestrictions(earliest_departure=earliest, latest_departure=latest)
+    return TimeRestrictions(**fields)
 
 
 def build_filters(spec: dict, origins: list, destinations: list, filters_cls=FlightSearchFilters, **extra):
@@ -230,7 +259,7 @@ def build_filters(spec: dict, origins: list, destinations: list, filters_cls=Fli
             departure_airport=[[a, 0] for a in origins],
             arrival_airport=[[a, 0] for a in destinations],
             travel_date=spec.get("departure_date") or datetime.now().strftime("%Y-%m-%d"),
-            time_restrictions=time_restrictions(spec.get("departure_time")),
+            time_restrictions=time_restrictions(spec.get("departure_time"), spec.get("arrival_time")),
         )
     ]
     if is_round_trip:
@@ -239,7 +268,7 @@ def build_filters(spec: dict, origins: list, destinations: list, filters_cls=Fli
                 departure_airport=[[a, 0] for a in destinations],
                 arrival_airport=[[a, 0] for a in origins],
                 travel_date=spec.get("return_date") or spec.get("departure_date") or datetime.now().strftime("%Y-%m-%d"),
-                time_restrictions=time_restrictions(spec.get("return_time")),
+                time_restrictions=time_restrictions(spec.get("return_time"), spec.get("return_arrival_time")),
             )
         )
 
@@ -480,6 +509,36 @@ def search_flexible_dates(spec: dict, origins: list, destinations: list, currenc
     }
 
 
+def execute_spec(spec: dict) -> dict:
+    origins, bad_origins = resolve_airports(spec.get("origins"))
+    destinations, bad_destinations = resolve_airports(spec.get("destinations"))
+    invalid = bad_origins + bad_destinations
+    if not origins or not destinations:
+        return {
+            "type": "clarify",
+            "message": f"I couldn't recognize these airport codes: {', '.join(invalid)}. Could you rephrase with standard airports or city names?",
+            "results": [],
+        }
+
+    currency = (spec.get("currency") or "USD").upper()
+
+    if spec.get("flexible_dates"):
+        payload = search_flexible_dates(spec, origins, destinations, currency)
+    elif spec.get("departure_date"):
+        payload = search_fixed_dates(spec, origins, destinations, currency)
+    else:
+        return {
+            "type": "clarify",
+            "message": "When would you like to travel? A specific date or a rough window both work.",
+            "results": [],
+        }
+
+    if spec.get("summary"):
+        payload["message"] = f"{spec['summary']}\n\n{payload['message']}"
+    payload["assumptions"] = spec.get("assumptions") or []
+    return payload
+
+
 @app.post("/api/search")
 async def search(request: Request):
     try:
@@ -488,43 +547,23 @@ async def search(request: Request):
         if not query:
             return JSONResponse({"error": "Query is required"}, status_code=400)
 
-        parsed = parse_query(query, body.get("history"))
+        calls = parse_query(query, body.get("history"))
+        searches = [c["input"] for c in calls if c["tool"] == "search_flights"]
 
-        if parsed["tool"] == "clarify":
-            return JSONResponse({
-                "type": "clarify",
-                "message": parsed["input"]["question"],
-                "results": [],
-            })
+        if not searches:
+            clarify = next((c for c in calls if c["tool"] == "clarify"), None)
+            question = clarify["input"]["question"] if clarify else "Could you tell me where you're flying from and to?"
+            return JSONResponse({"type": "clarify", "message": question, "results": []})
 
-        spec = parsed["input"]
-        origins, bad_origins = resolve_airports(spec.get("origins"))
-        destinations, bad_destinations = resolve_airports(spec.get("destinations"))
-        invalid = bad_origins + bad_destinations
-        if not origins or not destinations:
-            return JSONResponse({
-                "type": "clarify",
-                "message": f"I couldn't recognize these airport codes: {', '.join(invalid)}. Could you rephrase with standard airports or city names?",
-                "results": [],
-            })
+        if len(searches) == 1:
+            return JSONResponse(execute_spec(searches[0]))
 
-        currency = (spec.get("currency") or "USD").upper()
-
-        if spec.get("flexible_dates"):
-            payload = search_flexible_dates(spec, origins, destinations, currency)
-        elif spec.get("departure_date"):
-            payload = search_fixed_dates(spec, origins, destinations, currency)
-        else:
-            return JSONResponse({
-                "type": "clarify",
-                "message": "When would you like to travel? A specific date or a rough window both work.",
-                "results": [],
-            })
-
-        if spec.get("summary"):
-            payload["message"] = f"{spec['summary']}\n\n{payload['message']}"
-        payload["assumptions"] = spec.get("assumptions") or []
-        return JSONResponse(payload)
+        sections = [execute_spec(s) for s in searches[:4]]
+        return JSONResponse({
+            "type": "comparison",
+            "message": f"Comparing {len(sections)} options:",
+            "sections": sections,
+        })
 
     except SearchHTTPError as e:
         if e.status_code == 429:
