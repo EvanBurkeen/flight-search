@@ -194,6 +194,15 @@
     .input-hint { margin-top: 0.5rem; font-size: 0.7rem; opacity: 0.55; }
 
     .loading { display: flex; align-items: center; gap: 0.6rem; font-size: 0.85rem; opacity: 0.75; }
+    .stop-btn {
+      font-size: 0.68rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+      padding: 0.3rem 0.7rem; margin-left: 0.35rem;
+      border: 1px solid var(--line); border-radius: 999px;
+      background: transparent; color: var(--ink); cursor: pointer;
+      transition: all 0.15s;
+    }
+    .stop-btn:hover { border-color: var(--accent); color: var(--accent-dark); }
+    .msg-note { font-size: 0.8rem; opacity: 0.60; font-style: italic; }
     .loading-dot {
       width: 0.5rem; height: 0.5rem; border-radius: 50%; background: var(--accent);
       animation: pulse 1s ease-in-out infinite;
@@ -243,6 +252,7 @@
       <template x-for="(msg, i) in messages" :key="i">
         <div style="display:flex; flex-direction:column;">
           <div x-show="msg.role === 'user'" class="msg-user" x-text="msg.content"></div>
+          <div x-show="msg.role === 'note'" class="msg-note" x-text="msg.content"></div>
 
           <div x-show="msg.role === 'assistant'" class="msg-assistant">
             <div class="msg-text" x-html="renderText(msg.content)"></div>
@@ -398,6 +408,7 @@
       <div x-show="isLoading" class="loading">
         <div class="loading-dot"></div>
         <span x-text="loadingText"></span>
+        <button type="button" class="stop-btn" @click="stop()">■ Stop</button>
       </div>
       <div x-ref="bottom"></div>
     </div>
@@ -413,12 +424,11 @@
             @input="autosize()"
             @keydown.enter="onEnter($event)"
             placeholder="Ask anything — routes, dates, comparisons, budgets…"
-            :disabled="isLoading"
           ></textarea>
-          <button type="submit" class="submit-btn" :disabled="isLoading || !input.trim()">Send</button>
+          <button type="submit" class="submit-btn" :disabled="!input.trim()">Send</button>
         </div>
       </form>
-      <div class="input-hint">Enter to send · Shift+Enter for a new line · Powered by Google Flights + Claude</div>
+      <div class="input-hint">Enter to send · Shift+Enter for a new line · Sending during a search stops it and starts over with your correction</div>
     </div>
 
     <div class="footer">
@@ -442,6 +452,8 @@
         history: [],
         loadingText: 'Thinking…',
         loadingTimer: null,
+        controller: null,
+        reqId: 0,
 
         scrollToBottom() {
           this.$nextTick(() => { this.$refs.bottom?.scrollIntoView({ behavior: 'smooth' }); });
@@ -474,9 +486,27 @@
           clearInterval(this.loadingTimer);
         },
 
+        stop(silent) {
+          if (!this.isLoading) return;
+          this.controller?.abort();
+          this.isLoading = false;
+          this.stopLoadingCycle();
+          // mark the interruption so Claude reads the next message as a correction
+          this.history.push({ role: 'assistant', content: '(Search interrupted by the user before results came back.)' });
+          this.history = this.history.slice(-12);
+          if (!silent) {
+            this.messages.push({ role: 'note', content: 'Search stopped — tell me what to change.' });
+            this.scrollToBottom();
+          }
+        },
+
         async search(queryOverride) {
           const q = (queryOverride || this.input).trim();
-          if (!q || this.isLoading) return;
+          if (!q) return;
+          if (this.isLoading) this.stop(true); // correcting mid-search: cancel and restart
+
+          const myReq = ++this.reqId;
+          this.controller = new AbortController();
 
           this.input = '';
           this.$nextTick(() => this.autosize());
@@ -486,16 +516,20 @@
           this.startLoadingCycle();
           this.scrollToBottom();
 
+          // record the user turn now so a stopped search still leaves context
+          this.history.push({ role: 'user', content: q });
+
           try {
             const res = await fetch('/api/search', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ query: q, history: this.history }),
+              body: JSON.stringify({ query: q, history: this.history.slice(0, -1) }),
+              signal: this.controller.signal,
             });
             const data = await res.json();
             if (data.error) throw new Error(data.error);
+            if (myReq !== this.reqId) return; // superseded by a newer request
 
-            this.history.push({ role: 'user', content: q });
             this.history.push({ role: 'assistant', content: data.message });
             this.history = this.history.slice(-12);
 
@@ -505,11 +539,15 @@
               sections: data.sections || [],
             });
           } catch (err) {
+            if (err.name === 'AbortError') return; // stop() already recorded the interruption
+            if (myReq !== this.reqId) return;
             this.messages.push({ role: 'assistant', content: `Something went wrong: ${err.message}. Try again in a moment.`, sections: [] });
           } finally {
-            this.isLoading = false;
-            this.stopLoadingCycle();
-            this.scrollToBottom();
+            if (myReq === this.reqId) {
+              this.isLoading = false;
+              this.stopLoadingCycle();
+              this.scrollToBottom();
+            }
           }
         },
 
