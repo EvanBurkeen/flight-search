@@ -3,260 +3,412 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Flight Search — Evan Burkeen</title>
+  <title>Flight Assistant — Evan Burkeen</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fraunces:ital,wght@0,600;1,600&display=swap" rel="stylesheet" />
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
   <style>
+    :root {
+      --bg: #f7eed2;
+      --ink: #1c1a15;
+      --line: rgba(28, 26, 21, 0.14);
+      --panel: rgba(255, 255, 255, 0.55);
+      --accent: #b1471f;
+      --accent-dark: #8a3416;
+      --good: #3c6e2f;
+      --good-bg: rgba(60, 110, 47, 0.10);
+      --info: #1e40af;
+      --info-bg: rgba(30, 64, 175, 0.08);
+      --warn: #92400e;
+      --warn-bg: rgba(146, 64, 14, 0.10);
+    }
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      background-color: #f7eed2;
-      color: #000;
+      background-color: var(--bg);
+      background-image: radial-gradient(circle at 85% -10%, rgba(177, 71, 31, 0.08), transparent 45%);
+      color: var(--ink);
       -webkit-font-smoothing: antialiased;
     }
     a { color: inherit; }
-    button, input { font-family: inherit; }
+    button, input, textarea { font-family: inherit; }
 
-    .container { max-width: 56rem; margin: 0 auto; padding: 3rem 1.5rem; }
+    .container { max-width: 58rem; margin: 0 auto; padding: 2.5rem 1.5rem; }
 
-    .header { margin-bottom: 3rem; }
-    .header h1 { font-size: 2.25rem; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 0.25rem; }
-    .header p { font-size: 0.875rem; opacity: 0.72; }
+    .header { margin-bottom: 2rem; }
+    .header h1 {
+      font-family: Fraunces, Georgia, serif;
+      font-size: 2.5rem; font-weight: 600; letter-spacing: -0.02em; margin-bottom: 0.3rem;
+    }
+    .header h1 em { font-style: italic; color: var(--accent); }
+    .header p { font-size: 0.9rem; opacity: 0.72; }
+
+    /* landing */
+    .capabilities {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+      gap: 0.75rem; margin-bottom: 1.25rem;
+    }
+    .cap {
+      border: 1px solid var(--line); background: var(--panel);
+      padding: 0.9rem 1rem; border-radius: 4px;
+    }
+    .cap .cap-title { font-size: 0.8rem; font-weight: 600; margin-bottom: 0.2rem; }
+    .cap .cap-title span { color: var(--accent); margin-right: 0.35rem; }
+    .cap .cap-body { font-size: 0.75rem; opacity: 0.72; line-height: 1.5; }
+
+    .chips { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 2rem; }
+    .chip {
+      font-size: 0.75rem; padding: 0.45rem 0.8rem; border-radius: 999px;
+      border: 1px solid var(--line); background: var(--panel);
+      cursor: pointer; transition: all 0.15s; color: var(--ink);
+    }
+    .chip:hover { border-color: var(--accent); color: var(--accent-dark); }
 
     .messages { display: flex; flex-direction: column; gap: 1.5rem; margin-bottom: 2rem; }
 
-    .msg-system {
-      font-size: 0.875rem;
-      line-height: 1.6;
-      white-space: pre-line;
-      border-left: 2px solid #000;
-      padding-left: 1rem;
-      opacity: 0.78;
+    .msg-user {
+      align-self: flex-end; max-width: 85%;
+      background: var(--ink); color: var(--bg);
+      padding: 0.6rem 1rem; border-radius: 14px 14px 3px 14px;
+      font-size: 0.875rem; line-height: 1.55; white-space: pre-wrap;
     }
-
-    .msg-user { text-align: right; font-size: 0.875rem; }
 
     .msg-assistant { display: flex; flex-direction: column; gap: 1rem; }
-    .msg-text { font-size: 0.875rem; line-height: 1.6; white-space: pre-line; opacity: 0.90; }
-
-    .assumptions {
-      font-size: 0.75rem;
-      opacity: 0.60;
-      border-left: 2px solid rgba(0,0,0,0.25);
-      padding-left: 0.75rem;
-      display: flex; flex-direction: column; gap: 0.125rem;
+    .msg-text {
+      font-size: 0.9rem; line-height: 1.65; white-space: pre-wrap; max-width: 46rem;
+      border-left: 2px solid var(--accent); padding-left: 1rem;
     }
 
-    .flight-list { display: flex; flex-direction: column; gap: 0.5rem; }
+    .section-label {
+      font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em;
+      color: var(--accent-dark); font-weight: 600; margin-bottom: 0.4rem;
+      white-space: pre-line;
+    }
+    .assumptions { font-size: 0.72rem; opacity: 0.60; margin-top: 0.35rem; }
+
+    .flight-list { display: flex; flex-direction: column; gap: 0.6rem; }
 
     .flight-card {
-      border: 1px solid rgba(0,0,0,0.12);
-      padding: 1rem;
-      transition: opacity 0.15s;
+      border: 1px solid var(--line); background: var(--panel);
+      border-radius: 6px; padding: 1rem 1.1rem;
+      transition: border-color 0.15s, box-shadow 0.15s;
     }
-    .flight-card:hover { opacity: 0.92; }
+    .flight-card:hover { border-color: rgba(28,26,21,0.35); box-shadow: 0 2px 10px rgba(28,26,21,0.06); }
 
-    .card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 0.5rem; }
-    .card-airline { font-size: 0.875rem; font-weight: 500; margin-bottom: 0.125rem; }
-    .card-code { font-size: 0.75rem; opacity: 0.60; }
-    .card-price { font-size: 1.25rem; font-weight: 400; text-align: right; }
-    .card-price-note { font-size: 0.7rem; opacity: 0.60; text-align: right; }
+    .card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 0.65rem; gap: 0.75rem; }
+    .airline-id { display: flex; align-items: center; gap: 0.6rem; min-width: 0; }
+    .airline-avatar {
+      width: 2rem; height: 2rem; border-radius: 50%; flex: none;
+      display: flex; align-items: center; justify-content: center;
+      color: #fff; font-size: 0.7rem; font-weight: 700; letter-spacing: 0.02em;
+    }
+    .card-airline { font-size: 0.875rem; font-weight: 600; }
+    .card-code { font-size: 0.72rem; opacity: 0.60; }
+    .card-price { font-size: 1.35rem; font-weight: 600; text-align: right; color: var(--accent-dark); }
+    .card-price-note { font-size: 0.68rem; opacity: 0.60; text-align: right; }
 
-    .leg-row { font-size: 0.75rem; opacity: 0.82; margin-bottom: 0.2rem; }
+    .route { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem; }
+    .route-end { text-align: center; flex: none; }
+    .route-time { font-size: 1rem; font-weight: 600; }
+    .route-port { font-size: 0.7rem; opacity: 0.65; }
+    .route-mid { flex: 1; text-align: center; position: relative; }
+    .route-line { border-top: 1px solid rgba(28,26,21,0.30); position: relative; top: 0.05rem; }
+    .route-line::after {
+      content: "✈"; position: absolute; right: -2px; top: -0.72rem;
+      font-size: 0.8rem; color: var(--accent);
+    }
+    .route-meta { font-size: 0.68rem; opacity: 0.70; margin-top: 0.3rem; }
+
     .leg-label {
-      display: inline-block; width: 4.5rem;
-      text-transform: uppercase; letter-spacing: 0.06em;
-      font-size: 0.65rem; opacity: 0.65;
+      display: inline-block; font-size: 0.62rem; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.08em;
+      padding: 0.1rem 0.45rem; border-radius: 3px; margin-bottom: 0.35rem;
+      background: var(--info-bg); color: var(--info);
     }
-    .leg-detail { font-size: 0.7rem; opacity: 0.60; margin-left: 4.5rem; margin-bottom: 0.35rem; }
+    .leg-detail { font-size: 0.72rem; opacity: 0.68; margin: 0.15rem 0 0.4rem; }
 
-    .score-bar-track { height: 1px; background: rgba(0,0,0,0.12); margin: 0.5rem 0; }
-    .score-bar-fill { height: 1px; background: #000; transition: width 0.5s; }
-
-    .highlights { display: flex; flex-wrap: wrap; gap: 0.375rem; margin-bottom: 0.5rem; }
-    .highlight {
-      font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.05em;
-      border: 1px solid rgba(0,0,0,0.35); padding: 0.1rem 0.4rem;
+    .badges { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0.5rem 0 0.25rem; }
+    .badge {
+      font-size: 0.65rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
+      padding: 0.15rem 0.5rem; border-radius: 3px;
     }
-    .warning { font-size: 0.72rem; opacity: 0.75; margin-bottom: 0.15rem; }
+    .badge-direct { background: var(--good-bg); color: var(--good); }
+    .badge-cheap { background: var(--warn-bg); color: var(--warn); }
+    .badge-fast { background: var(--info-bg); color: var(--info); }
+    .badge-plain { background: rgba(28,26,21,0.07); color: var(--ink); }
+
+    .warning { font-size: 0.72rem; color: var(--warn); margin-top: 0.2rem; }
     .warning::before { content: "⚠ "; }
 
     .card-action {
-      display: block; width: 100%; text-align: center;
-      font-size: 0.75rem; padding: 0.5rem; margin-top: 0.5rem;
-      border: 1px solid #000; background: transparent; color: #000;
-      cursor: pointer; letter-spacing: 0.08em; text-transform: uppercase;
+      display: inline-block; margin-top: 0.6rem;
+      font-size: 0.72rem; font-weight: 600; padding: 0.45rem 1rem;
+      border: 1px solid var(--accent); border-radius: 4px;
+      background: transparent; color: var(--accent-dark);
+      cursor: pointer; letter-spacing: 0.05em; text-transform: uppercase;
       text-decoration: none; transition: background 0.15s, color 0.15s;
     }
-    .card-action:hover { background: #000; color: #fff; }
+    .card-action:hover { background: var(--accent); color: #fff; }
 
     .date-grid { display: flex; flex-wrap: wrap; gap: 0.5rem; }
     .date-cell {
-      border: 1px solid rgba(0,0,0,0.20);
-      padding: 0.5rem 0.75rem;
-      cursor: pointer;
-      background: transparent;
-      text-align: left;
-      transition: background 0.15s, color 0.15s;
+      border: 1px solid var(--line); background: var(--panel); border-radius: 5px;
+      padding: 0.5rem 0.75rem; cursor: pointer; text-align: left;
+      transition: all 0.15s;
     }
-    .date-cell:hover { background: #000; color: #fff; }
-    .date-cell.cheapest { border-color: #000; border-width: 2px; }
-    .date-cell .d { font-size: 0.75rem; display: block; }
-    .date-cell .p { font-size: 0.875rem; font-weight: 600; }
+    .date-cell:hover { border-color: var(--accent); box-shadow: 0 2px 8px rgba(177,71,31,0.12); }
+    .date-cell.cheapest { border-color: var(--good); background: var(--good-bg); }
+    .date-cell .d { font-size: 0.72rem; display: block; opacity: 0.75; }
+    .date-cell .p { font-size: 0.9rem; font-weight: 700; }
+    .date-cell.cheapest .p { color: var(--good); }
 
-    .input-area { border-top: 1px solid rgba(0,0,0,0.12); padding-top: 1.5rem; }
-    .input-row { display: flex; gap: 0.75rem; }
+    .input-area { border-top: 1px solid var(--line); padding-top: 1.25rem; }
+    .input-row { display: flex; gap: 0.75rem; align-items: flex-end; }
     .text-input {
-      flex: 1; font-size: 0.875rem;
-      border: none; border-bottom: 1px solid rgba(0,0,0,0.25);
-      outline: none; padding: 0.5rem 0;
-      background: transparent; color: #000;
+      flex: 1; font-size: 0.9rem; line-height: 1.5;
+      border: 1px solid var(--line); border-radius: 8px;
+      outline: none; padding: 0.65rem 0.9rem;
+      background: var(--panel); color: var(--ink);
+      resize: none; overflow-y: auto; max-height: 10rem; min-height: 2.9rem;
+      transition: border-color 0.15s;
     }
-    .text-input::placeholder { color: rgba(0,0,0,0.40); }
+    .text-input:focus { border-color: var(--accent); }
+    .text-input::placeholder { color: rgba(28,26,21,0.40); }
     .submit-btn {
-      font-size: 0.75rem; padding: 0.5rem 1.5rem;
-      border: 1px solid #000; background: transparent; color: #000;
+      font-size: 0.75rem; font-weight: 600; padding: 0.8rem 1.5rem;
+      border: none; border-radius: 8px;
+      background: var(--accent); color: #fff;
       cursor: pointer; letter-spacing: 0.08em; text-transform: uppercase;
-      transition: background 0.15s, color 0.15s;
+      transition: background 0.15s;
     }
-    .submit-btn:hover:not(:disabled) { background: #000; color: #fff; }
-    .submit-btn:disabled { opacity: 0.30; cursor: default; }
+    .submit-btn:hover:not(:disabled) { background: var(--accent-dark); }
+    .submit-btn:disabled { opacity: 0.35; cursor: default; }
+    .input-hint { margin-top: 0.5rem; font-size: 0.7rem; opacity: 0.55; }
 
-    .powered-by { margin-top: 1rem; font-size: 0.75rem; opacity: 0.60; }
-    .loading { font-size: 0.875rem; opacity: 0.60; }
+    .loading { display: flex; align-items: center; gap: 0.6rem; font-size: 0.85rem; opacity: 0.75; }
+    .loading-dot {
+      width: 0.5rem; height: 0.5rem; border-radius: 50%; background: var(--accent);
+      animation: pulse 1s ease-in-out infinite;
+    }
+    @keyframes pulse { 0%, 100% { opacity: 0.3; transform: scale(0.8); } 50% { opacity: 1; transform: scale(1.1); } }
 
-    .footer { text-align: center; margin-top: 4rem; font-size: 0.75rem; opacity: 0.60; }
+    .footer { text-align: center; margin-top: 3.5rem; font-size: 0.75rem; opacity: 0.60; }
     .footer a { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2px; }
-    .footer a:hover { opacity: 0.72; }
   </style>
 </head>
 <body>
   <div class="container" x-data="flightApp()">
     <div class="header">
-      <h1>Flight Search</h1>
-      <p>AI-powered · live Google Flights data</p>
+      <h1>Flight <em>Assistant</em></h1>
+      <p>Talk to Claude · live Google Flights data · real comparisons</p>
     </div>
+
+    <template x-if="!hasSearched">
+      <div>
+        <div class="capabilities">
+          <div class="cap">
+            <div class="cap-title"><span>↔</span>Compare strategies</div>
+            <div class="cap-body">"Fly out Wednesday night and stay over in FLL, or take the Thursday direct? Compare total prices."</div>
+          </div>
+          <div class="cap">
+            <div class="cap-title"><span>📅</span>Flexible dates</div>
+            <div class="cap-body">"Cheapest weekend to visit Chicago this fall" — get a price-by-date grid, click a date for real flights.</div>
+          </div>
+          <div class="cap">
+            <div class="cap-title"><span>✈</span>Real round-trip totals</div>
+            <div class="cap-body">Round trips are priced as complete itineraries — the number on the card is what you'd actually pay.</div>
+          </div>
+          <div class="cap">
+            <div class="cap-title"><span>💺</span>Picky is fine</div>
+            <div class="cap-body">Alliances, loyalty status, no budget carriers, arrive-by times, cabin class, price caps — just say it.</div>
+          </div>
+        </div>
+        <div class="chips">
+          <template x-for="(c, i) in exampleChips" :key="i">
+            <button class="chip" @click="search(c)" x-text="c"></button>
+          </template>
+        </div>
+      </div>
+    </template>
 
     <div class="messages">
       <template x-for="(msg, i) in messages" :key="i">
-        <div>
-          <div x-show="msg.role === 'system'" class="msg-system" x-text="msg.content"></div>
-
-          <div x-show="msg.role === 'user'" class="msg-user">
-            → <span x-text="msg.content"></span>
-          </div>
+        <div style="display:flex; flex-direction:column;">
+          <div x-show="msg.role === 'user'" class="msg-user" x-text="msg.content"></div>
 
           <div x-show="msg.role === 'assistant'" class="msg-assistant">
             <div class="msg-text" x-text="msg.content"></div>
 
-            <div x-show="msg.assumptions && msg.assumptions.length" class="assumptions">
-              <template x-for="(a, k) in (msg.assumptions || [])" :key="k">
-                <div x-text="'· ' + a"></div>
-              </template>
-            </div>
+            <template x-for="(sec, si) in (msg.sections || [])" :key="si">
+              <div>
+                <div class="section-label" x-text="sectionLabel(sec)"></div>
 
-            <!-- one-way flights -->
-            <template x-if="msg.type === 'flights' && msg.results && msg.results.length">
-            <div class="flight-list">
-              <template x-for="(f, j) in (msg.results || []).slice(0, 6)" :key="j">
-                <div class="flight-card">
-                  <div class="card-header">
-                    <div>
-                      <div class="card-airline" x-text="f.airline"></div>
-                      <div class="card-code" x-text="flightCodes(f)"></div>
-                    </div>
-                    <div>
-                      <div class="card-price" x-text="formatPrice(f.price, f.currency)"></div>
-                    </div>
+                <!-- one-way flights -->
+                <template x-if="sec.type === 'flights' && sec.results && sec.results.length">
+                  <div class="flight-list">
+                    <template x-for="(f, j) in sec.results.slice(0, 5)" :key="j">
+                      <div class="flight-card">
+                        <div class="card-header">
+                          <div class="airline-id">
+                            <div class="airline-avatar" :style="'background:' + airlineColor(f.airline_code)" x-text="f.airline_code"></div>
+                            <div>
+                              <div class="card-airline" x-text="f.airline"></div>
+                              <div class="card-code" x-text="flightCodes(f)"></div>
+                            </div>
+                          </div>
+                          <div>
+                            <div class="card-price" x-text="formatPrice(f.price, f.currency)"></div>
+                            <div class="card-price-note">one-way, per person</div>
+                          </div>
+                        </div>
+                        <div class="route">
+                          <div class="route-end">
+                            <div class="route-time" x-text="formatTime(f.legs[0].departure)"></div>
+                            <div class="route-port" x-text="f.legs[0].from"></div>
+                          </div>
+                          <div class="route-mid">
+                            <div class="route-line"></div>
+                            <div class="route-meta" x-text="formatDuration(f.duration) + ' · ' + stopsText(f.stops)"></div>
+                          </div>
+                          <div class="route-end">
+                            <div class="route-time" x-text="formatTime(f.legs[f.legs.length-1].arrival)"></div>
+                            <div class="route-port" x-text="f.legs[f.legs.length-1].to + arrivalDay(f)"></div>
+                          </div>
+                        </div>
+                        <template x-for="(lo, k) in (f.layovers || [])" :key="k">
+                          <div class="leg-detail" x-text="layoverText(lo)"></div>
+                        </template>
+                        <div class="leg-detail" x-show="f.legs[0].aircraft || f.legs[0].legroom"
+                             x-text="[f.legs[0].aircraft, f.legs[0].legroom ? f.legs[0].legroom + ' legroom' : null].filter(Boolean).join(' · ')"></div>
+                        <div class="badges" x-show="(f.highlights || []).length">
+                          <template x-for="(h, k) in f.highlights" :key="k">
+                            <span class="badge" :class="badgeClass(h)" x-text="h"></span>
+                          </template>
+                        </div>
+                        <template x-for="(w, k) in (f.warnings || [])" :key="'w'+k">
+                          <div class="warning" x-text="w"></div>
+                        </template>
+                        <a :href="f.booking_url" target="_blank" rel="noopener noreferrer" class="card-action">Book on Google Flights</a>
+                      </div>
+                    </template>
                   </div>
-                  <div class="leg-row" x-text="flightSummary(f)"></div>
-                  <template x-for="(lo, k) in (f.layovers || [])" :key="k">
-                    <div class="leg-detail" x-text="layoverText(lo)"></div>
-                  </template>
-                  <div class="leg-detail" x-show="f.legs && f.legs[0] && (f.legs[0].aircraft || f.legs[0].legroom)"
-                       x-text="[f.legs[0].aircraft, f.legs[0].legroom ? f.legs[0].legroom + ' legroom' : null].filter(Boolean).join(' · ')"></div>
-                  <div class="score-bar-track"><div class="score-bar-fill" :style="'width: ' + (f.score || 40) + '%'"></div></div>
-                  <div class="highlights" x-show="f.highlights && f.highlights.length">
-                    <template x-for="(h, k) in f.highlights" :key="k"><span class="highlight" x-text="h"></span></template>
-                  </div>
-                  <template x-for="(w, k) in (f.warnings || [])" :key="k"><div class="warning" x-text="w"></div></template>
-                  <a :href="f.booking_url" target="_blank" rel="noopener noreferrer" class="card-action">Book on Google Flights</a>
-                </div>
-              </template>
-            </div>
-            </template>
+                </template>
 
-            <!-- round-trip itineraries -->
-            <template x-if="msg.type === 'itineraries' && msg.results && msg.results.length">
-            <div class="flight-list">
-              <template x-for="(it, j) in (msg.results || []).slice(0, 6)" :key="j">
-                <div class="flight-card">
-                  <div class="card-header">
-                    <div>
-                      <div class="card-airline" x-text="it.outbound.airline + (it.return.airline !== it.outbound.airline ? ' + ' + it.return.airline : '')"></div>
-                      <div class="card-code">Round trip</div>
-                    </div>
-                    <div>
-                      <div class="card-price" x-text="formatPrice(it.total_price, it.currency)"></div>
-                      <div class="card-price-note">total, both directions</div>
-                    </div>
+                <!-- round-trip itineraries -->
+                <template x-if="sec.type === 'itineraries' && sec.results && sec.results.length">
+                  <div class="flight-list">
+                    <template x-for="(it, j) in sec.results.slice(0, 5)" :key="j">
+                      <div class="flight-card">
+                        <div class="card-header">
+                          <div class="airline-id">
+                            <div class="airline-avatar" :style="'background:' + airlineColor(it.outbound.airline_code)" x-text="it.outbound.airline_code"></div>
+                            <div>
+                              <div class="card-airline" x-text="it.outbound.airline + (it.return.airline !== it.outbound.airline ? ' + ' + it.return.airline : '')"></div>
+                              <div class="card-code">Round trip</div>
+                            </div>
+                          </div>
+                          <div>
+                            <div class="card-price" x-text="formatPrice(it.total_price, it.currency)"></div>
+                            <div class="card-price-note">total, both directions</div>
+                          </div>
+                        </div>
+                        <div>
+                          <span class="leg-label">Outbound</span>
+                          <div class="route">
+                            <div class="route-end">
+                              <div class="route-time" x-text="formatTime(it.outbound.legs[0].departure)"></div>
+                              <div class="route-port" x-text="it.outbound.legs[0].from"></div>
+                            </div>
+                            <div class="route-mid">
+                              <div class="route-line"></div>
+                              <div class="route-meta" x-text="formatDuration(it.outbound.duration) + ' · ' + stopsText(it.outbound.stops)"></div>
+                            </div>
+                            <div class="route-end">
+                              <div class="route-time" x-text="formatTime(it.outbound.legs[it.outbound.legs.length-1].arrival)"></div>
+                              <div class="route-port" x-text="it.outbound.legs[it.outbound.legs.length-1].to"></div>
+                            </div>
+                          </div>
+                          <template x-for="(lo, k) in (it.outbound.layovers || [])" :key="'o'+k">
+                            <div class="leg-detail" x-text="layoverText(lo)"></div>
+                          </template>
+                        </div>
+                        <div style="margin-top: 0.5rem;">
+                          <span class="leg-label" style="background: var(--warn-bg); color: var(--warn);">Return</span>
+                          <div class="route">
+                            <div class="route-end">
+                              <div class="route-time" x-text="formatTime(it.return.legs[0].departure)"></div>
+                              <div class="route-port" x-text="it.return.legs[0].from"></div>
+                            </div>
+                            <div class="route-mid">
+                              <div class="route-line"></div>
+                              <div class="route-meta" x-text="formatDuration(it.return.duration) + ' · ' + stopsText(it.return.stops)"></div>
+                            </div>
+                            <div class="route-end">
+                              <div class="route-time" x-text="formatTime(it.return.legs[it.return.legs.length-1].arrival)"></div>
+                              <div class="route-port" x-text="it.return.legs[it.return.legs.length-1].to"></div>
+                            </div>
+                          </div>
+                          <template x-for="(lo, k) in (it.return.layovers || [])" :key="'r'+k">
+                            <div class="leg-detail" x-text="layoverText(lo)"></div>
+                          </template>
+                        </div>
+                        <div class="badges" x-show="it.outbound.stops === 0 && it.return.stops === 0">
+                          <span class="badge badge-direct">Direct both ways</span>
+                        </div>
+                        <template x-for="(w, k) in (it.outbound.warnings || []).concat(it.return.warnings || [])" :key="'w'+k">
+                          <div class="warning" x-text="w"></div>
+                        </template>
+                        <a :href="it.booking_url" target="_blank" rel="noopener noreferrer" class="card-action">Book on Google Flights</a>
+                      </div>
+                    </template>
                   </div>
-                  <div class="leg-row"><span class="leg-label">Outbound</span><span x-text="flightSummary(it.outbound)"></span></div>
-                  <template x-for="(lo, k) in (it.outbound.layovers || [])" :key="'o'+k">
-                    <div class="leg-detail" x-text="layoverText(lo)"></div>
-                  </template>
-                  <div class="leg-row"><span class="leg-label">Return</span><span x-text="flightSummary(it.return)"></span></div>
-                  <template x-for="(lo, k) in (it.return.layovers || [])" :key="'r'+k">
-                    <div class="leg-detail" x-text="layoverText(lo)"></div>
-                  </template>
-                  <div class="score-bar-track"><div class="score-bar-fill" :style="'width: ' + (it.score || 40) + '%'"></div></div>
-                  <div class="highlights" x-show="itinHighlights(it).length">
-                    <template x-for="(h, k) in itinHighlights(it)" :key="k"><span class="highlight" x-text="h"></span></template>
-                  </div>
-                  <template x-for="(w, k) in (it.outbound.warnings || []).concat(it.return.warnings || [])" :key="'w'+k">
-                    <div class="warning" x-text="w"></div>
-                  </template>
-                  <a :href="it.booking_url" target="_blank" rel="noopener noreferrer" class="card-action">Book on Google Flights</a>
-                </div>
-              </template>
-            </div>
-            </template>
+                </template>
 
-            <!-- flexible-date price grid -->
-            <template x-if="msg.type === 'dates' && msg.dates && msg.dates.length">
-            <div class="date-grid">
-              <template x-for="(d, j) in (msg.dates || [])" :key="j">
-                <button class="date-cell" :class="d.cheapest ? 'cheapest' : ''" @click="pickDate(d)" :disabled="isLoading">
-                  <span class="d" x-text="formatDate(d.date) + (d.return_date ? ' → ' + formatDate(d.return_date) : '')"></span>
-                  <span class="p" x-text="formatPrice(d.price, d.currency)"></span>
-                </button>
-              </template>
-            </div>
+                <!-- flexible-date price grid -->
+                <template x-if="sec.type === 'dates' && sec.dates && sec.dates.length">
+                  <div class="date-grid">
+                    <template x-for="(d, j) in sec.dates" :key="j">
+                      <button class="date-cell" :class="d.cheapest ? 'cheapest' : ''" @click="pickDate(d)" :disabled="isLoading">
+                        <span class="d" x-text="formatDate(d.date) + (d.return_date ? ' → ' + formatDate(d.return_date) : '')"></span>
+                        <span class="p" x-text="formatPrice(d.price, d.currency)"></span>
+                      </button>
+                    </template>
+                  </div>
+                </template>
+
+                <div class="assumptions" x-show="(sec.assumptions || []).length"
+                     x-text="(sec.assumptions || []).map(a => '· ' + a).join('   ')"></div>
+              </div>
             </template>
           </div>
         </div>
       </template>
 
-      <div x-show="isLoading" class="loading">Searching live fares…</div>
+      <div x-show="isLoading" class="loading">
+        <div class="loading-dot"></div>
+        <span x-text="loadingText"></span>
+      </div>
       <div x-ref="bottom"></div>
     </div>
 
     <div class="input-area">
       <form @submit.prevent="search()">
         <div class="input-row">
-          <input
-            type="text"
+          <textarea
+            x-ref="box"
+            rows="1"
             class="text-input"
             x-model="input"
-            placeholder="Try: cheapest weekend in New York to Paris this fall, business class"
+            @input="autosize()"
+            @keydown.enter="onEnter($event)"
+            placeholder="Ask anything — routes, dates, comparisons, budgets…"
             :disabled="isLoading"
-          />
-          <button type="submit" class="submit-btn" :disabled="isLoading || !input.trim()">Search</button>
+          ></textarea>
+          <button type="submit" class="submit-btn" :disabled="isLoading || !input.trim()">Send</button>
         </div>
       </form>
-      <div class="powered-by">Powered by Google Flights + Claude</div>
+      <div class="input-hint">Enter to send · Shift+Enter for a new line · Powered by Google Flights + Claude</div>
     </div>
 
     <div class="footer">
@@ -269,16 +421,53 @@
       return {
         messages: [
           {
-            role: 'system',
-            content: "Describe any trip — vague is fine.\n\n• \"JFK to London March 21, direct, SkyTeam preferred\"\n• \"NYC to Tokyo round trip, a week in mid-October, business\"\n• \"Cheapest weekend to visit Chicago this fall\"\n• \"Boston to Lisbon, 2 adults, no budget airlines, under $600\""
+            role: 'assistant',
+            content: "Hi — I'm your flight assistant. Describe any trip, however vague, and I'll pull live Google Flights data to figure it out. Ask me to compare options and I'll run the numbers.",
+            sections: [],
           }
+        ],
+        exampleChips: [
+          "JFK to London in March, direct, SkyTeam preferred",
+          "NYC to Tokyo round trip, a week in mid-October, business",
+          "Cheapest weekend to visit Chicago this fall",
+          "Boston to Lisbon, 2 adults, no budget airlines, under $600",
         ],
         input: '',
         isLoading: false,
+        hasSearched: false,
         history: [],
+        loadingText: 'Thinking…',
+        loadingTimer: null,
 
         scrollToBottom() {
           this.$nextTick(() => { this.$refs.bottom?.scrollIntoView({ behavior: 'smooth' }); });
+        },
+
+        autosize() {
+          const el = this.$refs.box;
+          if (!el) return;
+          el.style.height = 'auto';
+          el.style.height = Math.min(el.scrollHeight, 160) + 'px';
+        },
+
+        onEnter(e) {
+          if (e.shiftKey) return; // allow newline
+          e.preventDefault();
+          this.search();
+        },
+
+        startLoadingCycle() {
+          const phases = ['Thinking…', 'Searching live fares…', 'Comparing options…', 'Still working — big searches take a moment…'];
+          let i = 0;
+          this.loadingText = phases[0];
+          this.loadingTimer = setInterval(() => {
+            i = Math.min(i + 1, phases.length - 1);
+            this.loadingText = phases[i];
+          }, 6000);
+        },
+
+        stopLoadingCycle() {
+          clearInterval(this.loadingTimer);
         },
 
         async search(queryOverride) {
@@ -286,8 +475,11 @@
           if (!q || this.isLoading) return;
 
           this.input = '';
+          this.$nextTick(() => this.autosize());
+          this.hasSearched = true;
           this.messages.push({ role: 'user', content: q });
           this.isLoading = true;
+          this.startLoadingCycle();
           this.scrollToBottom();
 
           try {
@@ -300,70 +492,68 @@
             if (data.error) throw new Error(data.error);
 
             this.history.push({ role: 'user', content: q });
-            if (data.type === 'clarify') {
-              this.history.push({ role: 'assistant', content: data.message });
-            }
-            // keep history short: last 3 exchanges
-            this.history = this.history.slice(-6);
+            this.history.push({ role: 'assistant', content: data.message });
+            this.history = this.history.slice(-12);
 
-            if (data.type === 'comparison') {
-              this.messages.push({ role: 'assistant', content: data.message, type: 'clarify' });
-              (data.sections || []).forEach(sec => {
-                this.messages.push({
-                  role: 'assistant',
-                  content: sec.message,
-                  type: sec.type,
-                  results: sec.results,
-                  dates: sec.dates,
-                  assumptions: sec.assumptions,
-                });
-              });
-            } else {
-              this.messages.push({
-                role: 'assistant',
-                content: data.message,
-                type: data.type,
-                results: data.results,
-                dates: data.dates,
-                assumptions: data.assumptions,
-              });
-            }
+            this.messages.push({
+              role: 'assistant',
+              content: data.message,
+              sections: data.sections || [],
+            });
           } catch (err) {
-            this.messages.push({ role: 'assistant', content: `Error: ${err.message}` });
+            this.messages.push({ role: 'assistant', content: `Something went wrong: ${err.message}. Try again in a moment.`, sections: [] });
           } finally {
             this.isLoading = false;
+            this.stopLoadingCycle();
             this.scrollToBottom();
           }
         },
 
         pickDate(d) {
-          let q = `Same search, departing ${d.date}`;
-          if (d.return_date) q += ` and returning ${d.return_date}`;
+          let q = `Show me the flights for ${d.date}`;
+          if (d.return_date) q += `, returning ${d.return_date}`;
           this.search(q);
+        },
+
+        sectionLabel(sec) {
+          const msg = sec.message || '';
+          return msg.split('\n')[0];
+        },
+
+        airlineColor(code) {
+          const palette = ['#0f4c5c', '#b1471f', '#5b21b6', '#166534', '#92400e', '#1e3a8a', '#9d174d', '#374151'];
+          let h = 0;
+          for (const ch of (code || '??')) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+          return palette[h % palette.length];
+        },
+
+        badgeClass(h) {
+          const t = (h || '').toLowerCase();
+          if (t.includes('direct')) return 'badge-direct';
+          if (t.includes('cheap')) return 'badge-cheap';
+          if (t.includes('fast') || t.includes('quick')) return 'badge-fast';
+          return 'badge-plain';
         },
 
         flightCodes(f) {
           return (f.legs || []).map(l => l.airline_code + ' ' + l.flight_number).join(' · ');
         },
 
-        flightSummary(f) {
+        stopsText(stops) {
+          return stops === 0 ? 'Direct' : stops + ' stop' + (stops > 1 ? 's' : '');
+        },
+
+        arrivalDay(f) {
           const legs = f.legs || [];
           if (!legs.length) return '';
-          const first = legs[0], last = legs[legs.length - 1];
-          const dep = this.formatTime(first.departure), arr = this.formatTime(last.arrival);
-          const route = first.from + ' → ' + last.to;
-          const stops = f.stops === 0 ? 'Direct' : f.stops + ' stop' + (f.stops > 1 ? 's' : '');
-          return `${route} · ${dep} → ${arr} · ${this.formatDuration(f.duration)} · ${stops}`;
+          const dep = (legs[0].departure || '').slice(0, 10);
+          const arr = (legs[legs.length - 1].arrival || '').slice(0, 10);
+          return dep && arr && dep !== arr ? ' +1' : '';
         },
 
         layoverText(lo) {
-          return `Layover: ${lo.duration ? Math.floor(lo.duration / 60) + 'h ' + (lo.duration % 60) + 'm' : ''} in ${lo.city || lo.airport} (${lo.airport})`;
-        },
-
-        itinHighlights(it) {
-          const h = [];
-          if (it.outbound.stops === 0 && it.return.stops === 0) h.push('Direct both ways');
-          return h.concat(it.outbound.highlights || []);
+          const dur = lo.duration ? Math.floor(lo.duration / 60) + 'h ' + (lo.duration % 60) + 'm' : '';
+          return `Layover: ${dur} in ${lo.city || lo.airport} (${lo.airport})`;
         },
 
         formatPrice(p, currency) {
@@ -389,7 +579,7 @@
         },
 
         formatDuration(mins) {
-          if (!mins) return 'N/A';
+          if (!mins) return '';
           return `${Math.floor(mins / 60)}h ${mins % 60}m`;
         },
       };

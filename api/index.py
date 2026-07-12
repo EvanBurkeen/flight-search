@@ -1,3 +1,4 @@
+import json
 import os
 import time
 from datetime import datetime
@@ -50,9 +51,11 @@ SORT_MAP = {
 SEARCH_TOOL = {
     "name": "search_flights",
     "description": (
-        "Run a flight search once the query contains (or you can reasonably infer) an origin, "
-        "a destination, and a date or date range. Prefer making sensible assumptions and "
-        "recording them over asking the user to clarify."
+        "Search live Google Flights data. Call this whenever the user needs prices, schedules, "
+        "or availability — never state a price or flight time you did not get from this tool. "
+        "You can call it several times in one turn to compare options (different dates, routings, "
+        "or a self-arranged stopover, one call per leg). Results are also shown to the user as "
+        "cards, so reference them rather than repeating every detail."
     ),
     "input_schema": {
         "type": "object",
@@ -164,62 +167,129 @@ SEARCH_TOOL = {
     },
 }
 
-CLARIFY_TOOL = {
-    "name": "clarify",
-    "description": (
-        "Use ONLY when the query is missing something you cannot reasonably assume: "
-        "no origin, no destination, or no date information whatsoever. Ask one concise question."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "question": {"type": "string"},
-        },
-        "required": ["question"],
-    },
-}
-
-
-def parse_query(query: str, history: list | None = None) -> dict:
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+def assistant_system_prompt() -> str:
     today = datetime.now().strftime("%A, %B %d, %Y")
+    return f"""You are the flight assistant on Evan's flight search site, backed by live Google Flights data via the search_flights tool. Today is {today}.
 
-    system_prompt = f"""You are the query parser for a flight search engine backed by live Google Flights data.
-Today is {today}. All dates you output must be in the future; a month/day with no year means the nearest future occurrence.
+You are a travel-savvy assistant, not a form. Converse naturally, but ground every price, time, and availability claim in a search_flights result from this conversation — never invent or recall fares.
 
-Turn the user's natural-language request into search_flights calls. The user may be vague — that is fine:
-- Cities or regions become lists of major airport codes.
-- "next weekend", "mid September", "sometime this fall", "cheapest time to go" -> use flexible_dates with a sensible window.
-- Loyalty or alliance hints map to airline/alliance filters.
-- "cheap"/"budget" -> sort cheapest; "quickest"/"shortest" -> sort fastest; otherwise best.
-- "arrive by / be there by X" is an ARRIVAL constraint -> arrival_time, never departure_time.
-- Record every leap of inference in assumptions so the user can correct you.
+How to handle requests:
+- Vague is fine. Expand cities to their major airports (NYC -> JFK/LGA/EWR). "mid September" or "cheapest time to go" -> flexible_dates. Loyalty hints -> airline filters. A bare month/day means the nearest future date.
+- "arrive by / be there by X" is an ARRIVAL constraint (arrival_time), never a departure cap.
+- Comparisons: run one search per option (at most 4 per turn). A self-arranged overnight stopover = one search per leg with the correct date on each. Give each search a summary naming the option ("Option A: Thursday nonstop").
+- Make reasonable assumptions and state them briefly instead of interrogating the user; ask a question only when origin or destination is truly unknowable.
 
-COMPARISONS: when the user asks to compare strategies (different routings, dates, or a
-self-arranged overnight stopover vs a same-day trip), emit MULTIPLE search_flights calls in
-the same response — one per option, at most 4 — each with a summary that names the option
-("Option A: nonstop Thursday", "Option B leg 1: ORF->FLL Wednesday evening"). A self-arranged
-stopover plan needs one call per leg, with the correct date on each leg.
+Answering:
+- The user sees result cards for every search you run, so don't recite every flight. Lead with your recommendation and the key numbers (totals for multi-leg plans, including a note that hotels/ground costs aren't included), then the trade-offs that matter.
+- Mention real caveats from the data: nothing arrives before X, prices are one-way vs round-trip totals, self-transfer risks, tight or overnight layovers.
+- If a search fails or is rate-limited, say so plainly and suggest trying again in a moment.
+- Keep responses short and conversational — a few sentences, not a report."""
 
-Only use clarify when origin or destination is truly unknowable from the query."""
 
-    messages = list(history or [])
+def compact_for_model(payload: dict) -> str:
+    """Condensed search result for Claude's context — the user sees full cards."""
+    kind = payload.get("type")
+    if kind == "dates":
+        dates = payload.get("dates") or []
+        cheapest = sorted(dates, key=lambda d: d["price"])[:10]
+        return json.dumps({
+            "kind": "date_prices",
+            "note": payload.get("message"),
+            "count": len(dates),
+            "cheapest_dates": cheapest,
+        })
+    if kind == "itineraries":
+        rows = [
+            {
+                "total_price": it["total_price"], "currency": it["currency"],
+                "outbound": _leg_summary(it["outbound"]),
+                "return": _leg_summary(it["return"]),
+            }
+            for it in (payload.get("results") or [])[:6]
+        ]
+        return json.dumps({"kind": "round_trips", "note": payload.get("message"), "options": rows})
+    rows = [_leg_summary(f) for f in (payload.get("results") or [])[:6]]
+    return json.dumps({"kind": "flights", "note": payload.get("message"), "options": rows})
+
+
+def _leg_summary(f: dict) -> dict:
+    legs = f.get("legs") or []
+    return {
+        "airline": f.get("airline"),
+        "price": f.get("price"),
+        "currency": f.get("currency"),
+        "depart": legs[0]["departure"] if legs else None,
+        "arrive": legs[-1]["arrival"] if legs else None,
+        "duration_min": f.get("duration"),
+        "stops": f.get("stops"),
+        "via": [lo["airport"] for lo in (f.get("layovers") or [])],
+        "warnings": f.get("warnings") or [],
+    }
+
+
+def run_assistant(query: str, history: list | None) -> dict:
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    messages = [
+        {"role": m["role"], "content": m["content"]}
+        for m in (history or [])[-12:]
+        if m.get("role") in ("user", "assistant") and m.get("content")
+    ]
     messages.append({"role": "user", "content": query})
 
-    response = client.messages.create(
-        model="claude-opus-4-8",
-        max_tokens=2000,
-        system=system_prompt,
-        tools=[SEARCH_TOOL, CLARIFY_TOOL],
-        tool_choice={"type": "any"},
-        messages=messages,
-    )
+    sections: list[dict] = []
+    searches_used = 0
 
-    return [
-        {"tool": b.name, "input": b.input}
-        for b in response.content
-        if b.type == "tool_use"
-    ]
+    for _ in range(3):  # at most 3 tool rounds per turn
+        response = client.messages.create(
+            model="claude-opus-4-8",
+            max_tokens=4000,
+            output_config={"effort": "medium"},
+            system=assistant_system_prompt(),
+            tools=[SEARCH_TOOL],
+            messages=messages,
+        )
+
+        tool_uses = [b for b in response.content if b.type == "tool_use"]
+        if response.stop_reason != "tool_use" or not tool_uses:
+            text = "\n".join(b.text for b in response.content if b.type == "text").strip()
+            return {"message": text or "…", "sections": sections}
+
+        messages.append({"role": "assistant", "content": response.content})
+        tool_results = []
+        for tu in tool_uses:
+            if searches_used >= 5:
+                tool_results.append({
+                    "type": "tool_result", "tool_use_id": tu.id,
+                    "content": "Search budget for this turn exhausted; answer with what you have.",
+                    "is_error": True,
+                })
+                continue
+            searches_used += 1
+            try:
+                payload = execute_spec(tu.input)
+                sections.append(payload)
+                tool_results.append({
+                    "type": "tool_result", "tool_use_id": tu.id,
+                    "content": compact_for_model(payload),
+                })
+            except SearchHTTPError as e:
+                detail = "Google Flights is rate-limiting right now (HTTP 429)." if e.status_code == 429 \
+                    else f"Google Flights returned HTTP {e.status_code}."
+                tool_results.append({
+                    "type": "tool_result", "tool_use_id": tu.id,
+                    "content": detail, "is_error": True,
+                })
+            except SearchClientError:
+                tool_results.append({
+                    "type": "tool_result", "tool_use_id": tu.id,
+                    "content": "Couldn't reach Google Flights for this search.", "is_error": True,
+                })
+        messages.append({"role": "user", "content": tool_results})
+
+    return {
+        "message": "That took more searching than one turn allows — here's what I found so far. Ask me to continue if you need more.",
+        "sections": sections,
+    }
 
 
 def resolve_airports(codes: list[str]) -> tuple[list, list[str]]:
@@ -585,35 +655,12 @@ async def search(request: Request):
         if not query:
             return JSONResponse({"error": "Query is required"}, status_code=400)
 
-        calls = parse_query(query, body.get("history"))
-        searches = [c["input"] for c in calls if c["tool"] == "search_flights"]
-
-        if not searches:
-            clarify = next((c for c in calls if c["tool"] == "clarify"), None)
-            question = clarify["input"]["question"] if clarify else "Could you tell me where you're flying from and to?"
-            return JSONResponse({"type": "clarify", "message": question, "results": []})
-
-        if len(searches) == 1:
-            return JSONResponse(execute_spec(searches[0]))
-
-        sections = [execute_spec(s) for s in searches[:4]]
+        result = run_assistant(query, body.get("history"))
         return JSONResponse({
-            "type": "comparison",
-            "message": f"Comparing {len(sections)} options:",
-            "sections": sections,
+            "type": "assistant",
+            "message": result["message"],
+            "sections": result["sections"],
         })
 
-    except SearchHTTPError as e:
-        if e.status_code == 429:
-            msg = "Google Flights is rate-limiting searches right now. Give it 20-30 seconds and try again — your query is fine."
-        else:
-            msg = "Google Flights returned an error for that search. Try again in a moment or rephrase slightly."
-        return JSONResponse({"type": "clarify", "message": msg, "results": []})
-    except SearchClientError:
-        return JSONResponse({
-            "type": "clarify",
-            "message": "Couldn't reach Google Flights just now. Try again in a few seconds.",
-            "results": [],
-        })
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
