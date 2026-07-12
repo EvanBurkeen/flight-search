@@ -41,29 +41,20 @@
     .msg-assistant { display: flex; flex-direction: column; gap: 1rem; }
     .msg-text { font-size: 0.875rem; line-height: 1.6; white-space: pre-line; opacity: 0.90; }
 
-    .outbound-summary {
-      padding: 1rem;
-      border: 1px solid rgba(0,0,0,0.20);
-      background: rgba(0,0,0,0.03);
-      margin-bottom: 0.5rem;
-    }
-    .outbound-label {
+    .assumptions {
       font-size: 0.75rem;
       opacity: 0.60;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-      margin-bottom: 0.25rem;
+      border-left: 2px solid rgba(0,0,0,0.25);
+      padding-left: 0.75rem;
+      display: flex; flex-direction: column; gap: 0.125rem;
     }
-    .outbound-airline { font-size: 0.875rem; font-weight: 500; }
-    .outbound-detail { font-size: 0.75rem; opacity: 0.72; }
 
-    .flight-list { display: flex; flex-direction: column; gap: 0.5rem; margin-top: 1.5rem; }
+    .flight-list { display: flex; flex-direction: column; gap: 0.5rem; }
 
     .flight-card {
       border: 1px solid rgba(0,0,0,0.12);
       padding: 1rem;
       transition: opacity 0.15s;
-      cursor: default;
     }
     .flight-card:hover { opacity: 0.92; }
 
@@ -71,66 +62,63 @@
     .card-airline { font-size: 0.875rem; font-weight: 500; margin-bottom: 0.125rem; }
     .card-code { font-size: 0.75rem; opacity: 0.60; }
     .card-price { font-size: 1.25rem; font-weight: 400; text-align: right; }
-    .card-cabin { font-size: 0.75rem; opacity: 0.60; text-align: right; }
+    .card-price-note { font-size: 0.7rem; opacity: 0.60; text-align: right; }
 
-    .card-details { font-size: 0.75rem; opacity: 0.78; margin-bottom: 0.5rem; }
-    .card-aircraft { font-size: 0.75rem; opacity: 0.72; margin-top: 0.125rem; }
+    .leg-row { font-size: 0.75rem; opacity: 0.82; margin-bottom: 0.2rem; }
+    .leg-label {
+      display: inline-block; width: 4.5rem;
+      text-transform: uppercase; letter-spacing: 0.06em;
+      font-size: 0.65rem; opacity: 0.65;
+    }
+    .leg-detail { font-size: 0.7rem; opacity: 0.60; margin-left: 4.5rem; margin-bottom: 0.35rem; }
 
-    .score-bar-track { height: 1px; background: rgba(0,0,0,0.12); margin-bottom: 0.5rem; }
+    .score-bar-track { height: 1px; background: rgba(0,0,0,0.12); margin: 0.5rem 0; }
     .score-bar-fill { height: 1px; background: #000; transition: width 0.5s; }
 
-    .highlights { display: flex; flex-direction: column; gap: 0.125rem; margin-bottom: 0.5rem; }
-    .highlight { font-size: 0.75rem; opacity: 0.72; }
-
-    .card-extras {
-      border-top: 1px solid rgba(0,0,0,0.08);
-      padding-top: 0.5rem;
-      margin-bottom: 0.5rem;
-      display: flex; flex-direction: column; gap: 0.125rem;
+    .highlights { display: flex; flex-wrap: wrap; gap: 0.375rem; margin-bottom: 0.5rem; }
+    .highlight {
+      font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.05em;
+      border: 1px solid rgba(0,0,0,0.35); padding: 0.1rem 0.4rem;
     }
-    .card-extra { font-size: 0.75rem; opacity: 0.72; }
+    .warning { font-size: 0.72rem; opacity: 0.75; margin-bottom: 0.15rem; }
+    .warning::before { content: "⚠ "; }
 
     .card-action {
-      display: block;
-      width: 100%;
-      text-align: center;
-      font-size: 0.75rem;
-      padding: 0.5rem;
-      border: 1px solid #000;
-      background: transparent;
-      color: #000;
-      cursor: pointer;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      text-decoration: none;
-      transition: background 0.15s, color 0.15s;
+      display: block; width: 100%; text-align: center;
+      font-size: 0.75rem; padding: 0.5rem; margin-top: 0.5rem;
+      border: 1px solid #000; background: transparent; color: #000;
+      cursor: pointer; letter-spacing: 0.08em; text-transform: uppercase;
+      text-decoration: none; transition: background 0.15s, color 0.15s;
     }
     .card-action:hover { background: #000; color: #fff; }
-    .card-action:disabled { opacity: 0.30; cursor: default; }
-    .card-action:disabled:hover { background: transparent; color: #000; }
+
+    .date-grid { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+    .date-cell {
+      border: 1px solid rgba(0,0,0,0.20);
+      padding: 0.5rem 0.75rem;
+      cursor: pointer;
+      background: transparent;
+      text-align: left;
+      transition: background 0.15s, color 0.15s;
+    }
+    .date-cell:hover { background: #000; color: #fff; }
+    .date-cell.cheapest { border-color: #000; border-width: 2px; }
+    .date-cell .d { font-size: 0.75rem; display: block; }
+    .date-cell .p { font-size: 0.875rem; font-weight: 600; }
 
     .input-area { border-top: 1px solid rgba(0,0,0,0.12); padding-top: 1.5rem; }
     .input-row { display: flex; gap: 0.75rem; }
     .text-input {
-      flex: 1;
-      font-size: 0.875rem;
-      border: none;
-      border-bottom: 1px solid rgba(0,0,0,0.25);
-      outline: none;
-      padding: 0.5rem 0;
-      background: transparent;
-      color: #000;
+      flex: 1; font-size: 0.875rem;
+      border: none; border-bottom: 1px solid rgba(0,0,0,0.25);
+      outline: none; padding: 0.5rem 0;
+      background: transparent; color: #000;
     }
     .text-input::placeholder { color: rgba(0,0,0,0.40); }
     .submit-btn {
-      font-size: 0.75rem;
-      padding: 0.5rem 1.5rem;
-      border: 1px solid #000;
-      background: transparent;
-      color: #000;
-      cursor: pointer;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
+      font-size: 0.75rem; padding: 0.5rem 1.5rem;
+      border: 1px solid #000; background: transparent; color: #000;
+      cursor: pointer; letter-spacing: 0.08em; text-transform: uppercase;
       transition: background 0.15s, color 0.15s;
     }
     .submit-btn:hover:not(:disabled) { background: #000; color: #fff; }
@@ -148,7 +136,7 @@
   <div class="container" x-data="flightApp()">
     <div class="header">
       <h1>Flight Search</h1>
-      <p>AI-powered</p>
+      <p>AI-powered · live Google Flights data</p>
     </div>
 
     <div class="messages">
@@ -163,85 +151,112 @@
           <div x-show="msg.role === 'assistant'" class="msg-assistant">
             <div class="msg-text" x-text="msg.content"></div>
 
-            <div x-show="msg.isReturn && msg.selectedOutbound" class="outbound-summary">
-              <div class="outbound-label">Selected Outbound</div>
-              <div class="outbound-airline" x-text="msg.selectedOutbound ? msg.selectedOutbound.airline + ' (' + msg.selectedOutbound.airline_code + ') · ' + formatPrice(msg.selectedOutbound.price) : ''"></div>
-              <div class="outbound-detail" x-text="msg.selectedOutbound ? formatTime(msg.selectedOutbound.departure_time) + ' → ' + formatTime(msg.selectedOutbound.arrival_time) + ' · ' + (msg.selectedOutbound.stops === 0 ? 'Direct' : msg.selectedOutbound.stops + ' stop(s)') : ''"></div>
+            <div x-show="msg.assumptions && msg.assumptions.length" class="assumptions">
+              <template x-for="(a, k) in (msg.assumptions || [])" :key="k">
+                <div x-text="'· ' + a"></div>
+              </template>
             </div>
 
-            <div x-show="msg.results && msg.results.length > 0" class="flight-list">
-              <template x-for="(flight, j) in (msg.results || []).slice(0, 5)" :key="j">
+            <!-- one-way flights -->
+            <template x-if="msg.type === 'flights' && msg.results && msg.results.length">
+            <div class="flight-list">
+              <template x-for="(f, j) in (msg.results || []).slice(0, 6)" :key="j">
                 <div class="flight-card">
                   <div class="card-header">
                     <div>
-                      <div class="card-airline" x-text="flight.airline"></div>
-                      <div class="card-code" x-text="flight.airline_code + ' · ' + flight.alliance"></div>
+                      <div class="card-airline" x-text="f.airline"></div>
+                      <div class="card-code" x-text="flightCodes(f)"></div>
                     </div>
                     <div>
-                      <div class="card-price" x-text="formatPrice(flight.price)"></div>
-                      <div class="card-cabin" x-text="flight.cabin_class.replace('_', ' ')"></div>
+                      <div class="card-price" x-text="formatPrice(f.price, f.currency)"></div>
                     </div>
                   </div>
-
-                  <div class="card-details">
-                    <div x-text="formatTime(flight.departure_time) + ' → ' + formatTime(flight.arrival_time) + ' · ' + formatDuration(flight.duration) + ' · ' + (flight.stops === 0 ? 'Direct' : flight.stops + ' stop' + (flight.stops > 1 ? 's' : ''))"></div>
-                    <div class="card-aircraft" x-show="flight.aircraft && flight.aircraft !== 'N/A'" x-text="flight.aircraft"></div>
-                  </div>
-
-                  <div class="score-bar-track">
-                    <div class="score-bar-fill" :style="'width: ' + flight.score + '%'"></div>
-                  </div>
-
-                  <div x-show="flight.highlights && flight.highlights.length > 0" class="highlights">
-                    <template x-for="(h, k) in flight.highlights" :key="k">
-                      <div class="highlight" x-text="h"></div>
-                    </template>
-                  </div>
-
-                  <div x-show="flight.details && (flight.details.refundable || flight.details.carry_on || flight.details.checked_bags)" class="card-extras">
-                    <div x-show="flight.details && flight.details.refundable" class="card-extra" x-text="flight.details ? flight.details.refundable : ''"></div>
-                    <div x-show="flight.details && flight.details.carry_on" class="card-extra" x-text="'Carry-on: ' + (flight.details ? flight.details.carry_on : '')"></div>
-                    <div x-show="flight.details && flight.details.checked_bags" class="card-extra" x-text="'Checked bag: ' + (flight.details ? flight.details.checked_bags : '')"></div>
-                  </div>
-
-                  <template x-if="msg.isOutbound">
-                    <button class="card-action" @click="selectOutbound(flight)" :disabled="isLoading">Select Outbound</button>
+                  <div class="leg-row" x-text="flightSummary(f)"></div>
+                  <template x-for="(lo, k) in (f.layovers || [])" :key="k">
+                    <div class="leg-detail" x-text="layoverText(lo)"></div>
                   </template>
-                  <template x-if="msg.isReturn && msg.selectedOutbound">
-                    <a :href="flight.booking_url" target="_blank" rel="noopener noreferrer" class="card-action">
-                      Book Round Trip · <span x-text="formatPrice((msg.selectedOutbound ? msg.selectedOutbound.price : 0) + flight.price)"></span>
-                    </a>
-                  </template>
-                  <template x-if="!msg.isOutbound && !msg.isReturn">
-                    <a :href="flight.booking_url" target="_blank" rel="noopener noreferrer" class="card-action">
-                      Book on <span x-text="flight.airline_code"></span>
-                    </a>
-                  </template>
+                  <div class="leg-detail" x-show="f.legs && f.legs[0] && (f.legs[0].aircraft || f.legs[0].legroom)"
+                       x-text="[f.legs[0].aircraft, f.legs[0].legroom ? f.legs[0].legroom + ' legroom' : null].filter(Boolean).join(' · ')"></div>
+                  <div class="score-bar-track"><div class="score-bar-fill" :style="'width: ' + (f.score || 40) + '%'"></div></div>
+                  <div class="highlights" x-show="f.highlights && f.highlights.length">
+                    <template x-for="(h, k) in f.highlights" :key="k"><span class="highlight" x-text="h"></span></template>
+                  </div>
+                  <template x-for="(w, k) in (f.warnings || [])" :key="k"><div class="warning" x-text="w"></div></template>
+                  <a :href="f.booking_url" target="_blank" rel="noopener noreferrer" class="card-action">Book on Google Flights</a>
                 </div>
               </template>
             </div>
+            </template>
+
+            <!-- round-trip itineraries -->
+            <template x-if="msg.type === 'itineraries' && msg.results && msg.results.length">
+            <div class="flight-list">
+              <template x-for="(it, j) in (msg.results || []).slice(0, 6)" :key="j">
+                <div class="flight-card">
+                  <div class="card-header">
+                    <div>
+                      <div class="card-airline" x-text="it.outbound.airline + (it.return.airline !== it.outbound.airline ? ' + ' + it.return.airline : '')"></div>
+                      <div class="card-code">Round trip</div>
+                    </div>
+                    <div>
+                      <div class="card-price" x-text="formatPrice(it.total_price, it.currency)"></div>
+                      <div class="card-price-note">total, both directions</div>
+                    </div>
+                  </div>
+                  <div class="leg-row"><span class="leg-label">Outbound</span><span x-text="flightSummary(it.outbound)"></span></div>
+                  <template x-for="(lo, k) in (it.outbound.layovers || [])" :key="'o'+k">
+                    <div class="leg-detail" x-text="layoverText(lo)"></div>
+                  </template>
+                  <div class="leg-row"><span class="leg-label">Return</span><span x-text="flightSummary(it.return)"></span></div>
+                  <template x-for="(lo, k) in (it.return.layovers || [])" :key="'r'+k">
+                    <div class="leg-detail" x-text="layoverText(lo)"></div>
+                  </template>
+                  <div class="score-bar-track"><div class="score-bar-fill" :style="'width: ' + (it.score || 40) + '%'"></div></div>
+                  <div class="highlights" x-show="itinHighlights(it).length">
+                    <template x-for="(h, k) in itinHighlights(it)" :key="k"><span class="highlight" x-text="h"></span></template>
+                  </div>
+                  <template x-for="(w, k) in (it.outbound.warnings || []).concat(it.return.warnings || [])" :key="'w'+k">
+                    <div class="warning" x-text="w"></div>
+                  </template>
+                  <a :href="it.booking_url" target="_blank" rel="noopener noreferrer" class="card-action">Book on Google Flights</a>
+                </div>
+              </template>
+            </div>
+            </template>
+
+            <!-- flexible-date price grid -->
+            <template x-if="msg.type === 'dates' && msg.dates && msg.dates.length">
+            <div class="date-grid">
+              <template x-for="(d, j) in (msg.dates || [])" :key="j">
+                <button class="date-cell" :class="d.cheapest ? 'cheapest' : ''" @click="pickDate(d)" :disabled="isLoading">
+                  <span class="d" x-text="formatDate(d.date) + (d.return_date ? ' → ' + formatDate(d.return_date) : '')"></span>
+                  <span class="p" x-text="formatPrice(d.price, d.currency)"></span>
+                </button>
+              </template>
+            </div>
+            </template>
           </div>
         </div>
       </template>
 
-      <div x-show="isLoading" class="loading">Searching...</div>
+      <div x-show="isLoading" class="loading">Searching live fares…</div>
       <div x-ref="bottom"></div>
     </div>
 
     <div class="input-area">
-      <form @submit.prevent="search">
+      <form @submit.prevent="search()">
         <div class="input-row">
           <input
             type="text"
             class="text-input"
             x-model="input"
-            placeholder="Describe your flight..."
+            placeholder="Try: cheapest weekend in New York to Paris this fall, business class"
             :disabled="isLoading"
           />
           <button type="submit" class="submit-btn" :disabled="isLoading || !input.trim()">Search</button>
         </div>
       </form>
-      <div class="powered-by">Powered by Google Flights + Claude AI</div>
+      <div class="powered-by">Powered by Google Flights + Claude</div>
     </div>
 
     <div class="footer">
@@ -255,27 +270,22 @@
         messages: [
           {
             role: 'system',
-            content: "I'm your flight assistant. Natural language works—just describe what you need.\n\nExamples:\n• \"JFK to London March 21st, direct if possible\"\n• \"Miami round trip Feb 5-8, no budget airlines\"\n• \"San Francisco next week, I have Delta status\""
+            content: "Describe any trip — vague is fine.\n\n• \"JFK to London March 21, direct, SkyTeam preferred\"\n• \"NYC to Tokyo round trip, a week in mid-October, business\"\n• \"Cheapest weekend to visit Chicago this fall\"\n• \"Boston to Lisbon, 2 adults, no budget airlines, under $600\""
           }
         ],
         input: '',
         isLoading: false,
-        selectedOutbound: null,
-        originalQuery: '',
+        history: [],
 
         scrollToBottom() {
-          this.$nextTick(() => {
-            this.$refs.bottom?.scrollIntoView({ behavior: 'smooth' });
-          });
+          this.$nextTick(() => { this.$refs.bottom?.scrollIntoView({ behavior: 'smooth' }); });
         },
 
-        async search() {
-          const q = this.input.trim();
+        async search(queryOverride) {
+          const q = (queryOverride || this.input).trim();
           if (!q || this.isLoading) return;
 
           this.input = '';
-          this.originalQuery = q;
-          this.selectedOutbound = null;
           this.messages.push({ role: 'user', content: q });
           this.isLoading = true;
           this.scrollToBottom();
@@ -284,16 +294,25 @@
             const res = await fetch('/api/search', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ query: q, searchType: 'outbound' }),
+              body: JSON.stringify({ query: q, history: this.history }),
             });
             const data = await res.json();
             if (data.error) throw new Error(data.error);
 
+            this.history.push({ role: 'user', content: q });
+            if (data.type === 'clarify') {
+              this.history.push({ role: 'assistant', content: data.message });
+            }
+            // keep history short: last 3 exchanges
+            this.history = this.history.slice(-6);
+
             this.messages.push({
               role: 'assistant',
               content: data.message,
+              type: data.type,
               results: data.results,
-              isOutbound: data.isRoundTrip,
+              dates: data.dates,
+              assumptions: data.assumptions,
             });
           } catch (err) {
             this.messages.push({ role: 'assistant', content: `Error: ${err.message}` });
@@ -303,52 +322,56 @@
           }
         },
 
-        async selectOutbound(flight) {
-          this.selectedOutbound = flight;
-          this.isLoading = true;
-          this.messages.push({ role: 'assistant', content: 'Searching return flights...' });
-          this.scrollToBottom();
-
-          try {
-            const res = await fetch('/api/search', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                query: this.originalQuery,
-                searchType: 'return',
-                selectedOutbound: flight,
-              }),
-            });
-            const data = await res.json();
-            if (data.error) throw new Error(data.error);
-
-            this.messages.splice(-1, 1, {
-              role: 'assistant',
-              content: data.message,
-              results: data.results,
-              isReturn: true,
-              selectedOutbound: flight,
-            });
-          } catch (err) {
-            this.messages.splice(-1, 1, { role: 'assistant', content: `Error: ${err.message}` });
-          } finally {
-            this.isLoading = false;
-            this.scrollToBottom();
-          }
+        pickDate(d) {
+          let q = `Same search, departing ${d.date}`;
+          if (d.return_date) q += ` and returning ${d.return_date}`;
+          this.search(q);
         },
 
-        formatPrice(p) {
-          return new Intl.NumberFormat('en-US', {
-            style: 'currency', currency: 'USD',
-            minimumFractionDigits: 0, maximumFractionDigits: 0,
-          }).format(p || 0);
+        flightCodes(f) {
+          return (f.legs || []).map(l => l.airline_code + ' ' + l.flight_number).join(' · ');
+        },
+
+        flightSummary(f) {
+          const legs = f.legs || [];
+          if (!legs.length) return '';
+          const first = legs[0], last = legs[legs.length - 1];
+          const dep = this.formatTime(first.departure), arr = this.formatTime(last.arrival);
+          const route = first.from + ' → ' + last.to;
+          const stops = f.stops === 0 ? 'Direct' : f.stops + ' stop' + (f.stops > 1 ? 's' : '');
+          return `${route} · ${dep} → ${arr} · ${this.formatDuration(f.duration)} · ${stops}`;
+        },
+
+        layoverText(lo) {
+          return `Layover: ${lo.duration ? Math.floor(lo.duration / 60) + 'h ' + (lo.duration % 60) + 'm' : ''} in ${lo.city || lo.airport} (${lo.airport})`;
+        },
+
+        itinHighlights(it) {
+          const h = [];
+          if (it.outbound.stops === 0 && it.return.stops === 0) h.push('Direct both ways');
+          return h.concat(it.outbound.highlights || []);
+        },
+
+        formatPrice(p, currency) {
+          if (p == null) return '—';
+          try {
+            return new Intl.NumberFormat('en-US', {
+              style: 'currency', currency: currency || 'USD',
+              minimumFractionDigits: 0, maximumFractionDigits: 0,
+            }).format(p);
+          } catch { return (currency || '$') + ' ' + Math.round(p); }
         },
 
         formatTime(t) {
           if (!t) return '—';
-          // Handles both "HH:MM" and ISO datetime strings
           if (t.includes('T')) return t.split('T')[1]?.slice(0, 5) || '—';
           return t.slice(0, 5);
+        },
+
+        formatDate(d) {
+          if (!d) return '';
+          const dt = new Date(d + 'T12:00:00');
+          return dt.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
         },
 
         formatDuration(mins) {
