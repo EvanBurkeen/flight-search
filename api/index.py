@@ -239,16 +239,27 @@ def resolve_airlines(codes: list[str] | None) -> list:
     return resolved
 
 
-def time_restrictions(departure: dict | None, arrival: dict | None = None) -> TimeRestrictions | None:
+def time_restrictions(departure: dict | None) -> TimeRestrictions | None:
     fields = {
         "earliest_departure": (departure or {}).get("earliest"),
         "latest_departure": (departure or {}).get("latest"),
-        "earliest_arrival": (arrival or {}).get("earliest"),
-        "latest_arrival": (arrival or {}).get("latest"),
     }
     if all(v is None for v in fields.values()):
         return None
     return TimeRestrictions(**fields)
+
+
+def arrival_ok(result, travel_date: str | None, window: dict | None) -> bool:
+    if not window or not (window.get("earliest") is not None or window.get("latest") is not None):
+        return True
+    arr = result.legs[-1].arrival_datetime if result.legs else None
+    if not arr:
+        return False
+    if travel_date and arr.strftime("%Y-%m-%d") != travel_date:
+        return False  # arrives on a different day than requested
+    hour = arr.hour + arr.minute / 60
+    lo, hi = window.get("earliest"), window.get("latest")
+    return (lo is None or hour >= lo) and (hi is None or hour <= hi)
 
 
 def build_filters(spec: dict, origins: list, destinations: list, filters_cls=FlightSearchFilters, **extra):
@@ -259,7 +270,9 @@ def build_filters(spec: dict, origins: list, destinations: list, filters_cls=Fli
             departure_airport=[[a, 0] for a in origins],
             arrival_airport=[[a, 0] for a in destinations],
             travel_date=spec.get("departure_date") or datetime.now().strftime("%Y-%m-%d"),
-            time_restrictions=time_restrictions(spec.get("departure_time"), spec.get("arrival_time")),
+            # arrival windows are enforced app-side (arrival_ok): Google's arrival
+            # filter matches clock hours only, so a 2 AM next-day arrival passes "by noon"
+            time_restrictions=time_restrictions(spec.get("departure_time")),
         )
     ]
     if is_round_trip:
@@ -268,7 +281,7 @@ def build_filters(spec: dict, origins: list, destinations: list, filters_cls=Fli
                 departure_airport=[[a, 0] for a in destinations],
                 arrival_airport=[[a, 0] for a in origins],
                 travel_date=spec.get("return_date") or spec.get("departure_date") or datetime.now().strftime("%Y-%m-%d"),
-                time_restrictions=time_restrictions(spec.get("return_time"), spec.get("return_arrival_time")),
+                time_restrictions=time_restrictions(spec.get("return_time")),
             )
         )
 
@@ -420,7 +433,19 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
             "results": [],
         }
 
+    aw, rw = spec.get("arrival_time"), spec.get("return_arrival_time")
+    dep_date = spec.get("departure_date")
+    ret_date = spec.get("return_date") or dep_date
+    arrival_note = None
+
     if isinstance(results[0], tuple):
+        strict = [c for c in results if arrival_ok(c[0], dep_date, aw) and arrival_ok(c[-1], ret_date, rw)]
+        if strict:
+            results = strict
+        elif aw or rw:
+            arrival_note = "Nothing meets the arrival-time cutoff exactly — showing the closest arrivals instead."
+            results = sorted(results, key=lambda c: c[0].legs[-1].arrival_datetime or datetime.max)
+
         itineraries = []
         for combo in results[:10]:
             out, ret = combo[0], combo[-1]
@@ -440,17 +465,30 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
             for leg_key in ("outbound", "return"):
                 if itin[leg_key]["stops"] == 0:
                     itin[leg_key]["highlights"].append("Direct")
+        message = f"Found {len(itineraries)} round-trip options. Prices are the real total for both directions."
+        if arrival_note:
+            message = f"{arrival_note}\n{message}"
         return {
             "type": "itineraries",
-            "message": f"Found {len(itineraries)} round-trip options. Prices are the real total for both directions.",
+            "message": message,
             "results": itineraries,
         }
 
+    strict = [r for r in results if arrival_ok(r, dep_date, aw)]
+    if strict:
+        results = strict
+    elif aw:
+        arrival_note = "Nothing arrives by that cutoff — showing the closest arrivals instead."
+        results = sorted(results, key=lambda r: r.legs[-1].arrival_datetime or datetime.max)
+
     flights = [serialize_flight(r, url) for r in results[:10]]
     add_highlights(flights)
+    message = f"Found {len(flights)} flights."
+    if arrival_note:
+        message = f"{arrival_note}\n{message}"
     return {
         "type": "flights",
-        "message": f"Found {len(flights)} flights.",
+        "message": message,
         "results": flights,
     }
 
