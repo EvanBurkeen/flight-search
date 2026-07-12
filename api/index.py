@@ -22,6 +22,7 @@ from fli.models import (
 )
 from fli.models.google_flights.base import PriceLimit
 from fli.search import SearchDates, SearchFlights
+from fli.search.exceptions import SearchClientError, SearchHTTPError
 
 app = FastAPI()
 
@@ -357,14 +358,23 @@ def add_highlights(flights: list[dict]) -> None:
 
 
 def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy, top_n: int):
-    # Google intermittently returns an unparseable payload (fli gives None);
-    # a retry, then a retry sorted by CHEAPEST, recovers nearly all of them.
-    for attempt_sort in (sort, sort, SortBy.CHEAPEST):
+    # Google intermittently returns an unparseable payload (fli gives None) or
+    # rate-limits with a 429 (fli raises after its own fast retries). A retry
+    # with a longer cool-down, then a retry sorted by CHEAPEST, recovers most.
+    last_exc = None
+    for i, attempt_sort in enumerate((sort, sort, SortBy.CHEAPEST)):
         attempt = filters.model_copy(update={"sort_by": attempt_sort})
-        results = search.search(attempt, top_n=top_n)
+        try:
+            results = search.search(attempt, top_n=top_n)
+        except SearchClientError as e:
+            last_exc = e
+            time.sleep(3 + 3 * i)
+            continue
         if results:
             return results
         time.sleep(1)
+    if last_exc:
+        raise last_exc
     return []
 
 
@@ -427,10 +437,21 @@ def search_flexible_dates(spec: dict, origins: list, destinations: list, currenc
 
     filters = build_filters(spec, origins, destinations, filters_cls=DateSearchFilters, **extra)
     searcher = SearchDates()
-    date_prices = searcher.search(filters)
-    if date_prices is None:
+    date_prices = None
+    last_exc = None
+    for i in range(3):
+        try:
+            date_prices = searcher.search(filters)
+            last_exc = None
+        except SearchClientError as e:
+            last_exc = e
+            time.sleep(3 + 3 * i)
+            continue
+        if date_prices:
+            break
         time.sleep(1)
-        date_prices = searcher.search(filters)
+    if last_exc:
+        raise last_exc
     date_prices = date_prices or []
     if not date_prices:
         return {
@@ -505,5 +526,17 @@ async def search(request: Request):
         payload["assumptions"] = spec.get("assumptions") or []
         return JSONResponse(payload)
 
+    except SearchHTTPError as e:
+        if e.status_code == 429:
+            msg = "Google Flights is rate-limiting searches right now. Give it 20-30 seconds and try again — your query is fine."
+        else:
+            msg = "Google Flights returned an error for that search. Try again in a moment or rephrase slightly."
+        return JSONResponse({"type": "clarify", "message": msg, "results": []})
+    except SearchClientError:
+        return JSONResponse({
+            "type": "clarify",
+            "message": "Couldn't reach Google Flights just now. Try again in a few seconds.",
+            "results": [],
+        })
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
