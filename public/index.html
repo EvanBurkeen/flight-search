@@ -546,7 +546,7 @@
             if (myReq === this.reqId) {
               this.isLoading = false;
               this.stopLoadingCycle();
-              this.scrollToBottom();
+              // no auto-scroll on completion — stay where the reader is
             }
           }
         },
