@@ -37,13 +37,49 @@
 
     .container { max-width: 58rem; margin: 0 auto; padding: 2.5rem 1.5rem; }
 
-    .header { margin-bottom: 2rem; }
+    .header { margin-bottom: 2rem; display: flex; justify-content: space-between; align-items: flex-end; gap: 1rem; flex-wrap: wrap; }
     .header h1 {
       font-family: Fraunces, Georgia, serif;
       font-size: 2.5rem; font-weight: 600; letter-spacing: -0.02em; margin-bottom: 0.3rem;
     }
     .header h1 em { font-style: italic; color: var(--accent); }
     .header p { font-size: 0.9rem; opacity: 0.72; }
+
+    .view-toggle {
+      display: inline-flex; border: 1px solid var(--line); border-radius: 999px;
+      overflow: hidden; background: var(--panel); flex: none; margin-bottom: 0.35rem;
+    }
+    .view-toggle button {
+      font-size: 0.7rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase;
+      padding: 0.4rem 0.9rem; border: none; background: transparent; color: var(--ink);
+      cursor: pointer; transition: all 0.15s; opacity: 0.65;
+    }
+    .view-toggle button.active { background: var(--ink); color: var(--bg); opacity: 1; }
+
+    .compact-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr));
+      gap: 0.5rem;
+    }
+    .compact-card {
+      border: 1px solid var(--line); background: var(--panel);
+      border-radius: 6px; padding: 0.65rem 0.75rem;
+      display: flex; flex-direction: column; gap: 0.25rem;
+    }
+    .compact-top { display: flex; justify-content: space-between; align-items: baseline; gap: 0.5rem; }
+    .compact-airline { font-size: 0.72rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .compact-price { font-size: 1.05rem; font-weight: 700; color: var(--accent-dark); flex: none; }
+    .compact-times { font-size: 0.82rem; font-weight: 600; }
+    .compact-sub { font-size: 0.68rem; opacity: 0.70; }
+    .compact-leg { font-size: 0.72rem; }
+    .compact-leg .lbl { font-size: 0.6rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; opacity: 0.55; margin-right: 0.3rem; }
+    .compact-badges { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+    .compact-badges .badge { font-size: 0.58rem; padding: 0.08rem 0.35rem; }
+    .compact-warn { font-size: 0.64rem; color: var(--warn); }
+    .compact-book {
+      font-size: 0.64rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase;
+      color: var(--accent-dark); text-decoration: none; margin-top: auto;
+    }
+    .compact-book:hover { text-decoration: underline; }
 
     /* landing */
     .capabilities {
@@ -216,8 +252,14 @@
 <body>
   <div class="container" x-data="flightApp()">
     <div class="header">
-      <h1>Flight <em>Assistant</em></h1>
-      <p>Talk to Claude · live Google Flights data · real comparisons</p>
+      <div>
+        <h1>Flight <em>Assistant</em></h1>
+        <p>Talk to Claude · live Google Flights data · real comparisons</p>
+      </div>
+      <div class="view-toggle">
+        <button :class="viewMode === 'detailed' ? 'active' : ''" @click="setView('detailed')">Detailed</button>
+        <button :class="viewMode === 'compact' ? 'active' : ''" @click="setView('compact')">Compact</button>
+      </div>
     </div>
 
     <template x-if="!hasSearched">
@@ -261,8 +303,29 @@
               <div>
                 <div class="section-label" x-text="sectionLabel(sec)"></div>
 
-                <!-- one-way flights -->
-                <template x-if="sec.type === 'flights' && sec.results && sec.results.length">
+                <!-- one-way flights, compact -->
+                <template x-if="sec.type === 'flights' && sec.results && sec.results.length && viewMode === 'compact'">
+                  <div class="compact-grid">
+                    <template x-for="(f, j) in sec.results.slice(0, 8)" :key="j">
+                      <div class="compact-card">
+                        <div class="compact-top">
+                          <div class="compact-airline" x-text="f.airline"></div>
+                          <div class="compact-price" x-text="formatPrice(f.price, f.currency)"></div>
+                        </div>
+                        <div class="compact-times" x-text="formatTime(f.legs[0].departure) + ' → ' + formatTime(f.legs[f.legs.length-1].arrival) + arrivalDay(f)"></div>
+                        <div class="compact-sub" x-text="f.legs[0].from + '–' + f.legs[f.legs.length-1].to + ' · ' + formatDuration(f.duration) + ' · ' + stopsText(f.stops) + ((f.layovers || []).length ? ' via ' + f.layovers.map(l => l.airport).join(', ') : '')"></div>
+                        <div class="compact-badges" x-show="(f.highlights || []).length">
+                          <template x-for="(h, k) in f.highlights" :key="k"><span class="badge" :class="badgeClass(h)" x-text="h"></span></template>
+                        </div>
+                        <div class="compact-warn" x-show="(f.warnings || []).length" x-text="'⚠ ' + (f.warnings || []).length + ' caveat' + (f.warnings.length > 1 ? 's' : '') + ' — see Detailed'"></div>
+                        <a :href="f.booking_url" target="_blank" rel="noopener noreferrer" class="compact-book">Book →</a>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+
+                <!-- one-way flights, detailed -->
+                <template x-if="sec.type === 'flights' && sec.results && sec.results.length && viewMode === 'detailed'">
                   <div class="flight-list">
                     <template x-for="(f, j) in sec.results.slice(0, 5)" :key="j">
                       <div class="flight-card">
@@ -312,8 +375,29 @@
                   </div>
                 </template>
 
-                <!-- round-trip itineraries -->
-                <template x-if="sec.type === 'itineraries' && sec.results && sec.results.length">
+                <!-- round-trip itineraries, compact -->
+                <template x-if="sec.type === 'itineraries' && sec.results && sec.results.length && viewMode === 'compact'">
+                  <div class="compact-grid">
+                    <template x-for="(it, j) in sec.results.slice(0, 8)" :key="j">
+                      <div class="compact-card">
+                        <div class="compact-top">
+                          <div class="compact-airline" x-text="it.outbound.airline + (it.return.airline !== it.outbound.airline ? ' + ' + it.return.airline : '')"></div>
+                          <div class="compact-price" x-text="formatPrice(it.total_price, it.currency)"></div>
+                        </div>
+                        <div class="compact-leg"><span class="lbl">Out</span><span x-text="formatTime(it.outbound.legs[0].departure) + ' → ' + formatTime(it.outbound.legs[it.outbound.legs.length-1].arrival) + ' · ' + stopsText(it.outbound.stops)"></span></div>
+                        <div class="compact-leg"><span class="lbl">Ret</span><span x-text="formatTime(it.return.legs[0].departure) + ' → ' + formatTime(it.return.legs[it.return.legs.length-1].arrival) + ' · ' + stopsText(it.return.stops)"></span></div>
+                        <div class="compact-sub" x-text="'round trip total' + (((it.outbound.warnings || []).length + (it.return.warnings || []).length) ? ' · ⚠ see Detailed' : '')"></div>
+                        <div class="compact-badges" x-show="it.outbound.stops === 0 && it.return.stops === 0">
+                          <span class="badge badge-direct">Direct both ways</span>
+                        </div>
+                        <a :href="it.booking_url" target="_blank" rel="noopener noreferrer" class="compact-book">Book →</a>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+
+                <!-- round-trip itineraries, detailed -->
+                <template x-if="sec.type === 'itineraries' && sec.results && sec.results.length && viewMode === 'detailed'">
                   <div class="flight-list">
                     <template x-for="(it, j) in sec.results.slice(0, 5)" :key="j">
                       <div class="flight-card">
@@ -450,6 +534,7 @@
         isLoading: false,
         hasSearched: false,
         history: [],
+        viewMode: localStorage.getItem('flightViewMode') || 'detailed',
         loadingText: 'Thinking…',
         loadingTimer: null,
         controller: null,
@@ -457,6 +542,11 @@
 
         scrollToBottom() {
           this.$nextTick(() => { this.$refs.bottom?.scrollIntoView({ behavior: 'smooth' }); });
+        },
+
+        setView(mode) {
+          this.viewMode = mode;
+          localStorage.setItem('flightViewMode', mode);
         },
 
         autosize() {
