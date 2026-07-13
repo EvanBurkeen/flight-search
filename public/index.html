@@ -117,11 +117,19 @@
       border-left: 2px solid var(--accent); padding-left: 1rem;
     }
 
+    .section-head { display: flex; justify-content: space-between; align-items: center; gap: 0.75rem; margin-bottom: 0.4rem; }
     .section-label {
       font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em;
-      color: var(--accent-dark); font-weight: 600; margin-bottom: 0.4rem;
+      color: var(--accent-dark); font-weight: 600;
       white-space: pre-line;
     }
+    .mini-toggle { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; background: var(--panel); flex: none; }
+    .mini-toggle button {
+      font-size: 0.6rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
+      padding: 0.2rem 0.55rem; border: none; background: transparent; color: var(--ink);
+      cursor: pointer; opacity: 0.6;
+    }
+    .mini-toggle button.active { background: var(--ink); color: var(--bg); opacity: 1; }
     .assumptions { font-size: 0.72rem; opacity: 0.60; margin-top: 0.35rem; }
 
     .flight-list { display: flex; flex-direction: column; gap: 0.6rem; }
@@ -301,10 +309,16 @@
 
             <template x-for="(sec, si) in (msg.sections || [])" :key="si">
               <div>
-                <div class="section-label" x-text="sectionLabel(sec)"></div>
+                <div class="section-head">
+                  <div class="section-label" x-text="sectionLabel(sec)"></div>
+                  <div class="mini-toggle" x-show="sec.results && sec.results.length">
+                    <button :class="sectionView(sec) === 'detailed' ? 'active' : ''" @click="sec._view = 'detailed'">Detail</button>
+                    <button :class="sectionView(sec) === 'compact' ? 'active' : ''" @click="sec._view = 'compact'">Compact</button>
+                  </div>
+                </div>
 
                 <!-- one-way flights, compact -->
-                <template x-if="sec.type === 'flights' && sec.results && sec.results.length && viewMode === 'compact'">
+                <template x-if="sec.type === 'flights' && sec.results && sec.results.length && sectionView(sec) === 'compact'">
                   <div class="compact-grid">
                     <template x-for="(f, j) in sec.results.slice(0, 8)" :key="j">
                       <div class="compact-card">
@@ -325,7 +339,7 @@
                 </template>
 
                 <!-- one-way flights, detailed -->
-                <template x-if="sec.type === 'flights' && sec.results && sec.results.length && viewMode === 'detailed'">
+                <template x-if="sec.type === 'flights' && sec.results && sec.results.length && sectionView(sec) === 'detailed'">
                   <div class="flight-list">
                     <template x-for="(f, j) in sec.results.slice(0, 5)" :key="j">
                       <div class="flight-card">
@@ -376,7 +390,7 @@
                 </template>
 
                 <!-- round-trip itineraries, compact -->
-                <template x-if="sec.type === 'itineraries' && sec.results && sec.results.length && viewMode === 'compact'">
+                <template x-if="sec.type === 'itineraries' && sec.results && sec.results.length && sectionView(sec) === 'compact'">
                   <div class="compact-grid">
                     <template x-for="(it, j) in sec.results.slice(0, 8)" :key="j">
                       <div class="compact-card">
@@ -397,7 +411,7 @@
                 </template>
 
                 <!-- round-trip itineraries, detailed -->
-                <template x-if="sec.type === 'itineraries' && sec.results && sec.results.length && viewMode === 'detailed'">
+                <template x-if="sec.type === 'itineraries' && sec.results && sec.results.length && sectionView(sec) === 'detailed'">
                   <div class="flight-list">
                     <template x-for="(it, j) in sec.results.slice(0, 5)" :key="j">
                       <div class="flight-card">
@@ -547,6 +561,12 @@
         setView(mode) {
           this.viewMode = mode;
           localStorage.setItem('flightViewMode', mode);
+          // global switch resets any per-section overrides
+          this.messages.forEach(m => (m.sections || []).forEach(s => { delete s._view; }));
+        },
+
+        sectionView(sec) {
+          return sec._view || this.viewMode;
         },
 
         autosize() {

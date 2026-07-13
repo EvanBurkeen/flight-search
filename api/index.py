@@ -76,6 +76,10 @@ SEARCH_TOOL = {
                 "type": ["string", "null"],
                 "description": "YYYY-MM-DD. Null only when flexible_dates is set.",
             },
+            "arrival_date": {
+                "type": ["string", "null"],
+                "description": "YYYY-MM-DD the outbound must LAND on (local time at destination). Use when the user cares about the arrival day ('land on Friday'). Remember timezones when picking departure_date: eastbound trans-Pacific (Asia -> US) lands the SAME local calendar day, so to land Friday you depart Friday; westbound (US -> Asia/Europe overnight) usually lands the NEXT day, so depart the day before.",
+            },
             "return_date": {
                 "type": ["string", "null"],
                 "description": "YYYY-MM-DD for round trips with a fixed return.",
@@ -182,6 +186,7 @@ You are a travel-savvy assistant, not a form. Converse naturally, but ground eve
 How to handle requests:
 - Vague is fine. Expand cities to their major airports (NYC -> JFK/LGA/EWR). "mid September" or "cheapest time to go" -> flexible_dates. Loyalty hints -> airline filters. A bare month/day means the nearest FUTURE date — if that month/day has already passed this year, it means next year.
 - "arrive by / be there by X" is an ARRIVAL constraint (arrival_time), never a departure cap.
+- When the user cares about the arrival DAY ("land on Friday"), set arrival_date and pick departure_date by timezone logic (Asia -> US lands the same local day; US -> Asia/Europe overnight lands the next day). When they change or relax the arrival day, immediately re-search with the new dates — do not re-serve the old results or just offer to search.
 - "via / through <hub>" questions: search with via_airports. That filter checks every itinerary Google returns; the plain result list you see is only a top-6 sample, so NEVER assert that a routing, hub, or airline "doesn't exist" from the plain list — and never say you "confirmed" or "checked directly" unless a via_airports search actually ran this conversation. If you haven't checked, say so and offer to.
 - Comparisons: run one search per option (at most 4 per turn). A self-arranged overnight stopover = one search per leg with the correct date on each. Give each search a summary naming the option ("Option A: Thursday nonstop").
 - Make reasonable assumptions and state them briefly instead of interrogating the user; ask a question only when origin or destination is truly unknowable.
@@ -342,14 +347,17 @@ def time_restrictions(departure: dict | None) -> TimeRestrictions | None:
     return TimeRestrictions(**fields)
 
 
-def arrival_ok(result, travel_date: str | None, window: dict | None) -> bool:
-    if not window or not (window.get("earliest") is not None or window.get("latest") is not None):
+def arrival_ok(result, target_date: str | None, window: dict | None) -> bool:
+    has_window = bool(window) and (window.get("earliest") is not None or window.get("latest") is not None)
+    if not has_window and not target_date:
         return True
     arr = result.legs[-1].arrival_datetime if result.legs else None
     if not arr:
         return False
-    if travel_date and arr.strftime("%Y-%m-%d") != travel_date:
+    if target_date and arr.strftime("%Y-%m-%d") != target_date:
         return False  # arrives on a different day than requested
+    if not has_window:
+        return True
     hour = arr.hour + arr.minute / 60
     lo, hi = window.get("earliest"), window.get("latest")
     return (lo is None or hour >= lo) and (hi is None or hour <= hi)
@@ -567,14 +575,20 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
     aw, rw = spec.get("arrival_time"), spec.get("return_arrival_time")
     dep_date = spec.get("departure_date")
     ret_date = spec.get("return_date") or dep_date
+    arr_date = spec.get("arrival_date")
+    has_win = lambda w: bool(w) and (w.get("earliest") is not None or w.get("latest") is not None)
+    # enforce the arrival calendar day when explicitly requested, or when a
+    # time-of-day window is set (a window is meaningless across the wrong day)
+    out_target = arr_date or (dep_date if has_win(aw) else None)
+    ret_target = ret_date if has_win(rw) else None
     arrival_note = None
 
     if isinstance(results[0], tuple):
-        strict = [c for c in results if arrival_ok(c[0], dep_date, aw) and arrival_ok(c[-1], ret_date, rw)]
+        strict = [c for c in results if arrival_ok(c[0], out_target, aw) and arrival_ok(c[-1], ret_target, rw)]
         if strict:
             results = strict
-        elif aw or rw:
-            arrival_note = "Nothing meets the arrival-time cutoff exactly — showing the closest arrivals instead."
+        elif aw or rw or arr_date:
+            arrival_note = "Nothing meets the arrival-day/time constraint exactly — showing the closest arrivals instead."
             results = sorted(results, key=lambda c: c[0].legs[-1].arrival_datetime or datetime.max)
 
         itineraries = []
@@ -605,11 +619,11 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
             "results": itineraries,
         }
 
-    strict = [r for r in results if arrival_ok(r, dep_date, aw)]
+    strict = [r for r in results if arrival_ok(r, out_target, aw)]
     if strict:
         results = strict
-    elif aw:
-        arrival_note = "Nothing arrives by that cutoff — showing the closest arrivals instead."
+    elif aw or arr_date:
+        arrival_note = "Nothing meets the arrival-day/time constraint exactly — showing the closest arrivals instead."
         results = sorted(results, key=lambda r: r.legs[-1].arrival_datetime or datetime.max)
 
     flights = [serialize_flight(r, url) for r in results[:10]]
@@ -700,7 +714,7 @@ def roll_past_dates(spec: dict) -> tuple[dict, list[str]]:
         return rolled
 
     spec = dict(spec)
-    for key in ("departure_date", "return_date"):
+    for key in ("departure_date", "return_date", "arrival_date"):
         spec[key] = roll(spec.get(key))
     if spec.get("flexible_dates"):
         flex = dict(spec["flexible_dates"])
