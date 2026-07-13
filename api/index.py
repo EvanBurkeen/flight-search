@@ -180,7 +180,7 @@ def assistant_system_prompt() -> str:
 You are a travel-savvy assistant, not a form. Converse naturally, but ground every price, time, and availability claim in a search_flights result from this conversation — never invent or recall fares.
 
 How to handle requests:
-- Vague is fine. Expand cities to their major airports (NYC -> JFK/LGA/EWR). "mid September" or "cheapest time to go" -> flexible_dates. Loyalty hints -> airline filters. A bare month/day means the nearest future date.
+- Vague is fine. Expand cities to their major airports (NYC -> JFK/LGA/EWR). "mid September" or "cheapest time to go" -> flexible_dates. Loyalty hints -> airline filters. A bare month/day means the nearest FUTURE date — if that month/day has already passed this year, it means next year.
 - "arrive by / be there by X" is an ARRIVAL constraint (arrival_time), never a departure cap.
 - "via / through <hub>" questions: search with via_airports. That filter checks every itinerary Google returns; the plain result list you see is only a top-6 sample, so NEVER assert that a routing, hub, or airline "doesn't exist" from the plain list — and never say you "confirmed" or "checked directly" unless a via_airports search actually ran this conversation. If you haven't checked, say so and offer to.
 - Comparisons: run one search per option (at most 4 per turn). A self-arranged overnight stopover = one search per leg with the correct date on each. Give each search a summary naming the option ("Option A: Thursday nonstop").
@@ -299,6 +299,13 @@ def run_assistant(query: str, history: list | None) -> dict:
                 tool_results.append({
                     "type": "tool_result", "tool_use_id": tu.id,
                     "content": "Couldn't reach Google Flights for this search.", "is_error": True,
+                })
+            except Exception as e:  # bad tool input etc. — let Claude correct itself
+                today = datetime.now().strftime("%Y-%m-%d")
+                tool_results.append({
+                    "type": "tool_result", "tool_use_id": tu.id,
+                    "content": f"Search failed: {str(e)[:300]} (today is {today}). Fix the input and retry.",
+                    "is_error": True,
                 })
         messages.append({"role": "user", "content": tool_results})
 
@@ -671,7 +678,40 @@ def search_flexible_dates(spec: dict, origins: list, destinations: list, currenc
     }
 
 
+def roll_past_dates(spec: dict) -> tuple[dict, list[str]]:
+    """A month/day that already passed this year means next year — fix it and say so."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    notes = []
+
+    def roll(ds: str | None) -> str | None:
+        if not ds or ds >= today:
+            return ds
+        try:
+            d = datetime.strptime(ds, "%Y-%m-%d")
+        except ValueError:
+            return ds
+        while d.strftime("%Y-%m-%d") < today:
+            try:
+                d = d.replace(year=d.year + 1)
+            except ValueError:  # Feb 29
+                d = d.replace(year=d.year + 1, day=28)
+        rolled = d.strftime("%Y-%m-%d")
+        notes.append(f"'{ds}' is in the past — interpreted as {rolled}")
+        return rolled
+
+    spec = dict(spec)
+    for key in ("departure_date", "return_date"):
+        spec[key] = roll(spec.get(key))
+    if spec.get("flexible_dates"):
+        flex = dict(spec["flexible_dates"])
+        flex["from_date"] = roll(flex.get("from_date"))
+        flex["to_date"] = roll(flex.get("to_date"))
+        spec["flexible_dates"] = flex
+    return spec, notes
+
+
 def execute_spec(spec: dict) -> dict:
+    spec, date_notes = roll_past_dates(spec)
     origins, bad_origins = resolve_airports(spec.get("origins"))
     destinations, bad_destinations = resolve_airports(spec.get("destinations"))
     invalid = bad_origins + bad_destinations
@@ -697,7 +737,7 @@ def execute_spec(spec: dict) -> dict:
 
     if spec.get("summary"):
         payload["message"] = f"{spec['summary']}\n\n{payload['message']}"
-    payload["assumptions"] = spec.get("assumptions") or []
+    payload["assumptions"] = (spec.get("assumptions") or []) + date_notes
     return payload
 
 
