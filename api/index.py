@@ -71,7 +71,20 @@ SEARCH_TOOL = {
                 "items": {"type": "string"},
                 "description": "Destination IATA codes, same expansion rule as origins.",
             },
-            "trip_type": {"type": "string", "enum": ["one_way", "round_trip"]},
+            "trip_type": {"type": "string", "enum": ["one_way", "round_trip", "multi_city"]},
+            "multi_city_segments": {
+                "type": ["array", "null"],
+                "description": "For trip_type multi_city: 2-5 legs in order, each priced together as one ticket. Example: NYC->London, London->Rome, Rome->NYC. When set, top-level origins/destinations/dates are ignored.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "origins": {"type": "array", "items": {"type": "string"}},
+                        "destinations": {"type": "array", "items": {"type": "string"}},
+                        "date": {"type": "string", "description": "YYYY-MM-DD"},
+                    },
+                    "required": ["origins", "destinations", "date"],
+                },
+            },
             "departure_date": {
                 "type": ["string", "null"],
                 "description": "YYYY-MM-DD. Null only when flexible_dates is set.",
@@ -189,6 +202,7 @@ How to handle requests:
 - When the user cares about the arrival DAY ("land on Friday"), set arrival_date and pick departure_date by timezone logic (Asia -> US lands the same local day; US -> Asia/Europe overnight lands the next day). When they change or relax the arrival day, immediately re-search with the new dates — do not re-serve the old results or just offer to search.
 - "via / through <hub>" questions: search with via_airports. That filter checks every itinerary Google returns; the plain result list you see is only a top-6 sample, so NEVER assert that a routing, hub, or airline "doesn't exist" from the plain list — and never say you "confirmed" or "checked directly" unless a via_airports search actually ran this conversation. If you haven't checked, say so and offer to.
 - Comparisons: run one search per option (at most 4 per turn). A self-arranged overnight stopover = one search per leg with the correct date on each. Give each search a summary naming the option ("Option A: Thursday nonstop").
+- Multi-city trips (A -> B, B -> C, C -> A, or open-jaw): use trip_type multi_city with multi_city_segments — that prices all legs as ONE ticket, usually cheaper than separate one-ways. Use separate one-way searches only when the user wants to compare against self-booking each leg.
 - Make reasonable assumptions and state them briefly instead of interrogating the user; ask a question only when origin or destination is truly unknowable.
 
 Answering:
@@ -211,6 +225,15 @@ def compact_for_model(payload: dict) -> str:
             "count": len(dates),
             "cheapest_dates": cheapest,
         })
+    if kind == "multicity":
+        rows = [
+            {
+                "total_price": it["total_price"], "currency": it["currency"],
+                "legs": [_leg_summary(p) for p in it["parts"]],
+            }
+            for it in (payload.get("results") or [])[:5]
+        ]
+        return json.dumps({"kind": "multi_city", "note": payload.get("message"), "options": rows})
     if kind == "itineraries":
         rows = [
             {
@@ -638,6 +661,76 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
     }
 
 
+def search_multi_city(spec: dict, currency: str) -> dict:
+    resolved = []
+    invalid: list[str] = []
+    for seg in (spec.get("multi_city_segments") or [])[:5]:
+        o, bad_o = resolve_airports(seg.get("origins"))
+        d, bad_d = resolve_airports(seg.get("destinations"))
+        invalid += bad_o + bad_d
+        if o and d and seg.get("date"):
+            resolved.append((o, d, seg["date"]))
+    if invalid or len(resolved) < 2:
+        return {
+            "type": "clarify",
+            "message": (f"I couldn't recognize these airport codes: {', '.join(invalid)}. " if invalid else "")
+                       + "A multi-city trip needs at least two legs, each with airports and a date.",
+            "results": [],
+        }
+
+    segments = [
+        FlightSegment(
+            departure_airport=[[a, 0] for a in o],
+            arrival_airport=[[a, 0] for a in d],
+            travel_date=date_,
+        )
+        for o, d, date_ in resolved
+    ]
+    filters = FlightSearchFilters(
+        trip_type=TripType.MULTI_CITY,
+        passenger_info=PassengerInfo(
+            adults=spec.get("adults") or 1, children=spec.get("children") or 0,
+        ),
+        stops=STOPS_MAP.get(spec.get("max_stops"), MaxStops.ANY),
+        seat_type=CABIN_MAP.get(spec.get("cabin"), SeatType.ECONOMY),
+        airlines=resolve_airlines(spec.get("airlines_include")) or None,
+        airlines_exclude=resolve_airlines(spec.get("airlines_exclude")) or None,
+        alliances=[getattr(Alliance, a) for a in spec.get("alliances") or [] if hasattr(Alliance, a)] or None,
+        flight_segments=segments,
+        show_all_results=True,
+    )
+    sort = SORT_MAP.get(spec.get("sort"), SortBy.CHEAPEST)
+    url = booking_url(resolved[0][0], resolved[0][1], {**spec, "departure_date": resolved[0][2], "trip_type": "multi_city"})
+    results = run_search(SearchFlights(), filters, sort, top_n=6)
+
+    if not results:
+        return {
+            "type": "multicity",
+            "message": "No multi-city itineraries found. Try shifting a date or splitting the legs into separate one-way searches.",
+            "results": [],
+        }
+
+    itineraries = []
+    for combo in results[:8]:
+        parts = list(combo) if isinstance(combo, tuple) else [combo]
+        prices = [p.price for p in parts if p.price]
+        itineraries.append({
+            "total_price": max(prices) if prices else None,
+            "currency": parts[0].currency or currency,
+            "parts": [serialize_flight(p, url) for p in parts],
+            "booking_url": url,
+        })
+    itineraries.sort(key=lambda i: i["total_price"] or 1e9)
+    for i, itin in enumerate(itineraries):
+        itin["score"] = round(95 - (i / max(len(itineraries) - 1, 1)) * 55)
+    route_text = " → ".join([resolved[0][0][0].name] + [d[0].name for _, d, _ in resolved])
+    return {
+        "type": "multicity",
+        "message": f"Found {len(itineraries)} multi-city itineraries ({route_text}). Prices are the total for all legs on one ticket.",
+        "results": itineraries,
+    }
+
+
 def search_flexible_dates(spec: dict, origins: list, destinations: list, currency: str) -> dict:
     flex = spec["flexible_dates"]
     is_round_trip = spec.get("trip_type") == "round_trip"
@@ -716,6 +809,10 @@ def roll_past_dates(spec: dict) -> tuple[dict, list[str]]:
     spec = dict(spec)
     for key in ("departure_date", "return_date", "arrival_date"):
         spec[key] = roll(spec.get(key))
+    if spec.get("multi_city_segments"):
+        spec["multi_city_segments"] = [
+            {**seg, "date": roll(seg.get("date"))} for seg in spec["multi_city_segments"]
+        ]
     if spec.get("flexible_dates"):
         flex = dict(spec["flexible_dates"])
         flex["from_date"] = roll(flex.get("from_date"))
@@ -726,6 +823,15 @@ def roll_past_dates(spec: dict) -> tuple[dict, list[str]]:
 
 def execute_spec(spec: dict) -> dict:
     spec, date_notes = roll_past_dates(spec)
+    currency_mc = (spec.get("currency") or "USD").upper()
+
+    if spec.get("trip_type") == "multi_city" or spec.get("multi_city_segments"):
+        payload = search_multi_city(spec, currency_mc)
+        if spec.get("summary"):
+            payload["message"] = f"{spec['summary']}\n\n{payload['message']}"
+        payload["assumptions"] = (spec.get("assumptions") or []) + date_notes
+        return payload
+
     origins, bad_origins = resolve_airports(spec.get("origins"))
     destinations, bad_destinations = resolve_airports(spec.get("destinations"))
     invalid = bad_origins + bad_destinations

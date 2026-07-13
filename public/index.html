@@ -483,6 +483,76 @@
                   </div>
                 </template>
 
+                <!-- multi-city itineraries, compact -->
+                <template x-if="sec.type === 'multicity' && sec.results && sec.results.length && sectionView(sec) === 'compact'">
+                  <div class="compact-grid">
+                    <template x-for="(it, j) in sec.results.slice(0, 8)" :key="j">
+                      <div class="compact-card">
+                        <div class="compact-top">
+                          <div class="compact-airline" x-text="[...new Set(it.parts.map(p => p.airline))].join(' + ')"></div>
+                          <div class="compact-price" x-text="formatPrice(it.total_price, it.currency)"></div>
+                        </div>
+                        <template x-for="(p, k) in it.parts" :key="k">
+                          <div class="compact-leg"><span class="lbl" x-text="'Leg ' + (k+1)"></span><span x-text="p.legs[0].from + '→' + p.legs[p.legs.length-1].to + ' · ' + formatTime(p.legs[0].departure) + '–' + formatTime(p.legs[p.legs.length-1].arrival) + ' · ' + stopsText(p.stops)"></span></div>
+                        </template>
+                        <div class="compact-sub">all legs, one ticket</div>
+                        <a :href="it.booking_url" target="_blank" rel="noopener noreferrer" class="compact-book">Book →</a>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+
+                <!-- multi-city itineraries, detailed -->
+                <template x-if="sec.type === 'multicity' && sec.results && sec.results.length && sectionView(sec) === 'detailed'">
+                  <div class="flight-list">
+                    <template x-for="(it, j) in sec.results.slice(0, 5)" :key="j">
+                      <div class="flight-card">
+                        <div class="card-header">
+                          <div class="airline-id">
+                            <div class="airline-avatar" :style="'background:' + airlineColor(it.parts[0].airline_code)" x-text="it.parts[0].airline_code"></div>
+                            <div>
+                              <div class="card-airline" x-text="[...new Set(it.parts.map(p => p.airline))].join(' + ')"></div>
+                              <div class="card-code" x-text="'Multi-city · ' + it.parts.length + ' legs'"></div>
+                            </div>
+                          </div>
+                          <div>
+                            <div class="card-price" x-text="formatPrice(it.total_price, it.currency)"></div>
+                            <div class="card-price-note">total, all legs</div>
+                          </div>
+                        </div>
+                        <template x-for="(p, k) in it.parts" :key="k">
+                          <div :style="k > 0 ? 'margin-top: 0.5rem;' : ''">
+                            <span class="leg-label" x-text="'Leg ' + (k+1) + ' · ' + formatDate(p.legs[0].departure.slice(0,10))"></span>
+                            <div class="route">
+                              <div class="route-end">
+                                <div class="route-time" x-text="formatTime(p.legs[0].departure)"></div>
+                                <div class="route-port" x-text="p.legs[0].from"></div>
+                              </div>
+                              <div class="route-mid">
+                                <div class="route-line"></div>
+                                <div class="route-meta" x-text="formatDuration(p.duration) + ' · ' + stopsText(p.stops)"></div>
+                              </div>
+                              <div class="route-end">
+                                <div class="route-time" x-text="formatTime(p.legs[p.legs.length-1].arrival)"></div>
+                                <div class="route-port" x-text="p.legs[p.legs.length-1].to"></div>
+                              </div>
+                            </div>
+                            <template x-for="(lo, m) in (p.layovers || [])" :key="m">
+                              <div class="leg-detail" x-text="layoverText(lo)"></div>
+                            </template>
+                            <div class="leg-detail" x-show="aircraftText(p)" x-text="aircraftText(p)"></div>
+                            <template x-for="(w, m) in (p.warnings || [])" :key="'w'+m">
+                              <div class="warning" x-text="w"></div>
+                            </template>
+                          </div>
+                        </template>
+                        <div class="route-map" x-show="multiCityPoints(it).length > 1" x-html="mapSvg(multiCityPoints(it))"></div>
+                        <a :href="it.booking_url" target="_blank" rel="noopener noreferrer" class="card-action">Book on Google Flights</a>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+
                 <!-- flexible-date price grid -->
                 <template x-if="sec.type === 'dates' && sec.dates && sec.dates.length">
                   <div class="date-grid">
@@ -567,6 +637,14 @@
 
         sectionView(sec) {
           return sec._view || this.viewMode;
+        },
+
+        multiCityPoints(it) {
+          const pts = [];
+          (it.parts || []).forEach(p => (p.route_points || []).forEach(pt => {
+            if (!pts.length || pts[pts.length - 1].code !== pt.code) pts.push(pt);
+          }));
+          return pts;
         },
 
         autosize() {
