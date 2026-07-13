@@ -117,6 +117,11 @@ SEARCH_TOOL = {
                 "type": "array",
                 "items": {"type": "string", "enum": ["ONEWORLD", "SKYTEAM", "STAR_ALLIANCE"]},
             },
+            "via_airports": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Only return itineraries connecting through these airports (IATA codes). Use this whenever the user asks about routing via a specific hub ('through HND', 'via Seoul') — it checks the FULL result set, so it is the only reliable way to establish whether a routing exists.",
+            },
             "sort": {"type": "string", "enum": ["best", "cheapest", "fastest", "departure_time"]},
             "max_price": {"type": ["number", "null"]},
             "currency": {"type": "string", "description": "ISO 4217, default USD"},
@@ -177,6 +182,7 @@ You are a travel-savvy assistant, not a form. Converse naturally, but ground eve
 How to handle requests:
 - Vague is fine. Expand cities to their major airports (NYC -> JFK/LGA/EWR). "mid September" or "cheapest time to go" -> flexible_dates. Loyalty hints -> airline filters. A bare month/day means the nearest future date.
 - "arrive by / be there by X" is an ARRIVAL constraint (arrival_time), never a departure cap.
+- "via / through <hub>" questions: search with via_airports. That filter checks every itinerary Google returns; the plain result list you see is only a top-6 sample, so NEVER assert that a routing, hub, or airline "doesn't exist" from the plain list — and never say you "confirmed" or "checked directly" unless a via_airports search actually ran this conversation. If you haven't checked, say so and offer to.
 - Comparisons: run one search per option (at most 4 per turn). A self-arranged overnight stopover = one search per leg with the correct date on each. Give each search a summary naming the option ("Option A: Thursday nonstop").
 - Make reasonable assumptions and state them briefly instead of interrogating the user; ask a question only when origin or destination is truly unknowable.
 
@@ -210,8 +216,16 @@ def compact_for_model(payload: dict) -> str:
             for it in (payload.get("results") or [])[:6]
         ]
         return json.dumps({"kind": "round_trips", "note": payload.get("message"), "options": rows})
-    rows = [_leg_summary(f) for f in (payload.get("results") or [])[:6]]
-    return json.dumps({"kind": "flights", "note": payload.get("message"), "options": rows})
+    results = payload.get("results") or []
+    rows = [_leg_summary(f) for f in results[:6]]
+    out = {"kind": "flights", "note": payload.get("message"), "options": rows}
+    if len(results) > 6:
+        out["sample_note"] = (
+            f"Showing 6 of {len(results)} results by the requested sort. Routings absent from "
+            "this sample may still exist — never claim a hub/airline/routing is unavailable "
+            "unless a via_airports-filtered search says so."
+        )
+    return json.dumps(out)
 
 
 def _leg_summary(f: dict) -> dict:
@@ -525,6 +539,23 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
             "message": "No flights found for that search. Try different dates, nearby airports, or fewer filters.",
             "results": [],
         }
+
+    via = {c.strip().upper() for c in spec.get("via_airports") or []}
+
+    def routes_via(result) -> bool:
+        return any(lo.airport.name in via for lo in (result.layovers or []))
+
+    if via:
+        if isinstance(results[0], tuple):
+            results = [c for c in results if routes_via(c[0]) or routes_via(c[-1])]
+        else:
+            results = [r for r in results if routes_via(r)]
+        if not results:
+            return {
+                "type": "flights",
+                "message": f"Checked every itinerary Google returned: nothing routes via {', '.join(sorted(via))} on that day.",
+                "results": [],
+            }
 
     aw, rw = spec.get("arrival_time"), spec.get("return_arrival_time")
     dep_date = spec.get("departure_date")

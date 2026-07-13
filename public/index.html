@@ -570,9 +570,7 @@
 
         aircraftText(f) {
           const legs = f.legs || [];
-          const craft = [...new Set(legs.map(l => l.aircraft).filter(Boolean))].join(' + ');
-          const legroom = legs[0] && legs[0].legroom ? legs[0].legroom + ' legroom' : null;
-          return [craft, legroom].filter(Boolean).join(' · ');
+          return [...new Set(legs.map(l => l.aircraft).filter(Boolean))].join(' + ');
         },
 
         mapSvg(points, returnPoints) {
