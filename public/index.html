@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fraunces:ital,wght@0,600;1,600&display=swap" rel="stylesheet" />
-  <script src="/world.js"></script>
+  <script src="/world.js?v=2"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
   <style>
     :root {
@@ -213,7 +213,7 @@
 
     .route-map {
       margin: 0.5rem 0 0.25rem; border: 1px solid var(--line); border-radius: 5px;
-      overflow: hidden; background: #f0e6c8;
+      overflow: hidden; background: #ece4cb;
     }
     .route-map svg { display: block; width: 100%; height: 7rem; }
 
@@ -716,7 +716,7 @@
           // one shared coastline definition; every mini-map references it via <use>
           if (!document.getElementById('worldpath')) {
             const holder = document.createElement('div');
-            holder.innerHTML = `<svg style="position:absolute;width:0;height:0" aria-hidden="true"><defs><path id="worldpath" d="${WORLD_PATH}"/></defs></svg>`;
+            holder.innerHTML = `<svg style="position:absolute;width:0;height:0" aria-hidden="true"><defs><path id="worldpath" d="${WORLD_PATH}"/><path id="lakespath" d="${LAKES_PATH}"/></defs></svg>`;
             document.body.appendChild(holder.firstChild);
           }
         },
@@ -999,10 +999,27 @@
             return `<circle cx="${p.x}" cy="${p.y}" r="${sw * (end ? 3.2 : 2.2)}" fill="${end ? '#1c1a15' : '#b1471f'}"/>` +
                    `<text x="${p.x}" y="${labelY}" font-size="${sw * 9}" text-anchor="middle" fill="#1c1a15" font-family="Inter, sans-serif" font-weight="600">${p.code}</text>`;
           }).join('');
+
+          // land + lakes drawn across three 360-degree spans so no edge of the
+          // crop ever runs out of world; lakes punch through in the ocean color
+          const OCEAN = '#ece4cb', LAND = '#dfd1a5', COAST = '#bfa96e';
+          let ground = '';
+          for (const dx of [-360, 0, 360]) {
+            const t = dx ? ` transform="translate(${dx},0)"` : '';
+            ground += `<use href="#worldpath"${t} fill="${LAND}" stroke="${COAST}" stroke-width="${sw * 0.6}"/>`;
+            ground += `<use href="#lakespath"${t} fill="${OCEAN}" stroke="${COAST}" stroke-width="${sw * 0.4}"/>`;
+          }
+          // faint graticule every 20 degrees for the atlas feel
+          let grid = '';
+          for (let gx = Math.ceil(minX / 20) * 20; gx <= maxX; gx += 20)
+            grid += `<line x1="${gx}" y1="${minY.toFixed(1)}" x2="${gx}" y2="${maxY.toFixed(1)}"/>`;
+          for (let gy = Math.max(0, Math.ceil(minY / 20) * 20); gy <= Math.min(180, maxY); gy += 20)
+            grid += `<line x1="${minX.toFixed(1)}" y1="${gy}" x2="${maxX.toFixed(1)}" y2="${gy}"/>`;
+          grid = `<g stroke="#1c1a15" stroke-opacity="0.07" stroke-width="${sw * 0.5}">${grid}</g>`;
+
           return `<svg viewBox="${vb}" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg">` +
-            `<use href="#worldpath" fill="#e3d5ae" stroke="#cbb987" stroke-width="${sw * 0.6}"/>` +
-            `<use href="#worldpath" transform="translate(360,0)" fill="#e3d5ae" stroke="#cbb987" stroke-width="${sw * 0.6}"/>` +
-            route + dots + `</svg>`;
+            `<rect x="${minX.toFixed(1)}" y="${minY.toFixed(1)}" width="${(maxX - minX).toFixed(1)}" height="${(maxY - minY).toFixed(1)}" fill="${OCEAN}"/>` +
+            ground + grid + route + dots + `</svg>`;
         },
 
         airlineColor(code) {
