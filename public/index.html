@@ -136,12 +136,6 @@
     .mini-toggle button.active { background: var(--ink); color: var(--bg); opacity: 1; }
 
     .filter-bar { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; margin-bottom: 0.5rem; }
-    .fchip {
-      font-size: 0.62rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
-      padding: 0.28rem 0.6rem; border: 1px solid var(--line); border-radius: 999px;
-      background: var(--panel); color: var(--ink); cursor: pointer; opacity: 0.75; transition: all 0.15s;
-    }
-    .fchip.active { background: var(--ink); color: var(--bg); opacity: 1; }
     .fselect {
       font-size: 0.68rem; padding: 0.26rem 0.5rem; border: 1px solid var(--line);
       border-radius: 6px; background: var(--panel); color: var(--ink);
@@ -332,17 +326,36 @@
                 </div>
 
                 <div class="filter-bar" x-show="sec._expanded && sec.type !== 'dates'">
-                  <select class="fselect" @change="setF(sec, 'sort', $event.target.value)">
+                  <select class="fselect" :value="(sec._filters || {}).sort || ''" @change="setF(sec, 'sort', $event.target.value)">
                     <option value="">Sort: best</option>
                     <option value="price">Sort: price</option>
                     <option value="duration">Sort: duration</option>
                     <option value="departure">Sort: departure</option>
                   </select>
-                  <button class="fchip" :class="hasTime(sec, 'early') ? 'active' : ''" @click="toggleTime(sec, 'early')">Before 8a</button>
-                  <button class="fchip" :class="hasTime(sec, 'morning') ? 'active' : ''" @click="toggleTime(sec, 'morning')">8a–12p</button>
-                  <button class="fchip" :class="hasTime(sec, 'afternoon') ? 'active' : ''" @click="toggleTime(sec, 'afternoon')">12–6p</button>
-                  <button class="fchip" :class="hasTime(sec, 'evening') ? 'active' : ''" @click="toggleTime(sec, 'evening')">After 6p</button>
-                  <button class="fchip" :class="(sec._filters || {}).direct ? 'active' : ''" @click="setF(sec, 'direct', !(sec._filters || {}).direct)">Direct only</button>
+                  <select class="fselect" :value="(sec._filters || {}).dep || ''" @change="setF(sec, 'dep', $event.target.value)">
+                    <option value="">Depart: any time</option>
+                    <option value="early">Before 8am</option>
+                    <option value="morning">8am – 12pm</option>
+                    <option value="afternoon">12pm – 6pm</option>
+                    <option value="evening">After 6pm</option>
+                  </select>
+                  <select class="fselect" :value="(sec._filters || {}).maxDur || ''" @change="setF(sec, 'maxDur', $event.target.value)">
+                    <option value="">Duration: any</option>
+                    <template x-for="h in durationOptions(sec)" :key="h">
+                      <option :value="h" x-text="'Under ' + h + 'h'" :selected="String((sec._filters || {}).maxDur) === String(h)"></option>
+                    </template>
+                  </select>
+                  <select class="fselect" :value="(sec._filters || {}).airline || ''" @change="setF(sec, 'airline', $event.target.value)">
+                    <option value="">Airline: any</option>
+                    <template x-for="a in airlineOptions(sec)" :key="a.code">
+                      <option :value="a.code" x-text="a.name" :selected="(sec._filters || {}).airline === a.code"></option>
+                    </template>
+                  </select>
+                  <select class="fselect" :value="(sec._filters || {}).stops ?? ''" @change="setF(sec, 'stops', $event.target.value)">
+                    <option value="">Stops: any</option>
+                    <option value="0">Nonstop only</option>
+                    <option value="1">1 stop max</option>
+                  </select>
                   <span class="fcount" x-text="list(sec).length + ' of ' + (sec.results || []).length + ' options'"></span>
                 </div>
 
@@ -700,22 +713,51 @@
           return x.stops === 0;
         },
 
+        _stopsOf(sec, x) {
+          if (sec.type === 'itineraries') return Math.max(x.outbound.stops, x.return.stops);
+          if (sec.type === 'multicity') return Math.max(...x.parts.map(p => p.stops));
+          return x.stops;
+        },
+        _airlinesOf(sec, x) {
+          const parts = sec.type === 'itineraries' ? [x.outbound, x.return]
+                      : sec.type === 'multicity' ? x.parts : [x];
+          return parts.flatMap(p => (p.legs || []).map(l => l.airline_code));
+        },
+
         list(sec) {
           let rs = sec.results || [];
           const f = sec._filters || {};
-          if (f.direct) rs = rs.filter(x => this._directOf(sec, x));
-          if ((f.times || []).length) {
+          if (f.dep) {
             const inB = (h, b) => b === 'early' ? h < 8 : b === 'morning' ? (h >= 8 && h < 12) : b === 'afternoon' ? (h >= 12 && h < 18) : h >= 18;
             rs = rs.filter(x => {
               const t = this._legsOf(sec, x)[0].departure;
-              const h = t ? parseInt(t.slice(11, 13), 10) : 0;
-              return f.times.some(b => inB(h, b));
+              return inB(t ? parseInt(t.slice(11, 13), 10) : 0, f.dep);
             });
           }
+          if (f.maxDur) rs = rs.filter(x => (this._durOf(sec, x) ?? 1e9) <= f.maxDur * 60);
+          if (f.airline) rs = rs.filter(x => this._airlinesOf(sec, x).includes(f.airline));
+          if (f.stops !== '' && f.stops != null) rs = rs.filter(x => this._stopsOf(sec, x) <= +f.stops);
           if (f.sort === 'price') rs = [...rs].sort((a, b) => (this._priceOf(sec, a) ?? 1e9) - (this._priceOf(sec, b) ?? 1e9));
           else if (f.sort === 'duration') rs = [...rs].sort((a, b) => (this._durOf(sec, a) ?? 1e9) - (this._durOf(sec, b) ?? 1e9));
           else if (f.sort === 'departure') rs = [...rs].sort((a, b) => (this._legsOf(sec, a)[0].departure || '').localeCompare(this._legsOf(sec, b)[0].departure || ''));
           return rs;
+        },
+
+        durationOptions(sec) {
+          const durs = (sec.results || []).map(x => this._durOf(sec, x)).filter(Boolean);
+          if (!durs.length) return [];
+          const minH = Math.min(...durs) / 60, maxH = Math.max(...durs) / 60;
+          return [4, 6, 8, 10, 12, 15, 18, 24, 30, 36, 48].filter(h => h > minH && h < maxH).slice(0, 4);
+        },
+
+        airlineOptions(sec) {
+          const seen = new Map();
+          for (const x of sec.results || []) {
+            const parts = sec.type === 'itineraries' ? [x.outbound, x.return]
+                        : sec.type === 'multicity' ? x.parts : [x];
+            for (const p of parts) if (p.airline_code && !seen.has(p.airline_code)) seen.set(p.airline_code, p.airline);
+          }
+          return [...seen].map(([code, name]) => ({ code, name })).sort((a, b) => (a.name || '').localeCompare(b.name || ''));
         },
 
         visible(sec, previewN) {
@@ -728,16 +770,6 @@
           sec._filters[key] = value;
         },
 
-        toggleTime(sec, bucket) {
-          if (!sec._filters) sec._filters = {};
-          const t = sec._filters.times || (sec._filters.times = []);
-          const i = t.indexOf(bucket);
-          i >= 0 ? t.splice(i, 1) : t.push(bucket);
-        },
-
-        hasTime(sec, bucket) {
-          return ((sec._filters || {}).times || []).includes(bucket);
-        },
 
         multiCityPoints(it) {
           const pts = [];
