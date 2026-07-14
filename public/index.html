@@ -101,6 +101,10 @@
       cursor: pointer; transition: all 0.15s; color: var(--ink);
     }
     .chip:hover { border-color: var(--accent); color: var(--accent-dark); }
+    .suggest-chips { margin-bottom: 0; margin-top: 0.25rem; }
+    .suggest-chips .chip { border-color: rgba(177, 71, 31, 0.4); color: var(--accent-dark); }
+    .suggest-chips .chip::before { content: "→ "; opacity: 0.6; }
+    .suggest-chips .chip:hover { background: var(--accent); color: #fff; }
 
     .messages { display: flex; flex-direction: column; gap: 1.5rem; margin-bottom: 2rem; }
 
@@ -569,6 +573,13 @@
                      x-text="(sec.assumptions || []).map(a => '· ' + a).join('   ')"></div>
               </div>
             </template>
+
+            <div class="chips suggest-chips"
+                 x-show="!isLoading && i === messages.length - 1 && (msg.suggestions || []).length">
+              <template x-for="(s, k) in (msg.suggestions || [])" :key="k">
+                <button class="chip" @click="search(s)" x-text="s"></button>
+              </template>
+            </div>
           </div>
         </div>
       </template>
@@ -725,6 +736,7 @@
               role: 'assistant',
               content: data.message,
               sections: data.sections || [],
+              suggestions: data.suggestions || [],
             });
           } catch (err) {
             if (err.name === 'AbortError') return; // stop() already recorded the interruption

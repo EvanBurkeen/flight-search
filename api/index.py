@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import time
 from datetime import datetime
 from functools import lru_cache
@@ -210,7 +211,10 @@ Answering:
 - Mention real caveats from the data: nothing arrives before X, prices are one-way vs round-trip totals, self-transfer risks, tight or overnight layovers.
 - If a search fails or is rate-limited, say so plainly and suggest trying again in a moment.
 - Keep responses short and conversational — a few sentences, not a report.
-- Formatting: you may use **bold** sparingly for the key number or verdict (it renders properly). No other markdown — no headers, no bullet syntax, no italics-by-asterisk."""
+- Formatting: you may use **bold** sparingly for the key number or verdict (it renders properly). No other markdown — no headers, no bullet syntax, no italics-by-asterisk.
+- End EVERY final reply with exactly one line in this form (it becomes tappable buttons and is stripped from your prose, so don't also ask the same things in the text):
+SUGGESTIONS: ["first likely follow-up", "second", "third"]
+2-4 items, each under 9 words, phrased as the user would type them ("check Saturday instead", "only nonstops", "what about Newark?"). Predict the most likely next asks given the results: nearby dates, price/speed trade-offs, filters, alternate airports, booking the pick."""
 
 
 def compact_for_model(payload: dict) -> str:
@@ -271,6 +275,18 @@ def _leg_summary(f: dict) -> dict:
     }
 
 
+def split_suggestions(text: str) -> tuple[str, list[str]]:
+    m = re.search(r"\n?\s*SUGGESTIONS:\s*(\[.*?\])\s*$", text, re.S)
+    if not m:
+        return text, []
+    try:
+        raw = json.loads(m.group(1))
+        suggestions = [s.strip() for s in raw if isinstance(s, str) and s.strip()][:4]
+    except (json.JSONDecodeError, TypeError):
+        return text[: m.start()].rstrip(), []
+    return text[: m.start()].rstrip(), suggestions
+
+
 def run_assistant(query: str, history: list | None) -> dict:
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     messages = [
@@ -296,7 +312,8 @@ def run_assistant(query: str, history: list | None) -> dict:
         tool_uses = [b for b in response.content if b.type == "tool_use"]
         if response.stop_reason != "tool_use" or not tool_uses:
             text = "\n".join(b.text for b in response.content if b.type == "text").strip()
-            return {"message": text or "…", "sections": sections}
+            text, suggestions = split_suggestions(text)
+            return {"message": text or "…", "sections": sections, "suggestions": suggestions}
 
         messages.append({"role": "assistant", "content": response.content})
         tool_results = []
@@ -340,6 +357,7 @@ def run_assistant(query: str, history: list | None) -> dict:
     return {
         "message": "That took more searching than one turn allows — here's what I found so far. Ask me to continue if you need more.",
         "sections": sections,
+        "suggestions": ["continue"],
     }
 
 
@@ -875,6 +893,7 @@ async def search(request: Request):
             "type": "assistant",
             "message": result["message"],
             "sections": result["sections"],
+            "suggestions": result.get("suggestions") or [],
         })
 
     except Exception as e:

@@ -72,6 +72,7 @@ if not os.environ.get("ANTHROPIC_API_KEY"):
             "message": f"STUB ASSISTANT (no API key): ran {len(sections)} search(es). "
                        "With a real key, Claude summarizes these conversationally.",
             "sections": sections,
+            "suggestions": ["check Saturday instead", "only nonstops", "make it round trip"],
         }
 
     app_mod.run_assistant = stub_run_assistant
