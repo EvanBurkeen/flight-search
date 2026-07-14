@@ -536,6 +536,7 @@ def serialize_leg(leg) -> dict:
         "arrival": leg.arrival_datetime.isoformat() if leg.arrival_datetime else None,
         "aircraft": leg.aircraft,
         "overnight": leg.overnight,
+        "operated_by": getattr(leg.operating_airline, "value", leg.operating_airline),
     }
 
 
@@ -563,6 +564,8 @@ def serialize_flight(result, cabin: str | None = None, ret_date: str | None = No
             warnings.append(f"Airport change during layover in {lo['city']}")
         if lo["overnight"]:
             warnings.append(f"Overnight layover in {lo['city']}")
+        if lo["duration"] and lo["duration"] < 45 and not lo["overnight"]:
+            warnings.append(f"Tight {lo['duration']}-minute connection in {lo['city']}")
 
     primary_code = result.primary_airline.name if result.primary_airline else (legs[0]["airline_code"] if legs else None)
     return {
@@ -577,6 +580,7 @@ def serialize_flight(result, cabin: str | None = None, ret_date: str | None = No
         "layovers": layovers,
         "warnings": warnings,
         "highlights": [],
+        "co2_delta_pct": result.co2_emissions_delta_pct,
         "booking_url": url,
         "route_points": route_points(result),
     }
