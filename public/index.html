@@ -351,6 +351,12 @@
                       <option :value="a.code" x-text="a.name" :selected="(sec._filters || {}).airline === a.code"></option>
                     </template>
                   </select>
+                  <select class="fselect" x-show="allianceOptions(sec).length" :value="(sec._filters || {}).alliance || ''" @change="setF(sec, 'alliance', $event.target.value)">
+                    <option value="">Alliance: any</option>
+                    <template x-for="al in allianceOptions(sec)" :key="al">
+                      <option :value="al" x-text="al" :selected="(sec._filters || {}).alliance === al"></option>
+                    </template>
+                  </select>
                   <select class="fselect" :value="(sec._filters || {}).stops ?? ''" @change="setF(sec, 'stops', $event.target.value)">
                     <option value="">Stops: any</option>
                     <option value="0">Nonstop only</option>
@@ -718,10 +724,12 @@
           if (sec.type === 'multicity') return Math.max(...x.parts.map(p => p.stops));
           return x.stops;
         },
+        _partsOf(sec, x) {
+          return sec.type === 'itineraries' ? [x.outbound, x.return]
+               : sec.type === 'multicity' ? x.parts : [x];
+        },
         _airlinesOf(sec, x) {
-          const parts = sec.type === 'itineraries' ? [x.outbound, x.return]
-                      : sec.type === 'multicity' ? x.parts : [x];
-          return parts.flatMap(p => (p.legs || []).map(l => l.airline_code));
+          return this._partsOf(sec, x).flatMap(p => (p.legs || []).map(l => l.airline_code));
         },
 
         list(sec) {
@@ -736,6 +744,7 @@
           }
           if (f.maxDur) rs = rs.filter(x => (this._durOf(sec, x) ?? 1e9) <= f.maxDur * 60);
           if (f.airline) rs = rs.filter(x => this._airlinesOf(sec, x).includes(f.airline));
+          if (f.alliance) rs = rs.filter(x => this._partsOf(sec, x).some(p => p.alliance === f.alliance));
           if (f.stops !== '' && f.stops != null) rs = rs.filter(x => this._stopsOf(sec, x) <= +f.stops);
           if (f.sort === 'price') rs = [...rs].sort((a, b) => (this._priceOf(sec, a) ?? 1e9) - (this._priceOf(sec, b) ?? 1e9));
           else if (f.sort === 'duration') rs = [...rs].sort((a, b) => (this._durOf(sec, a) ?? 1e9) - (this._durOf(sec, b) ?? 1e9));
@@ -753,11 +762,19 @@
         airlineOptions(sec) {
           const seen = new Map();
           for (const x of sec.results || []) {
-            const parts = sec.type === 'itineraries' ? [x.outbound, x.return]
-                        : sec.type === 'multicity' ? x.parts : [x];
-            for (const p of parts) if (p.airline_code && !seen.has(p.airline_code)) seen.set(p.airline_code, p.airline);
+            for (const p of this._partsOf(sec, x)) {
+              if (p.airline_code && !seen.has(p.airline_code)) seen.set(p.airline_code, p.airline);
+            }
           }
           return [...seen].map(([code, name]) => ({ code, name })).sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+        },
+
+        allianceOptions(sec) {
+          const seen = new Set();
+          for (const x of sec.results || []) {
+            for (const p of this._partsOf(sec, x)) if (p.alliance) seen.add(p.alliance);
+          }
+          return [...seen].sort();
         },
 
         visible(sec, previewN) {
@@ -954,7 +971,8 @@
         },
 
         flightCodes(f) {
-          return (f.legs || []).map(l => l.airline_code + ' ' + l.flight_number).join(' · ');
+          const codes = (f.legs || []).map(l => l.airline_code + ' ' + l.flight_number).join(' · ');
+          return f.alliance ? codes + ' · ' + f.alliance : codes;
         },
 
         stopsText(stops) {

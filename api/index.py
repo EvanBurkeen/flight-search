@@ -50,6 +50,24 @@ SORT_MAP = {
     "departure_time": SortBy.DEPARTURE_TIME,
 }
 
+# Alliance rosters (reference data, IATA codes, 2026 — incl. SAS in SkyTeam)
+ALLIANCE_MEMBERS = {
+    "Star Alliance": [
+        "A3", "AC", "AI", "AV", "BR", "CA", "CM", "ET", "LH", "LO", "LX",
+        "MS", "NH", "NZ", "OS", "OU", "OZ", "SA", "SN", "SQ", "TG", "TK",
+        "TP", "UA", "ZH",
+    ],
+    "oneworld": [
+        "AA", "AS", "AT", "AY", "BA", "CX", "FJ", "IB", "JL", "MH", "QF",
+        "QR", "RJ", "UL", "WY",
+    ],
+    "SkyTeam": [
+        "AF", "AM", "AR", "AZ", "CI", "DL", "GA", "KE", "KL", "KQ", "ME",
+        "MF", "MU", "OK", "RO", "SK", "SV", "UX", "VN", "VS",
+    ],
+}
+AIRLINE_ALLIANCE = {code: name for name, codes in ALLIANCE_MEMBERS.items() for code in codes}
+
 SEARCH_TOOL = {
     "name": "search_flights",
     "description": (
@@ -524,9 +542,11 @@ def serialize_flight(result, url: str) -> dict:
         if lo["overnight"]:
             warnings.append(f"Overnight layover in {lo['city']}")
 
+    primary_code = result.primary_airline.name if result.primary_airline else (legs[0]["airline_code"] if legs else None)
     return {
         "airline": result.primary_airline_name or (legs[0]["airline"] if legs else None),
-        "airline_code": result.primary_airline.name if result.primary_airline else (legs[0]["airline_code"] if legs else None),
+        "airline_code": primary_code,
+        "alliance": AIRLINE_ALLIANCE.get(primary_code),
         "price": result.price,
         "currency": result.currency or "USD",
         "duration": result.duration,
