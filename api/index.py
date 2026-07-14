@@ -468,20 +468,41 @@ def build_filters(spec: dict, origins: list, destinations: list, filters_cls=Fli
     )
 
 
-def booking_url(origins: list, destinations: list, spec: dict) -> str:
-    o = origins[0].name
-    d = destinations[0].name
-    q = f"flights from {o} to {d}"
-    if spec.get("departure_date"):
-        q += f" on {spec['departure_date']}"
-    if spec.get("trip_type") == "round_trip" and spec.get("return_date"):
-        q += f" returning {spec['return_date']}"
-    elif spec.get("trip_type") == "one_way":
-        q += " one way"
-    cabin = spec.get("cabin")
+def google_flights_url(dep_code: str, arr_code: str, dep_date: str | None,
+                       ret_date: str | None = None, cabin: str | None = None) -> str:
+    q = f"flights from {dep_code} to {arr_code}"
+    if dep_date:
+        q += f" on {dep_date}"
+    q += f" returning {ret_date}" if ret_date else " one way"
     if cabin and cabin != "economy":
         q += f" {cabin.replace('_', ' ')}"
     return f"https://www.google.com/travel/flights?q={quote(q)}"
+
+
+def multi_city_url(parts: list, cabin: str | None = None) -> str:
+    segs = []
+    for p in parts:
+        legs = p.legs or []
+        if not legs:
+            continue
+        date = legs[0].departure_datetime.strftime("%Y-%m-%d") if legs[0].departure_datetime else ""
+        segs.append(f"{legs[0].departure_airport.name} to {legs[-1].arrival_airport.name} on {date}")
+    q = "multi-city flights " + ", then ".join(segs)
+    if cabin and cabin != "economy":
+        q += f" {cabin.replace('_', ' ')}"
+    return f"https://www.google.com/travel/flights?q={quote(q)}"
+
+
+def result_booking_url(result, cabin: str | None = None, ret_date: str | None = None) -> str:
+    # built from the itinerary's OWN legs — multi-airport searches mean each
+    # result can have a different origin/destination than the search defaults
+    legs = result.legs or []
+    if not legs:
+        return "https://www.google.com/travel/flights"
+    dep = legs[0].departure_airport.name
+    arr = legs[-1].arrival_airport.name
+    dep_date = legs[0].departure_datetime.strftime("%Y-%m-%d") if legs[0].departure_datetime else None
+    return google_flights_url(dep, arr, dep_date, ret_date, cabin)
 
 
 @lru_cache(maxsize=1)
@@ -518,7 +539,8 @@ def serialize_leg(leg) -> dict:
     }
 
 
-def serialize_flight(result, url: str) -> dict:
+def serialize_flight(result, cabin: str | None = None, ret_date: str | None = None) -> dict:
+    url = result_booking_url(result, cabin, ret_date)
     legs = [serialize_leg(l) for l in result.legs]
     layovers = [
         {
@@ -606,7 +628,6 @@ def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy
 def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: str) -> dict:
     filters = build_filters(spec, origins, destinations, show_all_results=True)
     sort = SORT_MAP.get(spec.get("sort"), SortBy.CHEAPEST)
-    url = booking_url(origins, destinations, spec)
     results = run_search(SearchFlights(), filters, sort, top_n=8)
 
     if not results:
@@ -660,9 +681,13 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
                 {
                     "total_price": total,
                     "currency": out.currency or ret.currency or currency,
-                    "outbound": serialize_flight(out, url),
-                    "return": serialize_flight(ret, url),
-                    "booking_url": url,
+                    "outbound": (out_f := serialize_flight(
+                        out, spec.get("cabin"),
+                        ret_date=ret.legs[0].departure_datetime.strftime("%Y-%m-%d")
+                        if ret.legs and ret.legs[0].departure_datetime else spec.get("return_date"),
+                    )),
+                    "return": serialize_flight(ret, spec.get("cabin")),
+                    "booking_url": out_f["booking_url"],
                 }
             )
         itineraries.sort(key=lambda i: i["total_price"] or 1e9)
@@ -689,7 +714,7 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
 
     # ship the full reasonable list — the frontend previews a few and lets the
     # user expand/filter/sort the rest instantly, no re-search needed
-    flights = [serialize_flight(r, url) for r in results[:50]]
+    flights = [serialize_flight(r, spec.get("cabin")) for r in results[:50]]
     add_highlights(flights)
     message = f"Found {len(flights)} flights."
     if arrival_note:
@@ -740,7 +765,6 @@ def search_multi_city(spec: dict, currency: str) -> dict:
         show_all_results=True,
     )
     sort = SORT_MAP.get(spec.get("sort"), SortBy.CHEAPEST)
-    url = booking_url(resolved[0][0], resolved[0][1], {**spec, "departure_date": resolved[0][2], "trip_type": "multi_city"})
     # multi-city expands every leg chain — keep the fan-out small to stay inside
     # the serverless time budget
     results = run_search(SearchFlights(), filters, sort, top_n=4)
@@ -759,8 +783,8 @@ def search_multi_city(spec: dict, currency: str) -> dict:
         itineraries.append({
             "total_price": max(prices) if prices else None,
             "currency": parts[0].currency or currency,
-            "parts": [serialize_flight(p, url) for p in parts],
-            "booking_url": url,
+            "parts": [serialize_flight(p, spec.get("cabin")) for p in parts],
+            "booking_url": multi_city_url(parts, spec.get("cabin")),
         })
     itineraries.sort(key=lambda i: i["total_price"] or 1e9)
     for i, itin in enumerate(itineraries):
