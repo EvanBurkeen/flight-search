@@ -833,7 +833,9 @@
           if (!legs.length) return '';
           const dep = (legs[0].departure || '').slice(0, 10);
           const arr = (legs[legs.length - 1].arrival || '').slice(0, 10);
-          return dep && arr && dep !== arr ? ' +1' : '';
+          if (!dep || !arr || dep === arr) return '';
+          const days = Math.round((new Date(arr + 'T12:00:00') - new Date(dep + 'T12:00:00')) / 86400000);
+          return days > 0 ? ` +${days}` : '';
         },
 
         layoverText(lo) {

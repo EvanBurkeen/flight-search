@@ -477,7 +477,6 @@ def serialize_leg(leg) -> dict:
         "departure": leg.departure_datetime.isoformat() if leg.departure_datetime else None,
         "arrival": leg.arrival_datetime.isoformat() if leg.arrival_datetime else None,
         "aircraft": leg.aircraft,
-        "legroom": leg.legroom_short,
         "overnight": leg.overnight,
     }
 
