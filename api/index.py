@@ -666,7 +666,9 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
         arrival_note = "Nothing meets the arrival-day/time constraint exactly — showing the closest arrivals instead."
         results = sorted(results, key=lambda r: r.legs[-1].arrival_datetime or datetime.max)
 
-    flights = [serialize_flight(r, url) for r in results[:10]]
+    # ship the full reasonable list — the frontend previews a few and lets the
+    # user expand/filter/sort the rest instantly, no re-search needed
+    flights = [serialize_flight(r, url) for r in results[:50]]
     add_highlights(flights)
     message = f"Found {len(flights)} flights."
     if arrival_note:
