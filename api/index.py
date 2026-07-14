@@ -701,7 +701,9 @@ def search_multi_city(spec: dict, currency: str) -> dict:
     )
     sort = SORT_MAP.get(spec.get("sort"), SortBy.CHEAPEST)
     url = booking_url(resolved[0][0], resolved[0][1], {**spec, "departure_date": resolved[0][2], "trip_type": "multi_city"})
-    results = run_search(SearchFlights(), filters, sort, top_n=6)
+    # multi-city expands every leg chain — keep the fan-out small to stay inside
+    # the serverless time budget
+    results = run_search(SearchFlights(), filters, sort, top_n=4)
 
     if not results:
         return {
