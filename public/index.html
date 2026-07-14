@@ -83,8 +83,8 @@
 
     /* landing */
     .capabilities {
-      display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
-      gap: 0.75rem; margin-bottom: 1.25rem;
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr));
+      gap: 0.75rem; margin-bottom: 2rem;
     }
     .cap {
       border: 1px solid var(--line); background: var(--panel);
@@ -278,26 +278,17 @@
       <div>
         <div class="capabilities">
           <div class="cap">
-            <div class="cap-title"><span>↔</span>Compare strategies</div>
-            <div class="cap-body">"Fly out Wednesday night and stay over in FLL, or take the Thursday direct? Compare total prices."</div>
+            <div class="cap-title"><span>1</span>Talk like a person, not a form</div>
+            <div class="cap-body">Describe the trip the way you'd tell a friend — vague dates ("mid-October", "back by Friday"), cities instead of airport codes, budgets, loyalty status, "no budget airlines". The more intent you give, the better the recommendation.</div>
           </div>
           <div class="cap">
-            <div class="cap-title"><span>📅</span>Flexible dates</div>
-            <div class="cap-body">"Cheapest weekend to visit Chicago this fall" — get a price-by-date grid, click a date for real flights.</div>
+            <div class="cap-title"><span>2</span>Make it do the comparing</div>
+            <div class="cap-body">Ask A-vs-B questions: two dates, two routings, an overnight stopover vs the direct. It runs the searches side by side with real total prices — round trips and multi-city are priced as one ticket.</div>
           </div>
           <div class="cap">
-            <div class="cap-title"><span>✈</span>Real round-trip totals</div>
-            <div class="cap-body">Round trips are priced as complete itineraries — the number on the card is what you'd actually pay.</div>
+            <div class="cap-title"><span>3</span>Push back and iterate</div>
+            <div class="cap-body">Results are a conversation. Tap a suggested follow-up or type your own — "only nonstops", "is Saturday cheaper?", "what about Newark?" You can stop a search mid-way to correct it, and flip any result block to Compact for side-by-side scanning.</div>
           </div>
-          <div class="cap">
-            <div class="cap-title"><span>💺</span>Picky is fine</div>
-            <div class="cap-body">Alliances, loyalty status, no budget carriers, arrive-by times, cabin class, price caps — just say it.</div>
-          </div>
-        </div>
-        <div class="chips">
-          <template x-for="(c, i) in exampleChips" :key="i">
-            <button class="chip" @click="search(c)" x-text="c"></button>
-          </template>
         </div>
       </div>
     </template>
@@ -619,12 +610,6 @@
     function flightApp() {
       return {
         messages: [],
-        exampleChips: [
-          "JFK to London in March, direct, SkyTeam preferred",
-          "NYC to Tokyo round trip, a week in mid-October, business",
-          "Cheapest weekend to visit Chicago this fall",
-          "Boston to Lisbon, 2 adults, no budget airlines, under $600",
-        ],
         input: '',
         isLoading: false,
         hasSearched: false,
