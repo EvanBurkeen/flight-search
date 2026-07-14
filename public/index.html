@@ -1053,16 +1053,22 @@
             ground += `<use href="#worldpath"${t} fill="${LAND}" stroke="${COAST}" stroke-width="${sw * 0.6}"/>`;
             ground += `<use href="#lakespath"${t} fill="${OCEAN}" stroke="${COAST}" stroke-width="${sw * 0.4}"/>`;
           }
+          // ocean + graticule must extend well past the viewBox: with
+          // preserveAspectRatio="meet" the letterbox margins show extra world
+          const exW = (maxX - minX) * 1.6, exH = (maxY - minY) * 1.6;
+          const eMinX = minX - exW, eMaxX = maxX + exW;
+          const eMinY = minY - exH, eMaxY = maxY + exH;
+
           // faint graticule every 20 degrees for the atlas feel
           let grid = '';
-          for (let gx = Math.ceil(minX / 20) * 20; gx <= maxX; gx += 20)
-            grid += `<line x1="${gx}" y1="${minY.toFixed(1)}" x2="${gx}" y2="${maxY.toFixed(1)}"/>`;
-          for (let gy = Math.max(0, Math.ceil(minY / 20) * 20); gy <= Math.min(180, maxY); gy += 20)
-            grid += `<line x1="${minX.toFixed(1)}" y1="${gy}" x2="${maxX.toFixed(1)}" y2="${gy}"/>`;
+          for (let gx = Math.ceil(eMinX / 20) * 20; gx <= eMaxX; gx += 20)
+            grid += `<line x1="${gx}" y1="${eMinY.toFixed(1)}" x2="${gx}" y2="${eMaxY.toFixed(1)}"/>`;
+          for (let gy = Math.max(0, Math.ceil(eMinY / 20) * 20); gy <= Math.min(180, eMaxY); gy += 20)
+            grid += `<line x1="${eMinX.toFixed(1)}" y1="${gy}" x2="${eMaxX.toFixed(1)}" y2="${gy}"/>`;
           grid = `<g stroke="#1c1a15" stroke-opacity="0.07" stroke-width="${sw * 0.5}">${grid}</g>`;
 
           return `<svg viewBox="${vb}" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg">` +
-            `<rect x="${minX.toFixed(1)}" y="${minY.toFixed(1)}" width="${(maxX - minX).toFixed(1)}" height="${(maxY - minY).toFixed(1)}" fill="${OCEAN}"/>` +
+            `<rect x="${eMinX.toFixed(1)}" y="${eMinY.toFixed(1)}" width="${(eMaxX - eMinX).toFixed(1)}" height="${(eMaxY - eMinY).toFixed(1)}" fill="${OCEAN}"/>` +
             ground + grid + route + dots + `</svg>`;
         },
 
