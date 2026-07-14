@@ -239,7 +239,6 @@
     }
     .submit-btn:hover:not(:disabled) { background: var(--accent-dark); }
     .submit-btn:disabled { opacity: 0.35; cursor: default; }
-    .input-hint { margin-top: 0.5rem; font-size: 0.7rem; opacity: 0.55; }
 
     .loading { display: flex; align-items: center; gap: 0.6rem; font-size: 0.85rem; opacity: 0.75; }
     .stop-btn {
@@ -266,7 +265,7 @@
     <div class="header">
       <div>
         <h1>Flight <em>Assistant</em></h1>
-        <p>Talk to Claude · live Google Flights data · real comparisons</p>
+        <p>Conversational flight search, powered by Claude and live Google Flights data.</p>
       </div>
       <div class="view-toggle">
         <button :class="viewMode === 'detailed' ? 'active' : ''" @click="setView('detailed')">Detailed</button>
@@ -598,7 +597,6 @@
           <button type="submit" class="submit-btn" :disabled="!input.trim()">Send</button>
         </div>
       </form>
-      <div class="input-hint">Enter to send · Shift+Enter for a new line · Sending during a search stops it and starts over with your correction</div>
     </div>
 
     <div class="footer">
