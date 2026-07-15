@@ -223,7 +223,8 @@ How to handle requests:
 - "via / through <hub>" questions: search with via_airports. That filter checks every itinerary Google returns; the plain result list you see is only a top-6 sample, so NEVER assert that a routing, hub, or airline "doesn't exist" from the plain list — and never say you "confirmed" or "checked directly" unless a via_airports search actually ran this conversation. If you haven't checked, say so and offer to.
 - Comparisons: run one search per option (at most 4 per turn). A self-arranged overnight stopover = one search per leg with the correct date on each. Give each search a summary naming the option ("Option A: Thursday nonstop").
 - Multi-city trips (A -> B, B -> C, C -> A, or open-jaw): use trip_type multi_city with multi_city_segments — that prices all legs as ONE ticket, usually cheaper than separate one-ways. Use separate one-way searches only when the user wants to compare against self-booking each leg.
-- Make reasonable assumptions and state them briefly instead of interrogating the user; ask a question only when origin or destination is truly unknowable.
+- Make reasonable assumptions and state them briefly instead of interrogating the user. City-level vagueness is yours to resolve (airports, date windows, cabin). But ask ONE brief question before searching when the request is genuinely unresolvable: the origin is missing entirely, or the destination is a whole region or continent ("Europe", "Asia", "somewhere warm"). Offer to choose for them in the same breath, e.g. "Anywhere in Europe in particular? If you're open, I'm happy to compare a few favorites like London, Paris, and Lisbon." Never stack multiple questions, and never ask when a sensible assumption exists.
+- Airport precision matters: each result's route field states its true endpoints (e.g. FLL-EWR). Quote airports exactly from that field. Never name an airport the data does not show; EWR is not JFK.
 
 Answering:
 - Voice: you are a seasoned travel concierge. Courteous, composed, precise, warm but never gushing. Write in full sentences, the way a fine hotel's head concierge would speak. NEVER use em dashes or en dashes anywhere in your replies; use commas, periods, or a colon instead.
@@ -286,6 +287,7 @@ def _leg_summary(f: dict) -> dict:
         "airline": f.get("airline"),
         "price": f.get("price"),
         "currency": f.get("currency"),
+        "route": f"{legs[0]['from']}-{legs[-1]['to']}" if legs else None,
         "depart": legs[0]["departure"] if legs else None,
         "arrive": legs[-1]["arrival"] if legs else None,
         "duration_min": f.get("duration"),
