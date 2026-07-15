@@ -1006,14 +1006,21 @@
         },
 
         mapSvg(points, returnPoints) {
-          const pts = (points || []).filter(p => p && p.lat != null);
-          if (pts.length < 2) return '';
+          const norm = arr => (arr || []).filter(p => p && p.lat != null);
+          const pts1 = norm(points), pts2 = norm(returnPoints);
+          if (pts1.length < 2) return '';
           // equirectangular, same frame as WORLD_PATH: x = lon+180, y = 90-lat
-          let xs = pts.map(p => p.lon + 180);
-          const span = Math.max(...xs) - Math.min(...xs);
-          if (span > 180) xs = xs.map(x => (x < 180 ? x + 360 : x)); // antimeridian wrap
-          const ys = pts.map(p => 90 - p.lat);
-          const P = pts.map((p, i) => ({ x: xs[i], y: ys[i], code: p.code }));
+          const all = [...pts1, ...pts2];
+          const rawXs = all.map(p => p.lon + 180);
+          const wrap = (Math.max(...rawXs) - Math.min(...rawXs)) > 180; // antimeridian
+          const proj = p => {
+            let x = p.lon + 180;
+            if (wrap && x < 180) x += 360;
+            return { x, y: 90 - p.lat, code: p.code };
+          };
+          const P = pts1.map(proj), R = pts2.map(proj);
+          const allP = [...P, ...R];
+          const xs = allP.map(p => p.x), ys = allP.map(p => p.y);
 
           let minX = Math.min(...xs), maxX = Math.max(...xs);
           let minY = Math.min(...ys), maxY = Math.max(...ys);
@@ -1036,8 +1043,13 @@
           };
           let route = '';
           for (let i = 0; i < P.length - 1; i++) route += `<path d="${arc(P[i], P[i+1], 1)}" fill="none" stroke="#b1471f" stroke-width="${sw * 2}"/>`;
-          const dots = P.map((p, i) => {
-            const end = i === 0 || i === P.length - 1;
+          // return legs: dashed, bowed the opposite way so both directions read
+          for (let i = 0; i < R.length - 1; i++) route += `<path d="${arc(R[i], R[i+1], -1)}" fill="none" stroke="#8a3416" stroke-width="${sw * 1.8}" stroke-dasharray="${sw * 3.5} ${sw * 2.5}"/>`;
+
+          const seen = new Set();
+          const endpoints = new Set([P[0]?.code, P[P.length - 1]?.code, R[0]?.code, R[R.length - 1]?.code]);
+          const dots = allP.filter(p => !seen.has(p.code) && seen.add(p.code)).map(p => {
+            const end = endpoints.has(p.code);
             const nearTop = p.y < minY + (maxY - minY) * 0.24;
             const labelY = nearTop ? p.y + sw * 12 : p.y - sw * 5;
             return `<circle cx="${p.x}" cy="${p.y}" r="${sw * (end ? 3.2 : 2.2)}" fill="${end ? '#1c1a15' : '#b1471f'}"/>` +
