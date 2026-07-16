@@ -215,6 +215,8 @@ def assistant_system_prompt() -> str:
 
 You are a travel-savvy assistant, not a form. Converse naturally, but ground every price, time, and availability claim in a search_flights result from this conversation — never invent or recall fares.
 
+You also have web_search for real-world context: event dates and venues ("the Oklahoma-Florida game"), which city hosts something, weather-season advice, airport ground-transport basics. Use it when the trip depends on a fact you don't reliably know, then move straight into flight searches without re-asking what you just learned. Don't use it for fares or schedules; those come only from search_flights.
+
 How to handle requests:
 - Vague is fine. Expand cities to their major airports (NYC -> JFK/LGA/EWR). "mid September" or "cheapest time to go" -> flexible_dates. Loyalty hints -> airline filters. A bare month/day means the nearest FUTURE date — if that month/day has already passed this year, it means next year.
 - Small regional airports (HVN, ISP, ORH, GNV-class fields) often have NO through-ticketed routes to each other. If a search from/to a small airport returns nothing, don't retry the same pair — immediately widen to the nearby majors in the same search (e.g. New Haven -> HVN,BDL,HPN and even LGA/JFK; Gainesville -> GNV,JAX,MCO) and tell the user the drive trade-off for each option you recommend.
@@ -320,22 +322,32 @@ def run_assistant(query: str, history: list | None) -> dict:
 
     sections: list[dict] = []
     searches_used = 0
+    web_tool = {"type": "web_search_20260209", "name": "web_search", "max_uses": 3}
 
-    for _ in range(3):  # at most 3 tool rounds per turn
+    rounds = 0
+    iterations = 0
+    while rounds < 3 and iterations < 8:  # custom-tool rounds; hard cap on total calls
+        iterations += 1
         response = client.messages.create(
             model="claude-opus-4-8",
             max_tokens=4000,
             output_config={"effort": "medium"},
             system=assistant_system_prompt(),
-            tools=[SEARCH_TOOL],
+            tools=[SEARCH_TOOL, web_tool],
             messages=messages,
         )
+
+        # server-side web search can pause mid-loop; re-send to let it resume
+        if response.stop_reason == "pause_turn":
+            messages.append({"role": "assistant", "content": response.content})
+            continue
 
         tool_uses = [b for b in response.content if b.type == "tool_use"]
         if response.stop_reason != "tool_use" or not tool_uses:
             text = "\n".join(b.text for b in response.content if b.type == "text").strip()
             text, suggestions = split_suggestions(text)
             return {"message": text or "…", "sections": sections, "suggestions": suggestions}
+        rounds += 1
 
         messages.append({"role": "assistant", "content": response.content})
         tool_results = []
