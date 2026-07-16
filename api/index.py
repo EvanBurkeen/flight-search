@@ -525,7 +525,13 @@ def route_points(result) -> list[dict]:
         for code in (leg.departure_airport.name, leg.arrival_airport.name):
             if not codes or codes[-1] != code:
                 codes.append(code)
-    return [p for p in (coords_for(c) for c in codes) if p]
+    points = [p for p in (coords_for(c) for c in codes) if p]
+    # intermediate stops carry their layover length for the map labels
+    layovers = list(result.layovers or [])
+    for i, p in enumerate(points[1:-1]):
+        if i < len(layovers) and layovers[i].duration:
+            p["layover_min"] = layovers[i].duration
+    return points
 
 
 def serialize_leg(leg) -> dict:

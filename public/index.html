@@ -1016,7 +1016,7 @@
           const proj = p => {
             let x = p.lon + 180;
             if (wrap && x < 180) x += 360;
-            return { x, y: 90 - p.lat, code: p.code };
+            return { x, y: 90 - p.lat, code: p.code, layover: p.layover_min };
           };
           const P = pts1.map(proj), R = pts2.map(proj);
           const allP = [...P, ...R];
@@ -1024,8 +1024,10 @@
 
           let minX = Math.min(...xs), maxX = Math.max(...xs);
           let minY = Math.min(...ys), maxY = Math.max(...ys);
-          const padX = Math.max((maxX - minX) * 0.35, 6);
-          const padY = Math.max((maxY - minY) * 0.5, 5);
+          // padding is capped so long-haul routes stay framed on the route,
+          // not zoomed out to the whole planet
+          const padX = Math.min(Math.max((maxX - minX) * 0.35, 6), 16);
+          const padY = Math.min(Math.max((maxY - minY) * 0.5, 5), 12);
           minX -= padX; maxX += padX; minY -= padY; maxY += padY;
           // widen to a pleasant aspect ratio (~3:1)
           const w = maxX - minX, h = maxY - minY;
@@ -1046,21 +1048,27 @@
           // return legs: dashed, bowed the opposite way so both directions read
           for (let i = 0; i < R.length - 1; i++) route += `<path d="${arc(R[i], R[i+1], -1)}" fill="none" stroke="#8a3416" stroke-width="${sw * 1.8}" stroke-dasharray="${sw * 3.5} ${sw * 2.5}"/>`;
 
+          const fmtLay = m => m >= 60 ? Math.floor(m / 60) + 'h' + (m % 60 ? String(m % 60).padStart(2, '0') : '') : m + 'm';
           const seen = new Set();
           const endpoints = new Set([P[0]?.code, P[P.length - 1]?.code, R[0]?.code, R[R.length - 1]?.code]);
           const dots = allP.filter(p => !seen.has(p.code) && seen.add(p.code)).map(p => {
             const end = endpoints.has(p.code);
             const nearTop = p.y < minY + (maxY - minY) * 0.24;
             const labelY = nearTop ? p.y + sw * 12 : p.y - sw * 5;
-            return `<circle cx="${p.x}" cy="${p.y}" r="${sw * (end ? 3.2 : 2.2)}" fill="${end ? '#1c1a15' : '#b1471f'}"/>` +
-                   `<text x="${p.x}" y="${labelY}" font-size="${sw * 9}" text-anchor="middle" fill="#1c1a15" font-family="Inter, sans-serif" font-weight="600">${p.code}</text>`;
+            let t = `<circle cx="${p.x}" cy="${p.y}" r="${sw * (end ? 3.2 : 2.2)}" fill="${end ? '#1c1a15' : '#b1471f'}"/>` +
+                    `<text x="${p.x}" y="${labelY}" font-size="${sw * 9}" text-anchor="middle" fill="#1c1a15" font-family="Inter, sans-serif" font-weight="600">${p.code}</text>`;
+            if (!end && p.layover) {
+              const layY = nearTop ? labelY + sw * 9.5 : p.y + sw * 10;
+              t += `<text x="${p.x}" y="${layY}" font-size="${sw * 7}" text-anchor="middle" fill="#8a3416" font-family="Inter, sans-serif" font-weight="500">${fmtLay(p.layover)}</text>`;
+            }
+            return t;
           }).join('');
 
           // land + lakes drawn across three 360-degree spans so no edge of the
           // crop ever runs out of world; lakes punch through in the ocean color
           const OCEAN = '#ece4cb', LAND = '#dfd1a5', COAST = '#bfa96e';
           let ground = '';
-          for (const dx of [-360, 0, 360]) {
+          for (const dx of [-720, -360, 0, 360, 720]) {
             const t = dx ? ` transform="translate(${dx},0)"` : '';
             ground += `<use href="#worldpath"${t} fill="${LAND}" stroke="${COAST}" stroke-width="${sw * 0.6}"/>`;
             ground += `<use href="#lakespath"${t} fill="${OCEAN}" stroke="${COAST}" stroke-width="${sw * 0.4}"/>`;
