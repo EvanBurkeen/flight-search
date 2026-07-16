@@ -678,7 +678,7 @@
                 <!-- flexible-date price grid -->
                 <template x-if="sec.type === 'dates' && sec.dates && sec.dates.length">
                   <div class="date-grid">
-                    <template x-for="(d, j) in sec.dates" :key="j">
+                    <template x-for="(d, j) in visibleDates(sec)" :key="j">
                       <button class="date-cell" :class="d.cheapest ? 'cheapest' : ''" @click="pickDate(d)" :disabled="isLoading">
                         <span class="d" x-text="formatDate(d.date) + (d.return_date ? ' → ' + formatDate(d.return_date) : '')"></span>
                         <span class="p" x-text="formatPrice(d.price, d.currency)"></span>
@@ -688,9 +688,9 @@
                 </template>
 
                 <button class="show-all"
-                        x-show="sec.type !== 'dates' && ((sec.results || []).length > (sectionView(sec) === 'compact' ? 8 : 5))"
+                        x-show="canExpand(sec)"
                         @click="sec._expanded = !sec._expanded"
-                        x-text="sec._expanded ? 'Show top picks only' : 'Show all ' + list(sec).length + ' options · filter & sort'"></button>
+                        x-text="expandLabel(sec)"></button>
 
                 <div class="assumptions" x-show="(sec.assumptions || []).length"
                      x-text="(sec.assumptions || []).map(a => '· ' + a).join('   ')"></div>
@@ -855,6 +855,32 @@
         visible(sec, previewN) {
           const rs = this.list(sec);
           return sec._expanded ? rs : rs.slice(0, previewN);
+        },
+
+        visibleDates(sec) {
+          const all = sec.dates || [];
+          if (sec._expanded || all.length <= 12) return all;
+          // default view: only dates worth considering (within 15% of cheapest)
+          const min = Math.min(...all.map(d => d.price));
+          let best = all.filter(d => d.price <= min * 1.15);
+          if (best.length < 6) best = [...all].sort((a, b) => a.price - b.price).slice(0, 6);
+          if (best.length > 14) best = [...best].sort((a, b) => a.price - b.price).slice(0, 14);
+          const keep = new Set(best.map(d => d.date + '|' + (d.return_date || '')));
+          return all.filter(d => keep.has(d.date + '|' + (d.return_date || '')));
+        },
+
+        canExpand(sec) {
+          if (sec.type === 'dates') return (sec.dates || []).length > 12;
+          return (sec.results || []).length > (this.sectionView(sec) === 'compact' ? 8 : 5);
+        },
+
+        expandLabel(sec) {
+          if (sec.type === 'dates') {
+            return sec._expanded ? 'Show best-value dates only'
+              : 'Show all ' + (sec.dates || []).length + ' dates';
+          }
+          return sec._expanded ? 'Show top picks only'
+            : 'Show all ' + this.list(sec).length + ' options · filter & sort';
         },
 
         setF(sec, key, value) {

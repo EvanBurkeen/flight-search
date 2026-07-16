@@ -3,9 +3,14 @@ import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 from datetime import datetime
 from functools import lru_cache
 from urllib.parse import quote
+
+# must precede the fli imports: its default is 60s x 3 retries, which lets a
+# Google tarpit hang a request for minutes
+os.environ.setdefault("FLI_TIMEOUT", "15")
 
 import anthropic
 from fastapi import FastAPI, Request
@@ -376,16 +381,25 @@ def run_assistant(query: str, history: list | None) -> dict:
                 searches_used += 1
                 budgeted.append(tu)
 
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            futures = {tu.id: pool.submit(execute_spec, tu.input) for tu in budgeted}
+        # no context manager: its exit would JOIN hung threads and defeat the
+        # timeouts below. shutdown(wait=False) abandons stragglers instead.
+        pool = ThreadPoolExecutor(max_workers=4)
+        futures = {tu.id: pool.submit(execute_spec, tu.input) for tu in budgeted}
+        batch_deadline = time.monotonic() + 55
 
         for tu in budgeted:
             try:
-                payload = futures[tu.id].result()
+                payload = futures[tu.id].result(timeout=max(1.0, batch_deadline - time.monotonic()))
                 sections.append(payload)
                 tool_results_by_id[tu.id] = {
                     "type": "tool_result", "tool_use_id": tu.id,
                     "content": compact_for_model(payload),
+                }
+            except FuturesTimeout:
+                tool_results_by_id[tu.id] = {
+                    "type": "tool_result", "tool_use_id": tu.id,
+                    "content": "Search timed out: Google Flights is responding very slowly right now. Tell the user plainly and suggest trying again shortly; do not retry now.",
+                    "is_error": True,
                 }
             except SearchHTTPError as e:
                 detail = "Google Flights is rate-limiting right now (HTTP 429)." if e.status_code == 429 \
@@ -406,6 +420,7 @@ def run_assistant(query: str, history: list | None) -> dict:
                     "content": f"Search failed: {str(e)[:300]} (today is {today}). Fix the input and retry.",
                     "is_error": True,
                 }
+        pool.shutdown(wait=False, cancel_futures=True)
         messages.append({"role": "user", "content": [tool_results_by_id[tu.id] for tu in tool_uses]})
 
     if sections:
@@ -897,7 +912,7 @@ def search_flexible_dates(spec: dict, origins: list, destinations: list, currenc
         d["cheapest"] = d["price"] == cheapest
     return {
         "type": "dates",
-        "message": "Cheapest dates in your window — pick one to see actual flights.",
+        "message": "The best-value dates are shown first; expand for the full calendar. Pick one to see actual flights.",
         "dates": dates,
     }
 
