@@ -325,9 +325,12 @@ def run_assistant(query: str, history: list | None) -> dict:
     searches_used = 0
     web_tool = {"type": "web_search_20260209", "name": "web_search", "max_uses": 3}
 
+    started = time.monotonic()
     rounds = 0
     iterations = 0
-    while rounds < 3 and iterations < 8:  # custom-tool rounds; hard cap on total calls
+    # hard turn budget: past ~65s, stop searching and answer with what we have
+    # (a Google throttle wave otherwise compounds into multi-minute hangs)
+    while rounds < 3 and iterations < 8 and time.monotonic() - started < 65:
         iterations += 1
         response = client.messages.create(
             model="claude-opus-4-8",
@@ -405,10 +408,16 @@ def run_assistant(query: str, history: list | None) -> dict:
                 }
         messages.append({"role": "user", "content": [tool_results_by_id[tu.id] for tu in tool_uses]})
 
+    if sections:
+        return {
+            "message": "That search ran long, so here is what I have so far. The cards below are live results; say the word and I'll keep digging.",
+            "sections": sections,
+            "suggestions": ["keep digging"],
+        }
     return {
-        "message": "That took more searching than one turn allows — here's what I found so far. Ask me to continue if you need more.",
-        "sections": sections,
-        "suggestions": ["continue"],
+        "message": "Google Flights is responding slowly at the moment and that search ran past my patience. Give it a minute and try again; your question was perfectly fine.",
+        "sections": [],
+        "suggestions": ["try again"],
     }
 
 
