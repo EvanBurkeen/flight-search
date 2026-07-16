@@ -2,6 +2,7 @@ import json
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from functools import lru_cache
 from urllib.parse import quote
@@ -332,7 +333,13 @@ def run_assistant(query: str, history: list | None) -> dict:
             model="claude-opus-4-8",
             max_tokens=4000,
             output_config={"effort": "medium"},
-            system=assistant_system_prompt(),
+            # cache breakpoint on system caches tools+system for every call in
+            # the loop and across turns (prompt renders tools -> system -> messages)
+            system=[{
+                "type": "text",
+                "text": assistant_system_prompt(),
+                "cache_control": {"type": "ephemeral"},
+            }],
             tools=[SEARCH_TOOL, web_tool],
             messages=messages,
         )
@@ -350,43 +357,53 @@ def run_assistant(query: str, history: list | None) -> dict:
         rounds += 1
 
         messages.append({"role": "assistant", "content": response.content})
-        tool_results = []
+
+        # run this round's searches CONCURRENTLY — a 3-option comparison takes
+        # as long as its slowest search instead of the sum of all three
+        budgeted = []
+        tool_results_by_id: dict = {}
         for tu in tool_uses:
             if searches_used >= 5:
-                tool_results.append({
+                tool_results_by_id[tu.id] = {
                     "type": "tool_result", "tool_use_id": tu.id,
                     "content": "Search budget for this turn exhausted; answer with what you have.",
                     "is_error": True,
-                })
-                continue
-            searches_used += 1
+                }
+            else:
+                searches_used += 1
+                budgeted.append(tu)
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = {tu.id: pool.submit(execute_spec, tu.input) for tu in budgeted}
+
+        for tu in budgeted:
             try:
-                payload = execute_spec(tu.input)
+                payload = futures[tu.id].result()
                 sections.append(payload)
-                tool_results.append({
+                tool_results_by_id[tu.id] = {
                     "type": "tool_result", "tool_use_id": tu.id,
                     "content": compact_for_model(payload),
-                })
+                }
             except SearchHTTPError as e:
                 detail = "Google Flights is rate-limiting right now (HTTP 429)." if e.status_code == 429 \
                     else f"Google Flights returned HTTP {e.status_code}."
-                tool_results.append({
+                tool_results_by_id[tu.id] = {
                     "type": "tool_result", "tool_use_id": tu.id,
                     "content": detail, "is_error": True,
-                })
+                }
             except SearchClientError:
-                tool_results.append({
+                tool_results_by_id[tu.id] = {
                     "type": "tool_result", "tool_use_id": tu.id,
                     "content": "Couldn't reach Google Flights for this search.", "is_error": True,
-                })
+                }
             except Exception as e:  # bad tool input etc. — let Claude correct itself
                 today = datetime.now().strftime("%Y-%m-%d")
-                tool_results.append({
+                tool_results_by_id[tu.id] = {
                     "type": "tool_result", "tool_use_id": tu.id,
                     "content": f"Search failed: {str(e)[:300]} (today is {today}). Fix the input and retry.",
                     "is_error": True,
-                })
-        messages.append({"role": "user", "content": tool_results})
+                }
+        messages.append({"role": "user", "content": [tool_results_by_id[tu.id] for tu in tool_uses]})
 
     return {
         "message": "That took more searching than one turn allows — here's what I found so far. Ask me to continue if you need more.",
@@ -640,11 +657,11 @@ def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy
             results = search.search(attempt, top_n=top_n)
         except SearchClientError as e:
             last_exc = e
-            time.sleep(3 + 3 * i)
+            time.sleep(2 + 2 * i)
             continue
         if results:
             return results
-        time.sleep(1)
+        time.sleep(0.4)
     if last_exc:
         raise last_exc
     return []
