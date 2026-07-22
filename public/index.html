@@ -492,6 +492,9 @@
                           </div>
                           <div class="route-mid">
                             <div class="route-line"></div>
+                            <template x-for="(s, si) in stopPositions(f)" :key="'st'+si">
+                              <div class="route-stop" :style="'left:' + s.pct + '%'"><span class="route-stop-label" x-text="s.code"></span></div>
+                            </template>
                             <div class="route-meta" x-text="formatDate((f.legs[0].departure || '').slice(0, 10)) + ' · ' + formatDuration(f.duration) + ' · ' + stopsText(f.stops)"></div>
                           </div>
                           <div class="route-end">
@@ -568,6 +571,9 @@
                             </div>
                             <div class="route-mid">
                               <div class="route-line"></div>
+                            <template x-for="(s, si) in stopPositions(it.outbound)" :key="'st'+si">
+                              <div class="route-stop" :style="'left:' + s.pct + '%'"><span class="route-stop-label" x-text="s.code"></span></div>
+                            </template>
                               <div class="route-meta" x-text="formatDuration(it.outbound.duration) + ' · ' + stopsText(it.outbound.stops)"></div>
                             </div>
                             <div class="route-end">
@@ -590,6 +596,9 @@
                             </div>
                             <div class="route-mid">
                               <div class="route-line"></div>
+                            <template x-for="(s, si) in stopPositions(it.return)" :key="'st'+si">
+                              <div class="route-stop" :style="'left:' + s.pct + '%'"><span class="route-stop-label" x-text="s.code"></span></div>
+                            </template>
                               <div class="route-meta" x-text="formatDuration(it.return.duration) + ' · ' + stopsText(it.return.stops)"></div>
                             </div>
                             <div class="route-end">
@@ -662,6 +671,9 @@
                               </div>
                               <div class="route-mid">
                                 <div class="route-line"></div>
+                            <template x-for="(s, si) in stopPositions(p)" :key="'st'+si">
+                              <div class="route-stop" :style="'left:' + s.pct + '%'"><span class="route-stop-label" x-text="s.code"></span></div>
+                            </template>
                                 <div class="route-meta" x-text="formatDuration(p.duration) + ' · ' + stopsText(p.stops)"></div>
                               </div>
                               <div class="route-end">
@@ -1150,6 +1162,20 @@
 
         stopsText(stops) {
           return stops === 0 ? 'Direct' : stops + ' stop' + (stops > 1 ? 's' : '');
+        },
+
+        stopPositions(f) {
+          // place each connection on the timeline proportional to elapsed time
+          const legs = f.legs || [];
+          if (legs.length < 2) return [];
+          const t0 = Date.parse(legs[0].departure || '');
+          const t1 = Date.parse(legs[legs.length - 1].arrival || '');
+          if (!t0 || !t1 || t1 <= t0) return [];
+          return legs.slice(0, -1).map((l, i) => {
+            const a = Date.parse(l.arrival || ''), d = Date.parse(legs[i + 1].departure || '');
+            const mid = a && d ? (a + d) / 2 : (a || d);
+            return { code: l.to, pct: Math.min(94, Math.max(6, ((mid - t0) / (t1 - t0)) * 100)) };
+          }).filter(s => isFinite(s.pct));
         },
 
         arrivalDay(f) {
