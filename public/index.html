@@ -1057,16 +1057,26 @@
           const norm = arr => (arr || []).filter(p => p && p.lat != null);
           const pts1 = norm(points), pts2 = norm(returnPoints);
           if (pts1.length < 2) return '';
-          // equirectangular, same frame as WORLD_PATH: x = lon+180, y = 90-lat
-          const all = [...pts1, ...pts2];
-          const rawXs = all.map(p => p.lon + 180);
-          const wrap = (Math.max(...rawXs) - Math.min(...rawXs)) > 180; // antimeridian
-          const proj = p => {
-            let x = p.lon + 180;
-            if (wrap && x < 180) x += 360;
-            return { x, y: 90 - p.lat, code: p.code, layover: p.layover_min };
+          // equirectangular, same frame as WORLD_PATH: x = lon+180, y = 90-lat.
+          // Longitudes unwrap SEQUENTIALLY so every leg takes the short way
+          // around the globe (a global shift breaks multi-leg routes whose
+          // total span exceeds 180 degrees, e.g. FLL-BOS-CDG-PVG).
+          const unwrapSeq = (pts, anchorX) => {
+            const out = [];
+            let prev = anchorX;
+            for (const p of pts) {
+              let x = p.lon + 180;
+              if (prev != null) {
+                while (x - prev > 180) x -= 360;
+                while (prev - x > 180) x += 360;
+              }
+              out.push({ x, y: 90 - p.lat, code: p.code, layover: p.layover_min });
+              prev = x;
+            }
+            return out;
           };
-          const P = pts1.map(proj), R = pts2.map(proj);
+          const P = unwrapSeq(pts1, null);
+          const R = unwrapSeq(pts2, P.length ? P[P.length - 1].x : null);
           const allP = [...P, ...R];
           const xs = allP.map(p => p.x), ys = allP.map(p => p.y);
 
