@@ -33,6 +33,21 @@ from fli.models.google_flights.base import PriceLimit
 from fli.search import SearchDates, SearchFlights
 from fli.search.exceptions import SearchClientError, SearchHTTPError
 
+# Optional egress proxy for Google traffic (set FLI_PROXY in Vercel env to a
+# proxy URL). Datacenter IPs get throttled by Google in waves; a residential
+# proxy is the durable fix. No proxy -> unchanged behavior.
+if os.environ.get("FLI_PROXY"):
+    from fli.search import client as _fli_client
+
+    _orig_session = _fli_client.Client._session
+
+    def _session_with_proxy(self):
+        session = _orig_session(self)
+        session.proxies = {"http": os.environ["FLI_PROXY"], "https": os.environ["FLI_PROXY"]}
+        return session
+
+    _fli_client.Client._session = _session_with_proxy
+
 app = FastAPI()
 
 CABIN_MAP = {
@@ -318,7 +333,7 @@ def split_suggestions(text: str) -> tuple[str, list[str]]:
 
 
 def run_assistant(query: str, history: list | None) -> dict:
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"], max_retries=4)
     messages = [
         {"role": m["role"], "content": m["content"]}
         for m in (history or [])[-12:]
@@ -678,7 +693,7 @@ def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy
     for i, attempt_sort in enumerate((sort, sort, SortBy.CHEAPEST)):
         attempt = filters.model_copy(update={"sort_by": attempt_sort})
         try:
-            results = search.search(attempt, top_n=top_n)
+            results = search.search(attempt, top_n=top_n, currency="USD")
         except SearchClientError as e:
             last_exc = e
             time.sleep(2 + 2 * i)
@@ -878,7 +893,7 @@ def search_flexible_dates(spec: dict, origins: list, destinations: list, currenc
     last_exc = None
     for i in range(3):
         try:
-            date_prices = searcher.search(filters)
+            date_prices = searcher.search(filters, currency="USD")
             last_exc = None
         except SearchClientError as e:
             last_exc = e
@@ -1009,5 +1024,17 @@ async def search(request: Request):
             "suggestions": result.get("suggestions") or [],
         })
 
+    except anthropic.APIStatusError as e:
+        if e.status_code in (429, 529) or getattr(e, "type", "") == "overloaded_error":
+            msg = "My reasoning service is momentarily congested. Give it a few seconds and send that again; nothing was lost."
+        else:
+            msg = "I hit a temporary service error on my side. Please try that once more."
+        return JSONResponse({"type": "assistant", "message": msg, "sections": [], "suggestions": ["try again"]})
+    except anthropic.APIConnectionError:
+        return JSONResponse({
+            "type": "assistant",
+            "message": "I couldn't reach my reasoning service just now. One more try should do it.",
+            "sections": [], "suggestions": ["try again"],
+        })
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
