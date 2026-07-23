@@ -8,16 +8,13 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fraunces:ital,wght@0,600;1,600&display=swap" rel="stylesheet" />
   <script>
-    // theme pin runs before first paint to avoid a flash of the wrong theme;
-    // no stored preference = follow the system
+    // theme runs before first paint to avoid a flash of the wrong theme;
+    // light is the default — dark only when explicitly chosen
     (function () {
-      var mq = window.matchMedia('(prefers-color-scheme: dark)');
       function apply() {
-        var t = localStorage.getItem('flightTheme');
-        document.documentElement.classList.toggle('dark', t === 'dark' || (!t && mq.matches));
+        document.documentElement.classList.toggle('dark', localStorage.getItem('flightTheme') === 'dark');
       }
       apply();
-      mq.addEventListener('change', apply);
       window.__applyTheme = apply;
     })();
   </script>
@@ -893,7 +890,7 @@
         sectionSeq: 0,
         ladderOpen: false,
         viewMode: localStorage.getItem('flightViewMode') || 'detailed',
-        theme: localStorage.getItem('flightTheme') || 'auto',
+        theme: localStorage.getItem('flightTheme') === 'dark' ? 'dark' : 'light',
         loadingText: 'Thinking…',
         loadingTimer: null,
         controller: null,
@@ -924,18 +921,15 @@
         },
 
         cycleTheme() {
-          this.theme = this.theme === 'auto' ? 'light' : this.theme === 'light' ? 'dark' : 'auto';
-          if (this.theme === 'auto') localStorage.removeItem('flightTheme');
-          else localStorage.setItem('flightTheme', this.theme);
+          this.theme = this.theme === 'light' ? 'dark' : 'light';
+          localStorage.setItem('flightTheme', this.theme);
           window.__applyTheme();
         },
         themeIcon() {
-          return this.theme === 'light' ? '☀' : this.theme === 'dark' ? '☾' : '◐';
+          return this.theme === 'dark' ? '☾' : '☀';
         },
         themeTitle() {
-          return this.theme === 'auto' ? 'Theme: matching your device — click for light'
-            : this.theme === 'light' ? 'Theme: light — click for dark'
-            : 'Theme: dark — click to match your device';
+          return this.theme === 'dark' ? 'Theme: dark — click for light' : 'Theme: light — click for dark';
         },
 
         // --- instant client-side browse: filter/sort/expand over already-fetched results ---
