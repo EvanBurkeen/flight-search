@@ -102,6 +102,8 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
 ## Changelog
 
 **July 15, 2026 (later)**
+- Randomized, query-neutral loading phrases (no more 'consulting live fares' on
+  general questions); general aviation Q&A formally in scope in the prompt
 - Fix stray mid-sentence line breaks in replies: renderer joins soft wraps into
   flowing text (paragraphs and lists preserved); prompt forbids manual wrapping
 - FLI_PROXY activated in production: IPRoyal rotating US-residential proxy for all

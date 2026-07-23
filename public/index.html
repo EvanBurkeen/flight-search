@@ -933,12 +933,21 @@
         },
 
         startLoadingCycle() {
-          const phases = ['One moment…', 'Consulting live fares…', 'Comparing your options…', 'Nearly there — thorough searches take a moment…'];
+          // phrases must be honest for ANY query (not every turn searches fares)
+          const openers = ['One moment…', 'Right away…', 'Let me see…', 'On it…'];
+          const working = [
+            'Looking into that for you…', 'Consulting my sources…',
+            'Checking the details…', 'Gathering what you need…',
+            'A little patience, well spent…', 'Cross-checking a few things…',
+          ];
+          const long = ['Nearly there, thorough answers take a moment…', 'Still with it, almost done…'];
+          const pick = arr => arr[Math.floor(Math.random() * arr.length)];
+          const sequence = [pick(openers), pick(working), pick(working), pick(long)];
           let i = 0;
-          this.loadingText = phases[0];
+          this.loadingText = sequence[0];
           this.loadingTimer = setInterval(() => {
-            i = Math.min(i + 1, phases.length - 1);
-            this.loadingText = phases[i];
+            i = Math.min(i + 1, sequence.length - 1);
+            this.loadingText = sequence[i];
           }, 6000);
         },
 
