@@ -153,6 +153,15 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
 
 ## Changelog
 
+**July 23, 2026**
+- Facelift: cards lifted off the paper (solid warm-white panels, warm shadows),
+  Fraunces italic section headers, cold blue badge → deep teal, muted airline
+  avatar palette, lighter/shorter route maps, green active toggles, quieter
+  show-all row
+- Dark mode via prefers-color-scheme ("midnight concierge"): espresso-green
+  ground, copper prices, brass fittings; route maps intentionally stay cream
+  (atlas plates) so the JS-generated SVGs need no dark variant
+
 **July 16, 2026**
 - Made per-deployment changelog entries an explicit non-negotiable rule (Evan's request)
 - Arrival-day guidance corrected (Evan's catch): same-day Asia->US is a
