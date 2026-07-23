@@ -59,7 +59,7 @@
     a { color: inherit; }
     button, input, textarea { font-family: inherit; }
 
-    .container { max-width: 58rem; margin: 0 auto; padding: 2.5rem 1.5rem; }
+    .container { max-width: 58rem; margin: 0 auto; padding: 2.5rem 1.5rem 8rem; }
 
     .header {
       margin-bottom: 2rem; display: flex; justify-content: space-between; align-items: flex-end;
@@ -334,7 +334,22 @@
     .date-cell .p { font-size: 0.9rem; font-weight: 700; }
     .date-cell.cheapest .p { color: var(--good); }
 
-    .input-area { border-top: 1px solid var(--line); padding-top: 1.25rem; }
+    .input-area {
+      position: fixed; left: 0; right: 0; bottom: 0; z-index: 7;
+      background: var(--bg); border-top: 1px solid var(--line);
+      padding: 0.8rem 0 calc(0.8rem + env(safe-area-inset-bottom));
+      box-shadow: 0 -8px 20px -14px rgba(28, 26, 21, 0.35);
+    }
+    .input-inner { max-width: 58rem; margin: 0 auto; padding: 0 1.5rem; }
+    .new-below {
+      position: fixed; left: 50%; transform: translateX(-50%);
+      bottom: calc(5.9rem + env(safe-area-inset-bottom)); z-index: 8;
+      font-size: 0.72rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
+      padding: 0.5rem 1rem; border: none; border-radius: 999px;
+      background: var(--green); color: #f3ecd6; cursor: pointer;
+      box-shadow: 0 4px 14px rgba(28, 26, 21, 0.25);
+      animation: rise 0.25s ease both;
+    }
     .input-row { display: flex; gap: 0.75rem; align-items: flex-end; }
     .text-input {
       flex: 1; font-size: 0.9rem; line-height: 1.5;
@@ -391,7 +406,7 @@
     .ladder-item:hover { opacity: 1; color: var(--accent-dark); }
     .ladder-item .n { color: var(--brass); margin-right: 0.35rem; }
     .ladder-fab {
-      position: fixed; right: 1rem; bottom: 1.25rem; z-index: 6; display: none;
+      position: fixed; right: 1rem; bottom: calc(5.9rem + env(safe-area-inset-bottom)); z-index: 6; display: none;
       font-size: 0.62rem; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase;
       padding: 0.55rem 0.9rem; border-radius: 999px; border: 1px solid var(--brass);
       background: var(--bg); color: var(--brass); cursor: pointer;
@@ -400,7 +415,7 @@
     @media (max-width: 1400px) {
       .ladder { display: none; }
       .ladder.overlay {
-        display: block; top: auto; bottom: 4.25rem; right: 1rem;
+        display: block; top: auto; bottom: calc(9rem + env(safe-area-inset-bottom)); right: 1rem;
         background: var(--bg); border: 1px solid var(--brass-soft);
         border-radius: 8px; padding: 0.8rem 0.9rem; width: 14rem; max-height: 50vh;
         box-shadow: 0 6px 24px rgba(28,26,21,0.18);
@@ -450,6 +465,7 @@
     html.dark .badge-plain { background: rgba(236, 228, 203, 0.10); color: var(--ink); }
     html.dark .text-input::placeholder { color: rgba(236, 228, 203, 0.38); }
     html.dark .route-map { box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35); }
+    html.dark .input-area { box-shadow: 0 -8px 20px -14px rgba(0, 0, 0, 0.7); }
   </style>
 </head>
 <body>
@@ -497,7 +513,7 @@
 
     <div class="messages">
       <template x-for="(msg, i) in messages" :key="i">
-        <div style="display:flex; flex-direction:column;">
+        <div :id="'msg-' + i" style="display:flex; flex-direction:column;">
           <div x-show="msg.role === 'user'" class="msg-user" x-text="msg.content"></div>
           <div x-show="msg.role === 'note'" class="msg-note" x-text="msg.content"></div>
 
@@ -846,21 +862,25 @@
     </div>
 
     <div class="input-area">
-      <form @submit.prevent="search()">
-        <div class="input-row">
-          <textarea
-            x-ref="box"
-            rows="1"
-            class="text-input"
-            x-model="input"
-            @input="autosize()"
-            @keydown.enter="onEnter($event)"
-            placeholder="Tell me where you'd like to go…"
-          ></textarea>
-          <button type="submit" class="submit-btn" :disabled="!input.trim()">Send</button>
-        </div>
-      </form>
+      <div class="input-inner">
+        <form @submit.prevent="search()">
+          <div class="input-row">
+            <textarea
+              x-ref="box"
+              rows="1"
+              class="text-input"
+              x-model="input"
+              @input="autosize()"
+              @keydown.enter="onEnter($event)"
+              placeholder="Tell me where you'd like to go…"
+            ></textarea>
+            <button type="submit" class="submit-btn" :disabled="!input.trim()">Send</button>
+          </div>
+        </form>
+      </div>
     </div>
+
+    <button class="new-below" x-show="newBelow !== false" @click="jumpToNew()">↓ Results ready</button>
 
     <div class="footer">
       <div class="flourish">✦ ✦ ✦</div>
@@ -891,6 +911,7 @@
         ladderOpen: false,
         viewMode: localStorage.getItem('flightViewMode') || 'detailed',
         theme: localStorage.getItem('flightTheme') === 'dark' ? 'dark' : 'light',
+        newBelow: false,
         loadingText: 'Thinking…',
         loadingTimer: null,
         controller: null,
@@ -903,6 +924,28 @@
             holder.innerHTML = `<svg style="position:absolute;width:0;height:0" aria-hidden="true"><defs><path id="worldpath" d="${WORLD_PATH}"/><path id="lakespath" d="${LAKES_PATH}"/></defs></svg>`;
             document.body.appendChild(holder.firstChild);
           }
+          // scrolling the new reply into view dismisses the "results ready" nudge
+          window.addEventListener('scroll', () => {
+            if (this.newBelow === false) return;
+            const el = document.getElementById('msg-' + this.newBelow);
+            if (!el || el.getBoundingClientRect().top < window.innerHeight - 120) this.newBelow = false;
+          }, { passive: true });
+        },
+
+        maybeNudge() {
+          // no auto-scroll on completion by design; instead, offer a jump
+          // when the reply landed below the current viewport
+          this.$nextTick(() => {
+            const i = this.messages.length - 1;
+            const el = document.getElementById('msg-' + i);
+            if (el && el.getBoundingClientRect().top > window.innerHeight - 120) this.newBelow = i;
+          });
+        },
+
+        jumpToNew() {
+          const el = document.getElementById('msg-' + this.newBelow);
+          this.newBelow = false;
+          el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
         },
 
         scrollToBottom() {
@@ -1143,10 +1186,12 @@
               sections: data.sections || [],
               suggestions: data.suggestions || [],
             });
+            this.maybeNudge();
           } catch (err) {
             if (err.name === 'AbortError') return; // stop() already recorded the interruption
             if (myReq !== this.reqId) return;
             this.messages.push({ role: 'assistant', content: `Something went wrong: ${err.message}. Try again in a moment.`, sections: [] });
+            this.maybeNudge();
           } finally {
             if (myReq === this.reqId) {
               this.isLoading = false;

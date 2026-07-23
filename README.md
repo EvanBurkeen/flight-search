@@ -153,6 +153,13 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
 
 ## Changelog
 
+**July 23, 2026 (night)**
+- Sticky compose bar: input pinned to the viewport bottom (paper background,
+  top hairline, safe-area padding) so follow-ups don't require scrolling past
+  results; Searches fab and ladder overlay raised to clear it
+- "Results ready" nudge: replies still don't auto-scroll, but if a reply lands
+  below the fold a green pill appears (click to jump; dismisses on scroll)
+
 **July 23, 2026 (evening)**
 - Aircraft names standardized (Evan's request): drop Google's "Passenger"
   suffix, fix MAX spacing ("Boeing 737MAX 8 Passenger" → "Boeing 737 MAX 8");
