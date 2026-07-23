@@ -12,6 +12,10 @@ talk to Claude, which pulls live Google Flights data to search, compare, and rec
 You (an AI coding assistant) are expected to maintain this project from this
 document alone. Everything you need:
 
+- **NON-NEGOTIABLE RULE: every deployment gets a Changelog entry in this README,
+  in the same commit.** One or two lines: what changed and why (the context or
+  bug that motivated it), newest day first. No push without its log line.
+
 - **Owner:** Evan Burkeen. Product goal: *"the flight tool I use instead of
   Google Flights/Kayak."* Voice of the in-app assistant: concierge, no em dashes.
 - **Repo:** this directory (`~/Downloads/flight-search-web`), GitHub
@@ -150,6 +154,7 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
 ## Changelog
 
 **July 16, 2026**
+- Made per-deployment changelog entries an explicit non-negotiable rule (Evan's request)
 - Arrival-day guidance corrected (Evan's catch): same-day Asia->US is a
   heuristic that fails for late departures and Middle-East routings; assistant
   now searches both candidate departure days when routings vary
