@@ -1,5 +1,6 @@
 import json
 import os
+import random
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -37,16 +38,59 @@ from fli.search.exceptions import SearchClientError, SearchHTTPError
 # proxy URL). Datacenter IPs get throttled by Google in waves; a residential
 # proxy is the durable fix. No proxy -> unchanged behavior.
 if os.environ.get("FLI_PROXY"):
+    import secrets
+
     from fli.search import client as _fli_client
+
+    _proxy_base = os.environ["FLI_PROXY"]
+    _proxy_state: dict = {}
+
+    def _make_proxy_url() -> str:
+        # Sticky session (IPRoyal credential suffix): keep one residential exit
+        # for speed and coherent cookies, but rotate_proxy_session() swaps to a
+        # fresh IP whenever an attempt fails.
+        if "iproyal" in _proxy_base and "@" in _proxy_base:
+            creds, host = _proxy_base.rsplit("@", 1)
+            return f"{creds}_session-{secrets.token_hex(4)}_lifetime-30m@{host}"
+        return _proxy_base
+
+    _proxy_state["url"] = _make_proxy_url()
+
+    def rotate_proxy_session() -> None:
+        _proxy_state["url"] = _make_proxy_url()
 
     _orig_session = _fli_client.Client._session
 
     def _session_with_proxy(self):
         session = _orig_session(self)
-        session.proxies = {"http": os.environ["FLI_PROXY"], "https": os.environ["FLI_PROXY"]}
+        session.proxies = {"http": _proxy_state["url"], "https": _proxy_state["url"]}
         return session
 
     _fli_client.Client._session = _session_with_proxy
+else:
+    def rotate_proxy_session() -> None:  # no proxy configured
+        pass
+
+
+_google_warmed = False
+
+
+def warm_google_session() -> None:
+    """One cheap page-load before the first real search of this process.
+
+    A fresh session's first POST often gets a consent/bootstrap response that
+    parses to zero results; loading the Flights page once collects the cookies
+    that make the first real search behave like the second.
+    """
+    global _google_warmed
+    if _google_warmed:
+        return
+    _google_warmed = True  # one attempt per process, success or not
+    try:
+        from fli.search.client import get_client
+        get_client().get("https://www.google.com/travel/flights", timeout=8)
+    except Exception:
+        pass  # best-effort; the retry ladder still backstops
 
 app = FastAPI()
 
@@ -689,21 +733,25 @@ def add_highlights(flights: list[dict]) -> None:
 
 
 def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy, top_n: int):
-    # Google intermittently returns an unparseable payload (fli gives None) or
-    # rate-limits with a 429 (fli raises after its own fast retries). A retry
-    # with a longer cool-down, then a retry sorted by CHEAPEST, recovers most.
+    warm_google_session()
+    # Google's flights backend throws transient internal errors (200 + tiny
+    # ErrorResponse body, parsed to empty) on ~5-10% of requests, in BURSTS —
+    # so retries need spacing and jitter, not rapid fire. 429s (fli raises)
+    # get IP rotation on top.
     last_exc = None
-    for i, attempt_sort in enumerate((sort, sort, SortBy.CHEAPEST)):
+    for i, attempt_sort in enumerate((sort, sort, SortBy.CHEAPEST, SortBy.CHEAPEST)):
         attempt = filters.model_copy(update={"sort_by": attempt_sort})
         try:
             results = search.search(attempt, top_n=top_n, currency="USD")
         except SearchClientError as e:
             last_exc = e
+            rotate_proxy_session()  # a failing attempt may be a bad exit IP
             time.sleep(2 + 2 * i)
             continue
         if results:
             return results
-        time.sleep(0.4)
+        rotate_proxy_session()
+        time.sleep(0.6 * (i + 1) + random.uniform(0, 0.5))
     if last_exc:
         raise last_exc
     return []
@@ -892,6 +940,7 @@ def search_flexible_dates(spec: dict, origins: list, destinations: list, currenc
 
     filters = build_filters(spec, origins, destinations, filters_cls=DateSearchFilters, **extra)
     searcher = SearchDates()
+    warm_google_session()
     date_prices = None
     last_exc = None
     for i in range(3):
@@ -900,10 +949,12 @@ def search_flexible_dates(spec: dict, origins: list, destinations: list, currenc
             last_exc = None
         except SearchClientError as e:
             last_exc = e
+            rotate_proxy_session()
             time.sleep(3 + 3 * i)
             continue
         if date_prices:
             break
+        rotate_proxy_session()
         time.sleep(1)
     if last_exc:
         raise last_exc

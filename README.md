@@ -127,6 +127,10 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
   residential-proxy URL; the code already routes all Google traffic through it.
 - Currency is pinned to USD in every search, so non-US regions are safe.
 - Anthropic 429/529 overloads surface as a polite try-again message.
+- **Google backend transience:** ~5-10% of search POSTs return HTTP 200 with a
+  tiny `travel.frontend.flights.ErrorResponse` body (parses to empty), in
+  bursts. Handled by the 4-attempt jittered ladder in `run_search` — do not
+  mistake these for IP throttling (throttling = persistent, this = flicker).
 - fli quirks: `SortBy.BEST` intermittently returns None (fallback to CHEAPEST);
   multi-city is slow (fan-out capped at `top_n=4`, `maxDuration` 300s).
 - `world.js` is cache-busted by query string (`?v=2`); bump it when regenerating.
@@ -134,6 +138,10 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
 ## Changelog
 
 **July 16, 2026**
+- Root-caused first-search empties: Google's flights backend returns transient
+  ErrorResponse bodies (HTTP 200, ~5-10%, in bursts). Retry ladder now 4
+  attempts with jittered spacing; sticky proxy session per instance with IP
+  rotation on failure; warmup page-load per cold start. 10/10 cold-start ladder success
 - Empty searches (transient hiccups the assistant retried) no longer render as
   hollow sections; prompt discourages overlapping variants after a success
 - Search ladder: fixed side rail indexing every results section, click to jump
