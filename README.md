@@ -102,6 +102,8 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
 ## Changelog
 
 **July 15, 2026 (later)**
+- Fix stray mid-sentence line breaks in replies: renderer joins soft wraps into
+  flowing text (paragraphs and lists preserved); prompt forbids manual wrapping
 - FLI_PROXY activated in production: IPRoyal rotating US-residential proxy for all
   Google traffic — ends the datacenter-IP throttle waves and the region roulette
 - Region back to iad1 (US East; Google egress now goes through the proxy, so the

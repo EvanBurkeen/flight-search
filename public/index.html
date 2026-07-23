@@ -1026,7 +1026,16 @@
         renderText(t) {
           const esc = (t || '')
             .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-          return esc.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+          // the model sometimes hard-wraps mid-sentence; join single newlines
+          // into flowing text but keep paragraph breaks and list lines
+          const PARA = '\u0001', LIST = '\u0002';
+          const flowed = esc
+            .replace(/\n{2,}/g, PARA)
+            .replace(/\n(?=\s*(?:[-*\u2022]|\d+[.)])\s)/g, LIST)
+            .replace(/\n/g, ' ')
+            .replace(/\u0001/g, '\n\n')
+            .replace(/\u0002/g, '\n');
+          return flowed.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
         },
 
         greeting() {
