@@ -153,6 +153,13 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
 
 ## Changelog
 
+**July 23, 2026 (evening)**
+- Aircraft names standardized (Evan's request): drop Google's "Passenger"
+  suffix, fix MAX spacing ("Boeing 737MAX 8 Passenger" → "Boeing 737 MAX 8");
+  variants (777-300ER, A330-900neo) show whenever Google includes them —
+  they cannot be inferred when Google sends only the base type
+- Section titles above results are no longer italic (upright Fraunces)
+
 **July 23, 2026 (later still)**
 - Light mode is now the default for everyone (Evan's call): theme button is a
   simple light/dark toggle, dark only when explicitly chosen (localStorage);

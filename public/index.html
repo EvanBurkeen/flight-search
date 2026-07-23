@@ -194,7 +194,7 @@
 
     .section-head { display: flex; justify-content: space-between; align-items: center; gap: 0.75rem; margin-bottom: 0.4rem; }
     .section-label {
-      font-family: var(--serif); font-style: italic;
+      font-family: var(--serif);
       font-size: 1.05rem; letter-spacing: 0;
       color: var(--accent-dark); font-weight: 600;
       white-space: pre-line; display: flex; align-items: center; gap: 0.6rem;
@@ -1213,9 +1213,18 @@
           return new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
         },
 
+        cleanAircraft(name) {
+          // Google sends e.g. "Boeing 737MAX 8 Passenger"; show "Boeing 737 MAX 8".
+          // Variants (777-300ER, A330-900neo) appear whenever Google includes them.
+          return (name || '')
+            .replace(/\s*(Passenger|Freighter|Cargo)\s*$/i, '')
+            .replace(/(\d)\s*MAX\s*(\d)/i, '$1 MAX $2')
+            .trim();
+        },
+
         aircraftText(f) {
           const legs = f.legs || [];
-          return [...new Set(legs.map(l => l.aircraft).filter(Boolean))].join(' + ');
+          return [...new Set(legs.map(l => this.cleanAircraft(l.aircraft)).filter(Boolean))].join(' + ');
         },
 
         operatedBy(f) {
