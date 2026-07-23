@@ -416,7 +416,7 @@
           <div x-show="msg.role === 'assistant'" class="msg-assistant">
             <div class="msg-text" x-html="renderText(msg.content)"></div>
 
-            <template x-for="(sec, si) in (msg.sections || [])" :key="si">
+            <template x-for="(sec, si) in visibleSections(msg)" :key="sec._anchor || si">
               <div :id="sec._anchor">
                 <div class="section-head">
                   <div class="section-label" x-text="sectionLabel(sec)"></div>
@@ -1061,6 +1061,12 @@
         sectionLabel(sec) {
           const msg = sec.message || '';
           return msg.split('\n')[0];
+        },
+
+        visibleSections(msg) {
+          // empty searches (transient hiccups the assistant retried) stay out
+          // of the page; the reply text already tells that story
+          return (msg.sections || []).filter(s => (s.results || []).length || (s.dates || []).length);
         },
 
         ladder() {

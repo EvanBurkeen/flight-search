@@ -134,6 +134,8 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
 ## Changelog
 
 **July 16, 2026**
+- Empty searches (transient hiccups the assistant retried) no longer render as
+  hollow sections; prompt discourages overlapping variants after a success
 - Search ladder: fixed side rail indexing every results section, click to jump
   (each comparison prong is its own rung); hidden under 1400px viewports
 - README gains a "For AI assistants" handoff section (workflow, env, roadmap)
