@@ -7,11 +7,25 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fraunces:ital,wght@0,600;1,600&display=swap" rel="stylesheet" />
+  <script>
+    // theme pin runs before first paint to avoid a flash of the wrong theme;
+    // no stored preference = follow the system
+    (function () {
+      var mq = window.matchMedia('(prefers-color-scheme: dark)');
+      function apply() {
+        var t = localStorage.getItem('flightTheme');
+        document.documentElement.classList.toggle('dark', t === 'dark' || (!t && mq.matches));
+      }
+      apply();
+      mq.addEventListener('change', apply);
+      window.__applyTheme = apply;
+    })();
+  </script>
   <script src="/world.js?v=2"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
   <style>
     :root {
-      color-scheme: light dark;
+      color-scheme: light;
       --bg: #f7eed2;
       --ink: #1c1a15;
       --line: rgba(28, 26, 21, 0.16);
@@ -91,9 +105,17 @@
     }
     .hero .ask { font-family: var(--serif); font-style: italic; font-size: 1.05rem; opacity: 0.78; }
 
+    .header-tools { display: flex; align-items: center; gap: 0.5rem; flex: none; margin-bottom: 0.35rem; }
+    .theme-btn {
+      width: 2rem; height: 2rem; border-radius: 50%; flex: none;
+      border: 1px solid var(--line); background: var(--panel); color: var(--brass);
+      font-size: 0.85rem; line-height: 1; cursor: pointer;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    .theme-btn:hover { border-color: var(--brass); }
     .view-toggle {
       display: inline-flex; border: 1px solid var(--line); border-radius: 999px;
-      overflow: hidden; background: var(--panel); flex: none; margin-bottom: 0.35rem;
+      overflow: hidden; background: var(--panel); flex: none;
     }
     .view-toggle button {
       font-size: 0.7rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase;
@@ -394,41 +416,43 @@
     .footer a { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2px; opacity: 0.6; }
 
     /* Midnight concierge: same stationery, lights down. The route maps keep
-       their cream palette on purpose — they read as atlas plates on a dark desk. */
-    @media (prefers-color-scheme: dark) {
-      :root {
-        --bg: #1b1f1a;
-        --ink: #ece4cb;
-        --line: rgba(236, 228, 203, 0.14);
-        --line-strong: rgba(236, 228, 203, 0.32);
-        --rule-strong: rgba(236, 228, 203, 0.30);
-        --rule-soft: rgba(236, 228, 203, 0.14);
-        --panel: #242921;
-        --good: #a8d29a;
-        --good-bg: rgba(168, 210, 154, 0.13);
-        --info: #9ecbdc;
-        --info-bg: rgba(158, 203, 220, 0.13);
-        --warn: #e0b070;
-        --warn-bg: rgba(224, 176, 112, 0.13);
-        --brass: #c9a55a;
-        --brass-soft: rgba(201, 165, 90, 0.45);
-        --green: #3a5747;
-        --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.25), 0 10px 26px -14px rgba(0, 0, 0, 0.6);
-        --card-shadow-hover: 0 2px 4px rgba(0, 0, 0, 0.3), 0 16px 34px -14px rgba(0, 0, 0, 0.7);
-      }
-      body {
-        background-image: radial-gradient(circle at 85% -10%, rgba(217, 122, 74, 0.10), transparent 45%);
-      }
-      .header h1 em { color: #d97a4a; }
-      .card-price, .compact-price, .hero .hello, .route-stop-label, .compact-book,
-      .chip:hover, .ladder-item:hover { color: #e08a5a; }
-      .section-label { color: #d9995f; }
-      .msg-user { color: #f3ecd6; }
-      .msg-text { border-left-color: #d97a4a; }
-      .badge-plain { background: rgba(236, 228, 203, 0.10); color: var(--ink); }
-      .text-input::placeholder { color: rgba(236, 228, 203, 0.38); }
-      .route-map { box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35); }
+       their cream palette on purpose — they read as atlas plates on a dark desk.
+       Applied via html.dark (set by the head script): follows the system unless
+       the header theme button pins light or dark in localStorage. */
+    html.dark {
+      color-scheme: dark;
+      --bg: #1b1f1a;
+      --ink: #ece4cb;
+      --line: rgba(236, 228, 203, 0.14);
+      --line-strong: rgba(236, 228, 203, 0.32);
+      --rule-strong: rgba(236, 228, 203, 0.30);
+      --rule-soft: rgba(236, 228, 203, 0.14);
+      --panel: #242921;
+      --good: #a8d29a;
+      --good-bg: rgba(168, 210, 154, 0.13);
+      --info: #9ecbdc;
+      --info-bg: rgba(158, 203, 220, 0.13);
+      --warn: #e0b070;
+      --warn-bg: rgba(224, 176, 112, 0.13);
+      --brass: #c9a55a;
+      --brass-soft: rgba(201, 165, 90, 0.45);
+      --green: #3a5747;
+      --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.25), 0 10px 26px -14px rgba(0, 0, 0, 0.6);
+      --card-shadow-hover: 0 2px 4px rgba(0, 0, 0, 0.3), 0 16px 34px -14px rgba(0, 0, 0, 0.7);
     }
+    html.dark body {
+      background-image: radial-gradient(circle at 85% -10%, rgba(217, 122, 74, 0.10), transparent 45%);
+    }
+    html.dark .header h1 em { color: #d97a4a; }
+    html.dark .card-price, html.dark .compact-price, html.dark .hero .hello,
+    html.dark .route-stop-label, html.dark .compact-book,
+    html.dark .chip:hover, html.dark .ladder-item:hover { color: #e08a5a; }
+    html.dark .section-label { color: #d9995f; }
+    html.dark .msg-user { color: #f3ecd6; }
+    html.dark .msg-text { border-left-color: #d97a4a; }
+    html.dark .badge-plain { background: rgba(236, 228, 203, 0.10); color: var(--ink); }
+    html.dark .text-input::placeholder { color: rgba(236, 228, 203, 0.38); }
+    html.dark .route-map { box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35); }
   </style>
 </head>
 <body>
@@ -441,9 +465,12 @@
           <p>Claude · Live Google Flights Data</p>
         </div>
       </div>
-      <div class="view-toggle">
-        <button :class="viewMode === 'detailed' ? 'active' : ''" @click="setView('detailed')">Detailed</button>
-        <button :class="viewMode === 'compact' ? 'active' : ''" @click="setView('compact')">Compact</button>
+      <div class="header-tools">
+        <button class="theme-btn" @click="cycleTheme()" :title="themeTitle()" aria-label="Color theme" x-text="themeIcon()"></button>
+        <div class="view-toggle">
+          <button :class="viewMode === 'detailed' ? 'active' : ''" @click="setView('detailed')">Detailed</button>
+          <button :class="viewMode === 'compact' ? 'active' : ''" @click="setView('compact')">Compact</button>
+        </div>
       </div>
     </div>
 
@@ -866,6 +893,7 @@
         sectionSeq: 0,
         ladderOpen: false,
         viewMode: localStorage.getItem('flightViewMode') || 'detailed',
+        theme: localStorage.getItem('flightTheme') || 'auto',
         loadingText: 'Thinking…',
         loadingTimer: null,
         controller: null,
@@ -893,6 +921,21 @@
 
         sectionView(sec) {
           return sec._view || this.viewMode;
+        },
+
+        cycleTheme() {
+          this.theme = this.theme === 'auto' ? 'light' : this.theme === 'light' ? 'dark' : 'auto';
+          if (this.theme === 'auto') localStorage.removeItem('flightTheme');
+          else localStorage.setItem('flightTheme', this.theme);
+          window.__applyTheme();
+        },
+        themeIcon() {
+          return this.theme === 'light' ? '☀' : this.theme === 'dark' ? '☾' : '◐';
+        },
+        themeTitle() {
+          return this.theme === 'auto' ? 'Theme: matching your device — click for light'
+            : this.theme === 'light' ? 'Theme: light — click for dark'
+            : 'Theme: dark — click to match your device';
         },
 
         // --- instant client-side browse: filter/sort/expand over already-fetched results ---

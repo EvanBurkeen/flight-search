@@ -153,6 +153,12 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
 
 ## Changelog
 
+**July 23, 2026 (later)**
+- Theme control (Evan's request: dark mode had no off switch): header button
+  cycles auto → light → dark, pinned in localStorage; dark styles moved from
+  the prefers-color-scheme media query to an html.dark class set by a
+  pre-paint head script (no flash, follows system in auto)
+
 **July 23, 2026**
 - Facelift: cards lifted off the paper (solid warm-white panels, warm shadows),
   Fraunces italic section headers, cold blue badge → deep teal, muted airline
