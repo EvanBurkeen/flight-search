@@ -1,5 +1,7 @@
 {
-  "regions": ["pdx1"],
+  "regions": [
+    "fra1"
+  ],
   "rewrites": [
     {
       "source": "/api/:path*",
