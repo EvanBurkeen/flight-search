@@ -101,6 +101,12 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
 
 ## Changelog
 
+**July 15, 2026 (later)**
+- FLI_PROXY activated in production: IPRoyal rotating US-residential proxy for all
+  Google traffic — ends the datacenter-IP throttle waves and the region roulette
+- Region back to iad1 (US East; Google egress now goes through the proxy, so the
+  server region only affects Claude/API latency)
+
 **July 15, 2026**
 - Sequential longitude unwrapping — complex routes (FLL-BOS-CDG-PVG) no longer draw across the wrong ocean
 - Layover rings on card timelines; layover durations on map dots; capped map padding + 5-wide world tiling
