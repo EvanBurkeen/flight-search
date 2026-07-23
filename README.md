@@ -91,7 +91,9 @@ Google traffic through a proxy (see Operations).
   `route` field (EWR is not JFK).
 - Ask ONE question only when origin is missing or destination is a whole region;
   otherwise assume and state assumptions.
-- Arrival-day intent → `arrival_date` + timezone logic (Asia→US lands same day).
+- Arrival-day intent → `arrival_date` (enforced on actual arrival timestamps) +
+  timezone heuristics; for wide-open routings it searches both same-day and
+  day-before departures so Middle-East/late-night itineraries aren't missed.
 - Small regional airports with no service → widen to nearby majors, say the drive.
 - Never claim a route doesn't exist without a `via_airports`-filtered search.
 
@@ -148,6 +150,9 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
 ## Changelog
 
 **July 16, 2026**
+- Arrival-day guidance corrected (Evan's catch): same-day Asia->US is a
+  heuristic that fails for late departures and Middle-East routings; assistant
+  now searches both candidate departure days when routings vary
 - Pre-handoff audit: scripts/build_world.py committed (world.js was previously
   unregenerable), README ops section updated with live proxy details and the
   current 4-attempt retry ladder
