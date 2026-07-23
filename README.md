@@ -138,6 +138,8 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
 ## Changelog
 
 **July 16, 2026**
+- Search ladder now reachable on every screen size: fixed rail above 1400px,
+  floating brass 'Searches' button + overlay panel below it
 - Root-caused first-search empties: Google's flights backend returns transient
   ErrorResponse bodies (HTTP 200, ~5-10%, in bursts). Retry ladder now 4
   attempts with jittered spacing; sticky proxy session per instance with IP
