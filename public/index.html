@@ -342,6 +342,26 @@
     }
     @keyframes pulse { 0%, 100% { opacity: 0.3; transform: scale(0.8); } 50% { opacity: 1; transform: scale(1.1); } }
 
+    .ladder {
+      position: fixed; top: 7rem; right: 1rem; width: 12rem; z-index: 5;
+      max-height: calc(100vh - 10rem); overflow-y: auto;
+      border-left: 1px solid var(--brass-soft); padding-left: 0.7rem;
+    }
+    .ladder-title {
+      font-size: 0.58rem; font-weight: 700; letter-spacing: 0.2em; text-transform: uppercase;
+      color: var(--brass); margin-bottom: 0.5rem;
+    }
+    .ladder-item {
+      display: block; width: 100%; text-align: left; background: none; border: none;
+      font-size: 0.62rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase;
+      color: var(--ink); opacity: 0.55; cursor: pointer; padding: 0.22rem 0;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      transition: opacity 0.15s, color 0.15s;
+    }
+    .ladder-item:hover { opacity: 1; color: var(--accent-dark); }
+    .ladder-item .n { color: var(--brass); margin-right: 0.35rem; }
+    @media (max-width: 1400px) { .ladder { display: none; } }
+
     .footer { text-align: center; margin-top: 3.5rem; font-size: 0.72rem; }
     .footer .flourish { color: var(--brass); letter-spacing: 0.35em; font-size: 0.6rem; margin-bottom: 0.4rem; }
     .footer a { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2px; opacity: 0.6; }
@@ -397,7 +417,7 @@
             <div class="msg-text" x-html="renderText(msg.content)"></div>
 
             <template x-for="(sec, si) in (msg.sections || [])" :key="si">
-              <div>
+              <div :id="sec._anchor">
                 <div class="section-head">
                   <div class="section-label" x-text="sectionLabel(sec)"></div>
                   <div class="mini-toggle" x-show="sec.results && sec.results.length">
@@ -758,6 +778,15 @@
       <div class="flourish">✦ ✦ ✦</div>
       <a href="https://evanburkeen.com">Evan Burkeen</a>
     </div>
+
+    <nav class="ladder" x-show="ladder().length > 1" aria-label="Search results index">
+      <div class="ladder-title">Searches</div>
+      <template x-for="(item, i) in ladder()" :key="item.anchor">
+        <button class="ladder-item" @click="jumpTo(item.anchor)" :title="item.label">
+          <span class="n" x-text="i + 1"></span><span x-text="item.label"></span>
+        </button>
+      </template>
+    </nav>
   </div>
 
   <script>
@@ -768,6 +797,7 @@
         isLoading: false,
         hasSearched: false,
         history: [],
+        sectionSeq: 0,
         viewMode: localStorage.getItem('flightViewMode') || 'detailed',
         loadingText: 'Thinking…',
         loadingTimer: null,
@@ -1002,6 +1032,7 @@
             this.history.push({ role: 'assistant', content: data.message });
             this.history = this.history.slice(-12);
 
+            (data.sections || []).forEach(sec => { sec._anchor = 'sec-' + (++this.sectionSeq); });
             this.messages.push({
               role: 'assistant',
               content: data.message,
@@ -1030,6 +1061,22 @@
         sectionLabel(sec) {
           const msg = sec.message || '';
           return msg.split('\n')[0];
+        },
+
+        ladder() {
+          const items = [];
+          for (const m of this.messages) {
+            for (const sec of m.sections || []) {
+              if (sec._anchor && ((sec.results || []).length || (sec.dates || []).length)) {
+                items.push({ anchor: sec._anchor, label: this.sectionLabel(sec) });
+              }
+            }
+          }
+          return items;
+        },
+
+        jumpTo(anchor) {
+          document.getElementById(anchor)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
         },
 
         renderText(t) {

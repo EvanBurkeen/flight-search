@@ -7,6 +7,38 @@ talk to Claude, which pulls live Google Flights data to search, compare, and rec
 > what has shipped, and the operational lessons learned. Update the Changelog
 > with every push.
 
+## For AI assistants picking this up
+
+You (an AI coding assistant) are expected to maintain this project from this
+document alone. Everything you need:
+
+- **Owner:** Evan Burkeen. Product goal: *"the flight tool I use instead of
+  Google Flights/Kayak."* Voice of the in-app assistant: concierge, no em dashes.
+- **Repo:** this directory (`~/Downloads/flight-search-web`), GitHub
+  `EvanBurkeen/flight-search`, production `flights.evanburkeen.com`. Pushing
+  `main` deploys automatically (~60-90s). Always run git with an explicit
+  `git -C <path>` (there was once a stray repo at `$HOME`; neutralized to
+  `~/.git-old-flight-projects-backup`, but stay explicit).
+- **Workflow that has worked:** reproduce/diagnose locally first
+  (`scripts/dev_server.py`, stub grammar below) → fix → verify in local preview →
+  commit with a descriptive message → push → wait ~80s → verify in production
+  with `curl -X POST https://flights.evanburkeen.com/api/search -H 'Content-Type:
+  application/json' -d '{"query": "JFK to ORD one way sept 18 cheapest"}'` and
+  assert non-empty `sections[].results`. Update the Changelog in the same push.
+- **Debugging empty results:** run the identical search locally vs production.
+  Local works + prod empty = IP throttling (see Operations). Both empty = real
+  data gap (small airports, or genuinely no service).
+- **Env (Vercel only, never in git):** `ANTHROPIC_API_KEY`, `FLI_PROXY`
+  (IPRoyal rotating US-residential proxy; the fix for Google throttling).
+- **Costs Evan cares about:** Anthropic per-turn (~cents), IPRoyal bandwidth
+  (~$6/GB, ~2GB purchased July 2026, months of runway at current usage).
+- **Roadmap shelf (discussed, not built):** price watches (cron + email),
+  trip memory + login, streaming replies, price-by-date calendar heatmap,
+  real booking via Duffel, search-result caching.
+- **Known trade-offs accepted by Evan:** timeline layover dots use naive local
+  times (schematic, not exact); round trips ship ~10 combos (expansion cost);
+  Claude sees only top-6 summaries per search (with truncation warning baked in).
+
 ## Stack
 
 | Layer | What |
@@ -100,6 +132,12 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
 - `world.js` is cache-busted by query string (`?v=2`); bump it when regenerating.
 
 ## Changelog
+
+**July 16, 2026**
+- Search ladder: fixed side rail indexing every results section, click to jump
+  (each comparison prong is its own rung); hidden under 1400px viewports
+- README gains a "For AI assistants" handoff section (workflow, env, roadmap)
+
 
 **July 15, 2026 (later)**
 - Randomized, query-neutral loading phrases (no more 'consulting live fares' on
