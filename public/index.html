@@ -315,6 +315,28 @@
     }
     .card-action:hover { background: var(--brass); color: var(--bg); box-shadow: none; }
 
+    .ret-picker { margin: 0.6rem 0 0.2rem; }
+    .ret-picker-label {
+      font-size: 0.68rem; letter-spacing: 0.02em; opacity: 0.7; margin-bottom: 0.35rem;
+    }
+    .ret-options { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+    .ret-opt {
+      display: flex; flex-direction: column; gap: 0.1rem; text-align: left;
+      border: 1px solid var(--line); border-radius: 6px; background: transparent;
+      padding: 0.35rem 0.55rem; cursor: pointer; color: var(--ink);
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .ret-opt:hover { border-color: var(--brass); }
+    .ret-opt.picked { border-color: var(--green); background: rgba(44, 70, 54, 0.08); }
+    .ret-opt .t { font-size: 0.78rem; font-weight: 600; }
+    .ret-opt .s { font-size: 0.64rem; opacity: 0.65; }
+    .ret-opt .p { font-size: 0.66rem; font-weight: 600; color: var(--brass); }
+    .ret-opt.picked .p { color: var(--green); }
+    html.dark .ret-opt.picked { background: rgba(168, 210, 154, 0.10); border-color: #a8d29a; }
+    html.dark .ret-opt.picked .p { color: #a8d29a; }
+    .compact-ret { margin-top: 0.15rem; }
+    .compact-ret .fselect { width: 100%; font-size: 0.64rem; }
+
     .stub-divider { position: relative; border-top: 1.5px dashed rgba(28,26,21,0.22); margin: 0.85rem -1.1rem 0.6rem; }
     .stub-divider::before, .stub-divider::after {
       content: ""; position: absolute; top: -0.55rem; width: 1.1rem; height: 1.1rem;
@@ -660,6 +682,14 @@
                         <div class="compact-leg"><span class="lbl">Out</span><span x-text="formatTime(it.outbound.legs[0].departure) + ' → ' + formatTime(it.outbound.legs[it.outbound.legs.length-1].arrival) + ' · ' + stopsText(it.outbound.stops)"></span></div>
                         <div class="compact-leg"><span class="lbl">Ret</span><span x-text="formatTime(it.return.legs[0].departure) + ' → ' + formatTime(it.return.legs[it.return.legs.length-1].arrival) + ' · ' + stopsText(it.return.stops)"></span></div>
                         <div class="compact-sub" x-text="'round trip total' + (((it.outbound.warnings || []).length + (it.return.warnings || []).length) ? ' · ⚠ see Detailed' : '')"></div>
+                        <div class="compact-ret" x-show="(it.return_options || []).length > 1">
+                          <select class="fselect" @change="pickReturn(it, +$event.target.value)">
+                            <template x-for="(r, ri) in (it.return_options || [])" :key="ri">
+                              <option :value="ri" :selected="isPickedReturn(it, ri)"
+                                      x-text="formatTime(r.legs[0].departure) + '→' + formatTime(r.legs[r.legs.length-1].arrival) + ' · ' + stopsText(r.stops) + (r.extra_over_best ? ' +' + formatPrice(r.extra_over_best, r.currency) : '')"></option>
+                            </template>
+                          </select>
+                        </div>
                         <div class="compact-badges" x-show="it.outbound.stops === 0 && it.return.stops === 0">
                           <span class="badge badge-direct">Direct both ways</span>
                         </div>
@@ -736,6 +766,22 @@
                           </template>
                           <div class="leg-detail" x-show="aircraftText(it.return)" x-text="aircraftText(it.return)"></div>
                         </div>
+
+                        <!-- keep the outbound, swap the way home; each option
+                             priced as the real total for that pairing -->
+                        <div class="ret-picker" x-show="(it.return_options || []).length > 1">
+                          <div class="ret-picker-label">Coming home on <span x-text="formatDate((it.return.legs[0].departure || '').slice(0,10))"></span>, with this outbound:</div>
+                          <div class="ret-options">
+                            <template x-for="(r, ri) in (it.return_options || [])" :key="ri">
+                              <button class="ret-opt" :class="isPickedReturn(it, ri) ? 'picked' : ''" @click="pickReturn(it, ri)">
+                                <span class="t" x-text="formatTime(r.legs[0].departure) + ' → ' + formatTime(r.legs[r.legs.length-1].arrival)"></span>
+                                <span class="s" x-text="stopsText(r.stops) + ' · ' + formatDuration(r.duration)"></span>
+                                <span class="p" x-text="r.extra_over_best ? '+' + formatPrice(r.extra_over_best, r.currency) : 'cheapest'"></span>
+                              </button>
+                            </template>
+                          </div>
+                        </div>
+
                         <div class="route-map" x-show="(it.outbound.route_points || []).length > 1" x-html="mapSvg(it.outbound.route_points, it.return.route_points)"></div>
                         <div class="badges" x-show="it.outbound.stops === 0 && it.return.stops === 0">
                           <span class="badge badge-direct">Direct both ways</span>
@@ -1397,6 +1443,23 @@
           let h = 0;
           for (const ch of (code || '??')) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
           return palette[h % palette.length];
+        },
+
+        // Round trips are chosen the way Google does it: the card is an
+        // OUTBOUND priced at the best total it can reach, and picking a return
+        // swaps the leg in place so the total moves with the choice.
+        isPickedReturn(it, ri) {
+          const opts = it.return_options || [];
+          const cur = it.return;
+          return opts[ri] && cur && opts[ri].legs[0].departure === cur.legs[0].departure
+            && opts[ri].legs[0].flight_number === cur.legs[0].flight_number;
+        },
+
+        pickReturn(it, ri) {
+          const r = (it.return_options || [])[ri];
+          if (!r) return;
+          it.return = r;
+          if (r.total_price != null) it.total_price = r.total_price;
         },
 
         badgeClass(h) {

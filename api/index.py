@@ -1299,27 +1299,68 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
             arrival_note = "Nothing meets the arrival-day/time constraint exactly — showing the closest arrivals instead."
             results = sorted(results, key=lambda c: c[0].legs[-1].arrival_datetime or datetime.max)
 
-        itineraries = []
-        for combo in results[:COMBO_POOL]:   # build a pool, rank it, then cut
+        # Google's round-trip flow, and the right one: you choose an OUTBOUND
+        # (each priced at the best total it can reach), then a RETURN, watching
+        # the total move. Combos share outbounds - one search returned 94 combos
+        # across just 8 outbounds - so flattening and keeping the 10 cheapest
+        # showed ten rows that differed only in their return leg, hiding seven
+        # outbounds including the only nonstop. Group by outbound instead.
+        grouped: dict = {}
+        for combo in results:
             out, ret = combo[0], combo[-1]
+            if out.price is None and ret.price is None:
+                continue
             total = max(p for p in [out.price, ret.price, 0] if p is not None)
-            itineraries.append(
-                {
-                    "total_price": total,
-                    "currency": out.currency or ret.currency or currency,
-                    "outbound": (out_f := serialize_flight(
-                        out, spec.get("cabin"),
-                        ret_date=ret.legs[0].departure_datetime.strftime("%Y-%m-%d")
-                        if ret.legs and ret.legs[0].departure_datetime else spec.get("return_date"),
-                    )),
-                    "return": serialize_flight(ret, spec.get("cabin")),
-                    # NOT deep-linked: a two-segment tfs with both directions
-                    # selected is rejected by Google (it falls back to the
-                    # Flights home page), and the return-segment schema has not
-                    # been recovered. Round trips keep the search-query URL.
-                    "booking_url": out_f["booking_url"],
-                }
+            key = (
+                out.legs[0].departure_datetime.isoformat() if out.legs and out.legs[0].departure_datetime else "",
+                tuple((lg.airline.name, lg.flight_number) for lg in out.legs),
             )
+            g = grouped.setdefault(key, {"out": out, "returns": []})
+            g["returns"].append((ret, total))
+
+        itineraries = []
+        for g in grouped.values():
+            out = g["out"]
+            g["returns"].sort(key=lambda rt: rt[1] or 1e9)
+            best_ret, best_total = g["returns"][0]
+            out_f = serialize_flight(
+                out, spec.get("cabin"),
+                ret_date=best_ret.legs[0].departure_datetime.strftime("%Y-%m-%d")
+                if best_ret.legs and best_ret.legs[0].departure_datetime else spec.get("return_date"),
+            )
+            # every return that pairs with THIS outbound, each priced as the
+            # real total so the cost of a better time is visible
+            options = []
+            for ret, total in g["returns"][:12]:
+                ret_f = serialize_flight(ret, spec.get("cabin"))
+                ret_f["total_price"] = total
+                ret_f["extra_over_best"] = round((total or 0) - (best_total or 0))
+                options.append(ret_f)
+            options = order_by_value(
+                options,
+                price_of=lambda r: r.get("total_price"),
+                duration_of=lambda r: r.get("duration"),
+                stops_of=lambda r: r.get("stops") or 0,
+                warnings_of=lambda r: r.get("warnings"),
+                requested_sort=spec.get("sort"),
+            )
+            shown = options[0] if options else serialize_flight(best_ret, spec.get("cabin"))
+            itineraries.append({
+                # the headline must be the total for the pairing actually on
+                # screen, not the group's floor, or the card quotes a price for
+                # an itinerary it is not showing
+                "total_price": shown.get("total_price", best_total),
+                "cheapest_total": best_total,
+                "currency": out.currency or best_ret.currency or currency,
+                "outbound": out_f,
+                "return": shown,
+                "return_options": options,
+                # NOT deep-linked: a two-segment tfs with both directions
+                # selected is rejected by Google (it falls back to the
+                # Flights home page), and the return-segment schema has not
+                # been recovered. Round trips keep the search-query URL.
+                "booking_url": out_f["booking_url"],
+            })
         # round trips get the same treatment: a cheap fare that costs you a
         # whole extra day across two legs is not the better trip
         itineraries.sort(key=lambda i: i["total_price"] or 1e9)

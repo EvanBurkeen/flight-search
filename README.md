@@ -163,6 +163,22 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
 
 ## Changelog
 
+**July 24, 2026 (round-trip picker)**
+- Round trips now work like Google's: you choose an OUTBOUND, then a RETURN,
+  and the total moves with the choice (Evan: "it's giving me the cheapest
+  combos instead of letting me choose"). Previously we flattened combos and
+  kept the 10 cheapest, so a search returning 94 combos across 8 outbounds
+  showed ten rows that differed only in return leg - hiding seven outbounds
+  including the only nonstop.
+- `search_fixed_dates` groups combos by outbound; each card is one outbound
+  with its own `return_options`, every option carrying the real
+  `total_price` for that pairing plus `extra_over_best` vs the group's floor.
+  Clicking a return swaps the leg in place and updates the headline.
+- The headline price is always the total for the pairing ON SCREEN, never the
+  group floor (an earlier build quoted $228 while displaying a $257 pairing).
+  `cheapest_total` is kept separately for reference; the floor option is
+  labelled "cheapest", not "best", since value ranking may prefer another.
+
 **July 24, 2026 (book the flight you clicked)**
 - One-way "Book" links now deep-link to the exact itinerary instead of a
   search page the user has to scan (Evan: clicked a JetBlue fare and "had to
