@@ -72,6 +72,31 @@ else:
         pass
 
 
+def reset_google_session() -> None:
+    """Discard the current thread's Google session (cookies included).
+
+    The tiny-ErrorResponse failures (HTTP 200, ~94 bytes, gRPC code 13) are
+    SESSION-STICKY, not random: measured July 24 2026, a flagged session
+    failed 64/64 consecutive requests while brand-new sessions fired in the
+    same seconds succeeded 20/32. Retrying on the same cookie jar therefore
+    cannot escape a burst — the retry must arrive as a new visitor. Fresh
+    unwarmed sessions did NOT underperform warmed ones in that study, so no
+    re-warm here (a warmup page is ~1.8 MB of proxy bandwidth).
+    """
+    try:
+        from fli.search.client import get_client
+        c = get_client()
+        session = getattr(c._sessions, "session", None)
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
+            c._sessions.session = None
+    except Exception:
+        pass  # best-effort; worst case the old session lives on
+
+
 # Google streams GetShoppingResults as PROGRESSIVE wrb chunks in one HTTP
 # response: the first chunk is an early partial snapshot, later chunks are
 # fuller re-renders of the same search (this is why the real UI "fills in"
@@ -784,11 +809,13 @@ def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy
         except SearchClientError as e:
             last_exc = e
             rotate_proxy_session()  # a failing attempt may be a bad exit IP
+            reset_google_session()  # ...and failures are session-sticky: retry as a new visitor
             time.sleep(2 + 2 * i)
             continue
         if results:
             return results
         rotate_proxy_session()
+        reset_google_session()
         time.sleep(0.6 * (i + 1) + random.uniform(0, 0.5))
     if last_exc:
         raise last_exc

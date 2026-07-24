@@ -153,6 +153,17 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
 
 ## Changelog
 
+**July 24, 2026 (later)**
+- Root-caused the transient tiny-ErrorResponse failures (gRPC code 13):
+  they are SESSION-STICKY soft-blocks, not random flicker — a flagged
+  cookie jar failed 64/64 requests while brand-new sessions in the same
+  seconds went 20/32 OK. Retry ladder now discards the thread's Google
+  session on every failed attempt (reset_google_session) in addition to
+  rotating the proxy exit, so each retry arrives as a new visitor (new
+  residential IP + new cookies in prod). Deep IP-level bursts remain
+  (only IP rotation escapes those); warmup showed no benefit in the
+  study, so resets do not re-warm (saves ~1.8MB proxy bandwidth each)
+
 **July 24, 2026**
 - MAJOR data fix (Evan's catch: app showed 1 of 3 ICN→HRB Jan 1 nonstops while
   Google's UI showed all): Google streams GetShoppingResults as progressive
