@@ -583,7 +583,17 @@ def looks_like_plain_search(query: str) -> bool:
     return bool(_ROUTE_HINT.search(q))
 
 
-def run_assistant(query: str, history: list | None) -> dict:
+def run_assistant(query: str, history: list | None, emit=None) -> dict:
+    """Run the agent loop. `emit(event, data)` receives progress as it happens:
+
+      sections     a results batch is ready (cards can render immediately —
+                   this lands seconds before the prose is written)
+      text_delta   a chunk of the reply as Claude writes it
+      text_reset   the text so far was a preamble to a search; discard it
+
+    With emit=None the behaviour is identical, just silent.
+    """
+    emit = emit or (lambda *_: None)
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"], max_retries=4)
     messages = [
         {"role": m["role"], "content": m["content"]}
@@ -612,7 +622,8 @@ def run_assistant(query: str, history: list | None) -> dict:
     while rounds < 3 and iterations < 8 and time.monotonic() - started < 65:
         iterations += 1
         _t = time.monotonic()
-        response = client.messages.create(
+        streamed_any = False
+        with client.messages.stream(
             model="claude-opus-4-8",
             max_tokens=4000,
             # synthesis (any call after results are in) always runs at full
@@ -627,7 +638,12 @@ def run_assistant(query: str, history: list | None) -> dict:
             }],
             tools=[SEARCH_TOOL, web_tool],
             messages=messages,
-        )
+        ) as stream:
+            for chunk in stream.text_stream:
+                if chunk:
+                    streamed_any = True
+                    emit("text_delta", chunk)
+            response = stream.get_final_message()
 
         u = getattr(response, "usage", None)
         timings.append((
@@ -643,6 +659,9 @@ def run_assistant(query: str, history: list | None) -> dict:
             continue
 
         tool_uses = [b for b in response.content if b.type == "tool_use"]
+        if tool_uses and streamed_any:
+            # whatever was streamed was a lead-in to a search, not the answer
+            emit("text_reset", None)
         if response.stop_reason != "tool_use" or not tool_uses:
             text = "\n".join(b.text for b in response.content if b.type == "text").strip()
             text, suggestions = split_suggestions(text)
@@ -721,6 +740,10 @@ def run_assistant(query: str, history: list | None) -> dict:
                 }
         pool.shutdown(wait=False, cancel_futures=True)
         timings.append((f"searches_{rounds}", round(time.monotonic() - _tsearch, 2), f"n={len(budgeted)}"))
+        # cards can render now, well before the prose that describes them
+        fresh = [s for s in sections if (s.get("results") or s.get("dates"))]
+        if fresh:
+            emit("sections", fresh)
         messages.append({"role": "user", "content": [tool_results_by_id[tu.id] for tu in tool_uses]})
 
     if sections:
@@ -1381,6 +1404,67 @@ def execute_spec(spec: dict) -> dict:
         payload["message"] = f"{spec['summary']}\n\n{payload['message']}"
     payload["assumptions"] = (spec.get("assumptions") or []) + date_notes
     return payload
+
+
+@app.post("/api/search/stream")
+async def search_stream(request: Request):
+    """Same turn, delivered as it happens.
+
+    The agent loop is blocking, so it runs on a worker thread and pushes
+    events into a queue that this generator drains into SSE frames.
+    """
+    import queue as _queue
+    from starlette.responses import StreamingResponse
+
+    body = await request.json()
+    query: str = (body.get("query") or "").strip()
+    if not query:
+        return JSONResponse({"error": "Query is required"}, status_code=400)
+    history = body.get("history")
+
+    events: "_queue.Queue" = _queue.Queue()
+
+    def worker():
+        try:
+            result = run_assistant(query, history, emit=lambda ev, data: events.put((ev, data)))
+            events.put(("done", {
+                "message": result["message"],
+                "sections": result["sections"],
+                "suggestions": result.get("suggestions") or [],
+            }))
+        except anthropic.APIStatusError as e:
+            overloaded = e.status_code in (429, 529) or getattr(e, "type", "") == "overloaded_error"
+            events.put(("done", {
+                "message": "My reasoning service is momentarily congested. Give it a few seconds and send that again; nothing was lost."
+                if overloaded else "I hit a temporary service error on my side. Please try that once more.",
+                "sections": [], "suggestions": ["try again"],
+            }))
+        except anthropic.APIConnectionError:
+            events.put(("done", {
+                "message": "I couldn't reach my reasoning service just now. One more try should do it.",
+                "sections": [], "suggestions": ["try again"],
+            }))
+        except Exception as e:
+            events.put(("error", {"error": str(e)}))
+        finally:
+            events.put((None, None))
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    def frames():
+        while True:
+            try:
+                ev, data = events.get(timeout=90)
+            except Exception:
+                break
+            if ev is None:
+                break
+            yield f"event: {ev}\ndata: {json.dumps(data)}\n\n"
+
+    return StreamingResponse(frames(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",  # don't let a proxy sit on the stream
+    })
 
 
 @app.post("/api/search")

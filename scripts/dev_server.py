@@ -13,6 +13,7 @@ pattern parser so the UI and search plumbing can be exercised without the LLM:
 import os
 import re
 import sys
+import time
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -63,11 +64,18 @@ if not os.environ.get("ANTHROPIC_API_KEY"):
             ]
         return [spec]
 
-    def stub_run_assistant(query: str, history=None):
+    def stub_run_assistant(query: str, history=None, emit=None):
+        emit = emit or (lambda *_: None)
         specs = stub_parse(query)
         if not specs:
             return {"message": "STUB: give me two airport codes, e.g. 'JFK to ORD'.", "sections": []}
-        sections = [app_mod.execute_spec(s) for s in specs]
+        sections = [app_mod.cached_execute_spec(s) for s in specs]
+        emit("sections", [s for s in sections if s.get("results") or s.get("dates")])
+        # imitate token-by-token delivery so the streaming UI can be exercised
+        for word in ("STUB ASSISTANT (no API key): results above arrived first, "
+                     "then this prose streamed in word by word.").split(" "):
+            emit("text_delta", word + " ")
+            time.sleep(0.04)
         return {
             "message": f"STUB ASSISTANT (no API key): ran {len(sections)} search(es). "
                        "With a real key, Claude summarizes these conversationally.",

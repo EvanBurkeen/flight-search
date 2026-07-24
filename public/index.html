@@ -1165,32 +1165,86 @@
           // record the user turn now so a stopped search still leaves context
           this.history.push({ role: 'user', content: q });
 
+          let streamMsg = null;   // the message being filled in as it streams
+
           try {
-            const res = await fetch('/api/search', {
+            const res = await fetch('/api/search/stream', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ query: q, history: this.history.slice(0, -1) }),
               signal: this.controller.signal,
             });
-            const data = await res.json();
-            if (data.error) throw new Error(data.error);
-            if (myReq !== this.reqId) return; // superseded by a newer request
+
+            // the turn arrives in pieces: result cards land as soon as the
+            // searches finish, the prose streams in while it is written
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buf = '', data = null;
+
+            const ensureMsg = () => {
+              if (!streamMsg) {
+                streamMsg = { role: 'assistant', content: '', sections: [], suggestions: [] };
+                this.messages.push(streamMsg);
+              }
+              return streamMsg;
+            };
+
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buf += decoder.decode(value, { stream: true });
+              const frames = buf.split('\n\n');
+              buf = frames.pop();
+              for (const frame of frames) {
+                const ev = (frame.match(/^event: (.+)$/m) || [])[1];
+                const raw = (frame.match(/^data: ([\s\S]*)$/m) || [])[1];
+                if (!ev) continue;
+                if (myReq !== this.reqId) return; // superseded mid-stream
+                let payload = null;
+                try { payload = JSON.parse(raw); } catch { continue; }
+
+                if (ev === 'sections') {
+                  const m = ensureMsg();
+                  payload.forEach(sec => {
+                    if (!sec._anchor) sec._anchor = 'sec-' + (++this.sectionSeq);
+                  });
+                  m.sections = payload;
+                } else if (ev === 'text_delta') {
+                  ensureMsg().content += payload;
+                } else if (ev === 'text_reset') {
+                  ensureMsg().content = '';   // that text introduced a search
+                } else if (ev === 'done') {
+                  data = payload;
+                } else if (ev === 'error') {
+                  throw new Error(payload.error || 'stream failed');
+                }
+              }
+            }
+            if (myReq !== this.reqId) return;
+            if (!data) throw new Error('the connection closed early');
 
             this.history.push({ role: 'assistant', content: data.message });
             this.history = this.history.slice(-12);
 
-            (data.sections || []).forEach(sec => { sec._anchor = 'sec-' + (++this.sectionSeq); });
-            this.messages.push({
-              role: 'assistant',
-              content: data.message,
-              sections: data.sections || [],
-              suggestions: data.suggestions || [],
+            (data.sections || []).forEach(sec => {
+              if (!sec._anchor) sec._anchor = 'sec-' + (++this.sectionSeq);
             });
+            const m = ensureMsg();
+            m.content = data.message;            // cleaned of the SUGGESTIONS line
+            m.sections = data.sections || [];
+            m.suggestions = data.suggestions || [];
             this.maybeNudge();
           } catch (err) {
             if (err.name === 'AbortError') return; // stop() already recorded the interruption
             if (myReq !== this.reqId) return;
-            this.messages.push({ role: 'assistant', content: `Something went wrong: ${err.message}. Try again in a moment.`, sections: [] });
+            const note = `Something went wrong: ${err.message}. Try again in a moment.`;
+            if (streamMsg) {
+              // keep any cards that already arrived; replace the partial prose
+              streamMsg.content = note;
+              streamMsg.suggestions = [];
+            } else {
+              this.messages.push({ role: 'assistant', content: note, sections: [] });
+            }
             this.maybeNudge();
           } finally {
             if (myReq === this.reqId) {
@@ -1235,7 +1289,9 @@
         },
 
         renderText(t) {
-          const esc = (t || '')
+          // while streaming, the raw text still carries its trailing
+          // SUGGESTIONS line; the server strips it only in the final payload
+          const esc = (t || '').replace(/\n*SUGGESTIONS:[\s\S]*$/, '')
             .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
           // the model sometimes hard-wraps mid-sentence; join single newlines
           // into flowing text but keep paragraph breaks and list lines
