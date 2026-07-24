@@ -905,9 +905,14 @@ def multi_city_url(parts: list, cabin: str | None = None) -> str:
 #
 # Schema recovered from a real Google-issued link and verified by reproducing
 # that link byte for byte (see _tfs_segment for the per-segment layout):
-#   1: 28 (constant)   2: trip type (1 round, 2 one-way, 3 multi-city)
-#   3: segment (repeated)   8: seat class   9: adults
-#   14: 1 (constant)   16: {1: -1} (no max price)   19: 2 (constant)
+#   1: 28 (constant)   2: 2 (constant)
+#   3: segment (repeated: one per journey leg; a segment's own repeated f4
+#      entries are the connecting flights that make it up)
+#   8: seat class   9: adults   14: 1 (constant)   16: {1: -1} (no max price)
+#   19: TRIP TYPE — 1 round trip, 2 one-way, 3 multi-city
+# Note f2 is NOT the trip type: putting it there made Google reject the URL
+# and fall back to its home page. Verified against real Google links for all
+# three trip types.
 # The `tfu` token in Google's own links is session-scoped; it is not required.
 # --------------------------------------------------------------------------
 def _pb_varint(n: int) -> bytes:
@@ -957,14 +962,14 @@ def itinerary_url(segments: list, cabin: str | None = None, trip_type: int = 2,
     """Deep link straight to these exact flights, or None if we can't build one."""
     try:
         seat = CABIN_MAP.get(cabin or "economy", SeatType.ECONOMY).value
-        body = _pb_int(1, 28) + _pb_int(2, trip_type)
+        body = _pb_int(1, 28) + _pb_int(2, 2)
         for legs in segments:
             if not legs or not legs[0].departure_datetime:
                 return None
             body += _pb_msg(3, _tfs_segment(legs))
         body += _pb_int(8, seat) + _pb_int(9, max(1, adults)) + _pb_int(14, 1)
         body += _pb_msg(16, _pb_int(1, -1))
-        body += _pb_int(19, 2)
+        body += _pb_int(19, trip_type)
         tfs = base64.urlsafe_b64encode(body).decode().rstrip("=")
         return f"https://www.google.com/travel/flights?tfs={tfs}"
     except Exception:
@@ -1335,6 +1340,10 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
                 ret_f = serialize_flight(ret, spec.get("cabin"))
                 ret_f["total_price"] = total
                 ret_f["extra_over_best"] = round((total or 0) - (best_total or 0))
+                # each pairing books as its own itinerary, so the link has to
+                # travel with the option the user picks
+                ret_f["booking_url"] = (itinerary_url([out.legs, ret.legs], spec.get("cabin"), trip_type=1)
+                                        or out_f["booking_url"])
                 options.append(ret_f)
             options = order_by_value(
                 options,
@@ -1355,11 +1364,7 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
                 "outbound": out_f,
                 "return": shown,
                 "return_options": options,
-                # NOT deep-linked: a two-segment tfs with both directions
-                # selected is rejected by Google (it falls back to the
-                # Flights home page), and the return-segment schema has not
-                # been recovered. Round trips keep the search-query URL.
-                "booking_url": out_f["booking_url"],
+                "booking_url": shown.get("booking_url") or out_f["booking_url"],
             })
         # round trips get the same treatment: a cheap fare that costs you a
         # whole extra day across two legs is not the better trip
@@ -1502,7 +1507,8 @@ def search_multi_city(spec: dict, currency: str) -> dict:
             "total_price": max(prices) if prices else None,
             "currency": parts[0].currency or currency,
             "parts": [serialize_flight(p, spec.get("cabin")) for p in parts],
-            "booking_url": multi_city_url(parts, spec.get("cabin")),
+            "booking_url": (itinerary_url([p.legs for p in parts], spec.get("cabin"), trip_type=3)
+                            or multi_city_url(parts, spec.get("cabin"))),
         })
     itineraries.sort(key=lambda i: i["total_price"] or 1e9)
     for i, itin in enumerate(itineraries):

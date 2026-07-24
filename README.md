@@ -163,6 +163,23 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
 
 ## Changelog
 
+**July 24, 2026 (deep links for every trip type)**
+- Round-trip and multi-city Book links now open the exact itinerary too, so
+  all three trip types are deep-linked. The earlier round-trip failure was a
+  misread of the schema: **f2 is a constant 2 and f19 is the TRIP TYPE**
+  (1 round trip, 2 one-way, 3 multi-city). Putting the trip type in f2 made
+  Google reject the URL and fall back to its home page.
+- Confirmed by decoding real Google links Evan supplied for all three types.
+  Repeated f3 = journey segments; a segment's repeated f4 entries are the
+  connecting flights inside it (so multi-city FLL-ATL-ICN is one segment with
+  two f4s). f13/f14 endpoints take {1:1, 2:"IATA"} for an airport or
+  {1:3, 2:"/m/..."} for a Knowledge-Graph city; we always emit airports.
+- Browser-verified: round trip opens with BOTH legs selected, multi-city
+  opens as a "Multi-city trip" with every segment selected and vendors listed.
+  The one-way byte-for-byte test still passes, so the encoder is pinned.
+- Each round-trip RETURN OPTION carries its own booking link, and picking one
+  swaps the card's link, so Book always opens the pairing on screen.
+
 **July 24, 2026 (round-trip picker)**
 - Round trips now work like Google's: you choose an OUTBOUND, then a RETURN,
   and the total moves with the choice (Evan: "it's giving me the cheapest

@@ -1460,6 +1460,7 @@
           if (!r) return;
           it.return = r;
           if (r.total_price != null) it.total_price = r.total_price;
+          if (r.booking_url) it.booking_url = r.booking_url;  // book what's shown
         },
 
         badgeClass(h) {
