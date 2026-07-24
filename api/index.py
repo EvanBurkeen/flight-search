@@ -3,6 +3,9 @@ import os
 import random
 import re
 import time
+
+_PROCESS_START = time.monotonic()
+_process_served = 0  # 0 while this process has not yet answered a request
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
 from datetime import datetime
@@ -553,12 +556,14 @@ def run_assistant(query: str, history: list | None) -> dict:
     web_tool = {"type": "web_search_20260209", "name": "web_search", "max_uses": 3}
 
     started = time.monotonic()
+    timings: list = []   # [(phase, seconds, detail)] — surfaced for profiling
     rounds = 0
     iterations = 0
     # hard turn budget: past ~65s, stop searching and answer with what we have
     # (a Google throttle wave otherwise compounds into multi-minute hangs)
     while rounds < 3 and iterations < 8 and time.monotonic() - started < 65:
         iterations += 1
+        _t = time.monotonic()
         response = client.messages.create(
             model="claude-opus-4-8",
             max_tokens=4000,
@@ -574,6 +579,14 @@ def run_assistant(query: str, history: list | None) -> dict:
             messages=messages,
         )
 
+        u = getattr(response, "usage", None)
+        timings.append((
+            f"claude_{iterations}", round(time.monotonic() - _t, 2),
+            f"in={getattr(u, 'input_tokens', '?')} "
+            f"cache_r={getattr(u, 'cache_read_input_tokens', '?')} "
+            f"out={getattr(u, 'output_tokens', '?')} stop={response.stop_reason}",
+        ))
+
         # server-side web search can pause mid-loop; re-send to let it resume
         if response.stop_reason == "pause_turn":
             messages.append({"role": "assistant", "content": response.content})
@@ -583,7 +596,8 @@ def run_assistant(query: str, history: list | None) -> dict:
         if response.stop_reason != "tool_use" or not tool_uses:
             text = "\n".join(b.text for b in response.content if b.type == "text").strip()
             text, suggestions = split_suggestions(text)
-            return {"message": text or "…", "sections": sections, "suggestions": suggestions}
+            return {"message": text or "…", "sections": sections,
+                    "suggestions": suggestions, "timings": timings}
         rounds += 1
 
         messages.append({"role": "assistant", "content": response.content})
@@ -615,6 +629,7 @@ def run_assistant(query: str, history: list | None) -> dict:
                 time.sleep(delay)
             return execute_spec(spec)
 
+        _tsearch = time.monotonic()
         futures = {
             tu.id: pool.submit(_staggered, tu.input, n * 0.4)
             for n, tu in enumerate(budgeted)
@@ -655,6 +670,7 @@ def run_assistant(query: str, history: list | None) -> dict:
                     "is_error": True,
                 }
         pool.shutdown(wait=False, cancel_futures=True)
+        timings.append((f"searches_{rounds}", round(time.monotonic() - _tsearch, 2), f"n={len(budgeted)}"))
         messages.append({"role": "user", "content": [tool_results_by_id[tu.id] for tu in tool_uses]})
 
     if sections:
@@ -1258,13 +1274,25 @@ async def search(request: Request):
         if not query:
             return JSONResponse({"error": "Query is required"}, status_code=400)
 
+        global _process_served
+        cold = _process_served == 0
+        _process_served += 1
+        t0 = time.monotonic()
         result = run_assistant(query, body.get("history"))
-        return JSONResponse({
+        payload = {
             "type": "assistant",
             "message": result["message"],
             "sections": result["sections"],
             "suggestions": result.get("suggestions") or [],
-        })
+        }
+        if body.get("debug_timings"):
+            payload["timings"] = {
+                "total": round(time.monotonic() - t0, 2),
+                "cold_process": cold,
+                "since_process_start": round(time.monotonic() - _PROCESS_START, 2),
+                "phases": result.get("timings") or [],
+            }
+        return JSONResponse(payload)
 
     except anthropic.APIStatusError as e:
         if e.status_code in (429, 529) or getattr(e, "type", "") == "overloaded_error":
