@@ -807,7 +807,7 @@
                         <template x-for="(p, k) in it.parts" :key="k">
                           <div class="compact-leg"><span class="lbl" x-text="'Leg ' + (k+1)"></span><span x-text="p.legs[0].from + '→' + p.legs[p.legs.length-1].to + ' · ' + formatTime(p.legs[0].departure) + '–' + formatTime(p.legs[p.legs.length-1].arrival) + ' · ' + stopsText(p.stops)"></span></div>
                         </template>
-                        <div class="compact-sub">all legs, one ticket</div>
+                        <div class="compact-sub" x-text="'combined trip' + ((it.warnings || []).length ? ' · ⚠ separate tickets possible' : '')"></div>
                         <a :href="it.booking_url" target="_blank" rel="noopener noreferrer" class="compact-book">Book →</a>
                       </div>
                     </template>
@@ -860,6 +860,9 @@
                               <div class="warning" x-text="w"></div>
                             </template>
                           </div>
+                        </template>
+                        <template x-for="(w, k) in (it.warnings || [])" :key="'tw'+k">
+                          <div class="warning" x-text="w"></div>
                         </template>
                         <div class="route-map" x-show="multiCityPoints(it).length > 1" x-html="mapSvg(multiCityPoints(it))"></div>
                         <a :href="it.booking_url" target="_blank" rel="noopener noreferrer" class="card-action">Book on Google Flights</a>

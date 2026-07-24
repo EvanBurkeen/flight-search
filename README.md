@@ -163,6 +163,24 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
 
 ## Changelog
 
+**July 24, 2026 (multi-city truthfulness)**
+- Two Evan catches on the FLL-ICN-HRB trip. (1) The best one-way (6:35 Delta)
+  never appeared in combined results: multi-city expands only the first
+  `top_n` leg-1 candidates and it sat at rank 5+ among same-price ties.
+  Fan-out is now 6, and multi_city_segments accept a per-leg departure_time
+  window so a specific departure can be forced into the expansion ("what
+  about the 6:35?" now works; it priced at $2,207 combined, which is WHY
+  cheapest-first hid it). (2) We claimed "one ticket" and quoted a single
+  price; Google's own booking page said "Separate tickets - must be booked
+  individually" (Delta=SkyTeam + Asiana=Star don't interline) and showed a
+  seller spread ($1,022 OTA vs $1,166 airline-direct vs our $1,042 quote).
+- Now: mixed-carrier itineraries whose alliances differ (or a carrier has
+  none) carry an explicit separate-tickets warning on the card, in Claude's
+  summary, and in the section message; prices are framed as Google's
+  search-time quote with seller variance; the prompt forbids promising
+  through-bags or misconnect protection on mixed-carrier combinations.
+  Same-alliance pairings (Delta + China Eastern) correctly stay unflagged.
+
 **July 24, 2026 (deep links for every trip type)**
 - Round-trip and multi-city Book links now open the exact itinerary too, so
   all three trip types are deep-linked. The earlier round-trip failure was a

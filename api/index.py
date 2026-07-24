@@ -353,6 +353,14 @@ SEARCH_TOOL = {
                         "origins": {"type": "array", "items": {"type": "string"}},
                         "destinations": {"type": "array", "items": {"type": "string"}},
                         "date": {"type": "string", "description": "YYYY-MM-DD"},
+                        "departure_time": {
+                            "type": ["object", "null"],
+                            "description": "Departure window for THIS leg, hours 0-24. Only a handful of leg-1 candidates get expanded into full itineraries, so when the user asks about a specific departure (e.g. 'the 6:35am'), set a tight window like {earliest: 5, latest: 8} to force that neighborhood into the expansion.",
+                            "properties": {
+                                "earliest": {"type": ["number", "null"]},
+                                "latest": {"type": ["number", "null"]},
+                            },
+                        },
                     },
                     "required": ["origins", "destinations", "date"],
                 },
@@ -480,7 +488,7 @@ How to handle requests:
 - "via / through <hub>" questions: search with via_airports. That filter checks every itinerary Google returns; the plain result list you see is only a top-6 sample, so NEVER assert that a routing, hub, or airline "doesn't exist" from the plain list — and never say you "confirmed" or "checked directly" unless a via_airports search actually ran this conversation. If you haven't checked, say so and offer to.
 - Comparisons: run one search per option (at most 4 per turn). A self-arranged overnight stopover = one search per leg with the correct date on each. Give each search a summary naming the option ("Option A: Thursday nonstop").
 - Empty first results on busy routes are usually transient: retry the SAME search once before broadening. Once a search succeeds, stop; don't also run overlapping broader variants of a question that's already answered. (Empty searches are hidden from the user's page, so never reference "the empty section above.")
-- Multi-city trips (A -> B, B -> C, C -> A, or open-jaw): use trip_type multi_city with multi_city_segments — that prices all legs as ONE ticket, usually cheaper than separate one-ways. Use separate one-way searches only when the user wants to compare against self-booking each leg.
+- Multi-city trips (A -> B, B -> C, C -> A, or open-jaw): use trip_type multi_city with multi_city_segments — Google prices the whole trip together, often cheaper than separate one-ways. But NEVER promise "one ticket", through-checked bags, or missed-connection protection unless every leg is on the same carrier or alliance: mixed-carrier combinations (a result's warning will say so) are often issued as separate tickets even though they are priced together. Quote combined prices as "from $X" since the final price varies by seller. Use separate one-way searches when the user wants to compare against self-booking each leg.
 - Make reasonable assumptions and state them briefly instead of interrogating the user. City-level vagueness is yours to resolve (airports, date windows, cabin). But ask ONE brief question before searching when the request is genuinely unresolvable: the origin is missing entirely, or the destination is a whole region or continent ("Europe", "Asia", "somewhere warm"). Offer to choose for them in the same breath, e.g. "Anywhere in Europe in particular? If you're open, I'm happy to compare a few favorites like London, Paris, and Lisbon." Never stack multiple questions, and never ask when a sensible assumption exists.
 - Airport precision matters: each result's route field states its true endpoints (e.g. FLL-EWR). Quote airports exactly from that field. Never name an airport the data does not show; EWR is not JFK.
 
@@ -514,6 +522,7 @@ def compact_for_model(payload: dict) -> str:
             {
                 "total_price": it["total_price"], "currency": it["currency"],
                 "legs": [_leg_summary(p) for p in it["parts"]],
+                **({"ticketing_warning": it["warnings"][0]} if it.get("warnings") else {}),
             }
             for it in (payload.get("results") or [])[:5]
         ]
@@ -1457,7 +1466,7 @@ def search_multi_city(spec: dict, currency: str) -> dict:
         d, bad_d = resolve_airports(seg.get("destinations"))
         invalid += bad_o + bad_d
         if o and d and seg.get("date"):
-            resolved.append((o, d, seg["date"]))
+            resolved.append((o, d, seg["date"], time_restrictions(seg.get("departure_time"))))
     if invalid or len(resolved) < 2:
         return {
             "type": "clarify",
@@ -1471,8 +1480,9 @@ def search_multi_city(spec: dict, currency: str) -> dict:
             departure_airport=[[a, 0] for a in o],
             arrival_airport=[[a, 0] for a in d],
             travel_date=date_,
+            time_restrictions=tr,
         )
-        for o, d, date_ in resolved
+        for o, d, date_, tr in resolved
     ]
     filters = FlightSearchFilters(
         trip_type=TripType.MULTI_CITY,
@@ -1490,7 +1500,12 @@ def search_multi_city(spec: dict, currency: str) -> dict:
     sort = SORT_MAP.get(spec.get("sort"), SortBy.CHEAPEST)
     # multi-city expands every leg chain — keep the fan-out small to stay inside
     # the serverless time budget
-    results = run_search(SearchFlights(), filters, sort, top_n=4)
+    # fan-out: only this many leg-1 candidates get expanded into full
+    # itineraries. 4 lost the best one-way (a 6:35 departure sat at rank 5
+    # among eight same-price ties); warm-connection reuse made expansions
+    # cheap enough to widen. Time-window refinement narrows WHICH candidates
+    # get expanded, so a specific departure can always be forced in.
+    results = run_search(SearchFlights(), filters, sort, top_n=6)
 
     if not results:
         return {
@@ -1503,20 +1518,42 @@ def search_multi_city(spec: dict, currency: str) -> dict:
     for combo in results[:8]:
         parts = list(combo) if isinstance(combo, tuple) else [combo]
         prices = [p.price for p in parts if p.price]
+        serialized = [serialize_flight(p, spec.get("cabin")) for p in parts]
+        # Ticketing honesty: Google prices these as a combined trip, but when
+        # the legs are on carriers that do not ticket jointly it sells them as
+        # SEPARATE tickets (its own booking page says "must be booked
+        # individually" for e.g. Delta + Asiana). No through-bags, no
+        # misconnect protection. Flag exactly that case.
+        alliances = {s.get("alliance") for s in serialized}
+        carriers = {s.get("airline_code") for s in serialized}
+        ticket_warnings = []
+        if len(carriers) > 1 and (len(alliances) > 1 or None in alliances):
+            names = " + ".join(sorted({s.get("airline") or "?" for s in serialized}))
+            ticket_warnings.append(
+                f"Mixed carriers ({names}) that do not ticket jointly: sellers may issue "
+                "separate tickets, so bags and onward connections may not be protected. "
+                "Check the booking page."
+            )
         itineraries.append({
             "total_price": max(prices) if prices else None,
             "currency": parts[0].currency or currency,
-            "parts": [serialize_flight(p, spec.get("cabin")) for p in parts],
+            "parts": serialized,
+            "warnings": ticket_warnings,
             "booking_url": (itinerary_url([p.legs for p in parts], spec.get("cabin"), trip_type=3)
                             or multi_city_url(parts, spec.get("cabin"))),
         })
     itineraries.sort(key=lambda i: i["total_price"] or 1e9)
     for i, itin in enumerate(itineraries):
         itin["score"] = round(95 - (i / max(len(itineraries) - 1, 1)) * 55)
-    route_text = " → ".join([resolved[0][0][0].name] + [d[0].name for _, d, _ in resolved])
+    route_text = " → ".join([resolved[0][0][0].name] + [d[0].name for _, d, _, _ in resolved])
     return {
         "type": "multicity",
-        "message": f"Found {len(itineraries)} multi-city itineraries ({route_text}). Prices are the total for all legs on one ticket.",
+        "message": (
+            f"Found {len(itineraries)} combined itineraries ({route_text}). Prices are Google's "
+            "quote for the whole trip at search time; the final price varies by seller (booking "
+            "direct with the airlines can cost more than an agency). Mixed-carrier combinations "
+            "may be issued as separate tickets."
+        ),
         "results": itineraries,
     }
 
