@@ -36,6 +36,16 @@ document alone. Everything you need:
   (IPRoyal rotating US-residential proxy; the fix for Google throttling).
 - **Costs Evan cares about:** Anthropic per-turn (~cents), IPRoyal bandwidth
   (~$6/GB, ~2GB purchased July 2026, months of runway at current usage).
+- **Parked work — `streaming-experiment` branch** (`git -C <path> checkout
+  streaming-experiment`): SSE turn delivery with progressive result cards,
+  held-back reveal after the intro sentence, and letter-by-letter typing.
+  Shelved July 24, 2026 because it was not fully reliable in practice. The
+  `/api/search/stream` endpoint and `run_assistant(..., emit=...)` are STILL
+  ON MAIN and still work, so returning to it is a one-line change in
+  `public/index.html` (fetch `/api/search/stream` instead of `/api/search`)
+  plus restoring that branch's frontend stream handler and typewriter. Known
+  gotcha if you go back: mutate Alpine's reactive proxy
+  (`this.messages[this.messages.length - 1]`), never the object you pushed.
 - **Roadmap shelf (discussed, not built):** price watches (cron + email),
   trip memory + login, streaming replies, price-by-date calendar heatmap,
   real booking via Duffel, search-result caching.
@@ -152,6 +162,16 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
   lakes; run it, then bump the `?v=N` cache-buster on the script tag in index.html).
 
 ## Changelog
+
+**July 24, 2026 (late, streaming reverted)**
+- Reverted the frontend to the non-streaming `/api/search` path (Evan: "not
+  fully working right now"). Streaming, progressive card reveal, and
+  letter-by-letter typing are preserved on the **`streaming-experiment`**
+  branch; the server side (`/api/search/stream`, `run_assistant(emit=...)`)
+  stays on main, so switching back is a one-line fetch change plus that
+  branch's stream handler. Kept from that work: the search cache,
+  warm-connection identity reuse, effort routing, capped breaker waits, and
+  the textarea autosize fix (all latency wins are independent of streaming).
 
 **July 24, 2026 (night, latency)**
 - Profiled the turn first (opt-in `debug_timings` on /api/search). Baseline

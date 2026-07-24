@@ -71,12 +71,11 @@ if not os.environ.get("ANTHROPIC_API_KEY"):
             return {"message": "STUB: give me two airport codes, e.g. 'JFK to ORD'.", "sections": []}
         sections = [app_mod.cached_execute_spec(s) for s in specs]
         emit("sections", [s for s in sections if s.get("results") or s.get("dates")])
-        # imitate chunked delivery so the streaming UI can be exercised: two
-        # sentences, so the card reveal (which waits for the first) is visible
-        stub_text = ("STUB: the best flight is the first card below. "
-                     "The cards should have appeared right after that opening "
-                     "sentence finished typing, while this second sentence "
-                     "continues on afterwards.")
+        # emit() is a no-op on the non-streaming path; the events are still
+        # produced so /api/search/stream (see the streaming-experiment branch)
+        # stays exercisable locally
+        stub_text = (f"STUB ASSISTANT (no API key): ran {len(specs)} search(es). "
+                     "With a real key, Claude summarizes these conversationally.")
         for word in stub_text.split(" "):
             emit("text_delta", word + " ")
             time.sleep(0.05)

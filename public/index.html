@@ -932,63 +932,6 @@
           }, { passive: true });
         },
 
-        // --- letter-by-letter reveal -------------------------------------
-        // Claude's stream arrives in big pieces (a 440-character reply came in
-        // 9 chunks), so painting each chunk makes whole phrases pop in. Instead
-        // content walks toward _target a few characters per frame. The rate is
-        // adaptive: whatever is buffered is always drained inside DRAIN_MS, so
-        // the typing can never finish meaningfully later than the response did.
-        typeOut(msg) {
-          const DRAIN_MS = 400, TICK = 16;
-          if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-            msg.content = msg._target || '';
-            this.revealCards(msg);
-            return;
-          }
-          if (msg._typing) return;
-          msg._typing = true;
-          const step = () => {
-            const target = msg._target || '', shown = msg.content || '';
-            if (document.hidden) {
-              // background tabs throttle timers to ~1/s, which would leave a
-              // half-typed reply waiting for the reader to come back
-              msg.content = target;
-              msg._typing = false;
-              if (msg._complete) this.revealCards(msg);
-              return;
-            }
-            if (target.length < shown.length || !target.startsWith(shown)) {
-              // the final payload drops the trailing SUGGESTIONS line we had
-              // been typing through; snap to the clean text
-              msg.content = target;
-              msg._typing = false;
-              this.revealCards(msg);
-              return;
-            }
-            if (shown.length >= target.length) {
-              msg._typing = false;
-              if (msg._complete) this.revealCards(msg);  // never strand the cards
-              return;
-            }
-            const n = Math.max(1, Math.ceil((target.length - shown.length) / (DRAIN_MS / TICK)));
-            msg.content = target.slice(0, shown.length + n);
-            if (!msg._revealed && this.introDone(msg.content)) this.revealCards(msg);
-            setTimeout(step, TICK);
-          };
-          step();
-        },
-
-        introDone(text) {
-          // one finished sentence is the cue: "The best flight is a Delta
-          // nonstop at $154, landing 10:59pm." then the cards drop in
-          return /[.!?]["')\]]?(\s|$)/.test(text || '') || (text || '').length > 170;
-        },
-
-        revealCards(msg) {
-          if (msg._revealed) return;
-          msg._revealed = true;
-          if ((msg._held || []).length) msg.sections = msg._held;
-        },
 
         maybeNudge() {
           // no auto-scroll on completion by design; instead, offer a jump
@@ -1228,110 +1171,36 @@
           // record the user turn now so a stopped search still leaves context
           this.history.push({ role: 'user', content: q });
 
-          let streamMsg = null;   // the message being filled in as it streams
-
           try {
-            const res = await fetch('/api/search/stream', {
+            // Non-streaming: the whole turn arrives at once. The SSE version
+            // (progressive cards + letter-by-letter typing) lives on the
+            // `streaming-experiment` branch; /api/search/stream is still
+            // served, so switching back is a change to this fetch alone.
+            const res = await fetch('/api/search', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ query: q, history: this.history.slice(0, -1) }),
               signal: this.controller.signal,
             });
-
-            // the turn arrives in pieces: result cards land as soon as the
-            // searches finish, the prose streams in while it is written
-            const reader = res.body.getReader();
-            const decoder = new TextDecoder();
-            let buf = '', data = null;
-
-            const ensureMsg = () => {
-              if (!streamMsg) {
-                this.messages.push({
-                  role: 'assistant', content: '', sections: [], suggestions: [],
-                  _target: '',      // text received so far; content types toward it
-                  _held: [],        // cards fetched but deliberately not shown yet
-                  _revealed: false,
-                });
-                // read the pushed item BACK out of the array: that returns
-                // Alpine's reactive proxy. Mutating the raw object we pushed
-                // updates no bindings, so the UI would freeze on the first
-                // delta and never show the rest of the reply.
-                streamMsg = this.messages[this.messages.length - 1];
-              }
-              return streamMsg;
-            };
-
-            while (true) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              buf += decoder.decode(value, { stream: true });
-              const frames = buf.split('\n\n');
-              buf = frames.pop();
-              for (const frame of frames) {
-                const ev = (frame.match(/^event: (.+)$/m) || [])[1];
-                const raw = (frame.match(/^data: ([\s\S]*)$/m) || [])[1];
-                if (!ev) continue;
-                if (myReq !== this.reqId) return; // superseded mid-stream
-                let payload = null;
-                try { payload = JSON.parse(raw); } catch { continue; }
-
-                if (ev === 'sections') {
-                  const m = ensureMsg();
-                  payload.forEach(sec => {
-                    if (!sec._anchor) sec._anchor = 'sec-' + (++this.sectionSeq);
-                  });
-                  // hold the cards back: the intro sentence should land first,
-                  // then the results it is talking about
-                  m._held = payload;
-                  if (m._revealed) m.sections = payload;
-                } else if (ev === 'text_delta') {
-                  const m = ensureMsg();
-                  m._target += payload;
-                  this.typeOut(m);
-                } else if (ev === 'text_reset') {
-                  const m = ensureMsg();
-                  m._target = '';             // that text introduced a search
-                  m.content = '';
-                } else if (ev === 'done') {
-                  data = payload;
-                } else if (ev === 'error') {
-                  throw new Error(payload.error || 'stream failed');
-                }
-              }
-            }
-            if (myReq !== this.reqId) return;
-            if (!data) throw new Error('the connection closed early');
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+            if (myReq !== this.reqId) return; // superseded by a newer request
 
             this.history.push({ role: 'assistant', content: data.message });
             this.history = this.history.slice(-12);
 
-            (data.sections || []).forEach(sec => {
-              if (!sec._anchor) sec._anchor = 'sec-' + (++this.sectionSeq);
+            (data.sections || []).forEach(sec => { sec._anchor = 'sec-' + (++this.sectionSeq); });
+            this.messages.push({
+              role: 'assistant',
+              content: data.message,
+              sections: data.sections || [],
+              suggestions: data.suggestions || [],
             });
-            const m = ensureMsg();
-            (data.sections || []).forEach(sec => {
-              if (!sec._anchor) sec._anchor = 'sec-' + (++this.sectionSeq);
-            });
-            m._held = data.sections || [];
-            m.suggestions = data.suggestions || [];
-            m._target = data.message;            // cleaned of the SUGGESTIONS line
-            m._complete = true;
-            this.typeOut(m);                     // types the tail, then reveals
             this.maybeNudge();
           } catch (err) {
             if (err.name === 'AbortError') return; // stop() already recorded the interruption
             if (myReq !== this.reqId) return;
-            const note = `Something went wrong: ${err.message}. Try again in a moment.`;
-            if (streamMsg) {
-              // keep any cards that already arrived; replace the partial prose
-              streamMsg._target = note;
-              streamMsg.content = note;
-              streamMsg.suggestions = [];
-              streamMsg._complete = true;
-              this.revealCards(streamMsg);
-            } else {
-              this.messages.push({ role: 'assistant', content: note, sections: [] });
-            }
+            this.messages.push({ role: 'assistant', content: `Something went wrong: ${err.message}. Try again in a moment.`, sections: [] });
             this.maybeNudge();
           } finally {
             if (myReq === this.reqId) {
@@ -1376,8 +1245,8 @@
         },
 
         renderText(t) {
-          // while streaming, the raw text still carries its trailing
-          // SUGGESTIONS line; the server strips it only in the final payload
+          // the server strips the trailing SUGGESTIONS line, but belt and
+          // braces: never render it if one slips through
           const esc = (t || '').replace(/\n*SUGGESTIONS:[\s\S]*$/, '')
             .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
           // the model sometimes hard-wraps mid-sentence; join single newlines
