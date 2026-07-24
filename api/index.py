@@ -616,7 +616,14 @@ def run_assistant(query: str, history: list | None, emit=None) -> dict:
     # Knowledge questions ("what's Delta's baggage allowance") are ANSWERED on
     # that same call, so they keep full effort — brevity there would cost the
     # quality that is the product.
-    first_effort = "low" if looks_like_plain_search(query) else "medium"
+    plain_search = looks_like_plain_search(query)
+    first_effort = "low" if plain_search else "medium"
+    # Streaming the first call's text is a win for questions we answer
+    # directly ("what's Delta's baggage allowance" starts appearing in ~1s),
+    # but on a route search that text is only a lead-in that text_reset then
+    # wipes, so the reader watches a sentence appear and vanish. Suppress it
+    # exactly where it is predictably throwaway.
+    stream_first_text = not plain_search
 
     started = time.monotonic()
     timings: list = []   # [(phase, seconds, detail)] — surfaced for profiling
@@ -644,8 +651,9 @@ def run_assistant(query: str, history: list | None, emit=None) -> dict:
             tools=[SEARCH_TOOL, web_tool],
             messages=messages,
         ) as stream:
+            show_text = stream_first_text or iterations > 1
             for chunk in stream.text_stream:
-                if chunk:
+                if chunk and show_text:
                     streamed_any = True
                     emit("text_delta", chunk)
             response = stream.get_final_message()
