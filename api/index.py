@@ -72,6 +72,36 @@ else:
         pass
 
 
+# Google streams GetShoppingResults as PROGRESSIVE wrb chunks in one HTTP
+# response: the first chunk is an early partial snapshot, later chunks are
+# fuller re-renders of the same search (this is why the real UI "fills in"
+# over a few seconds). fli parses only the FIRST chunk, which can miss whole
+# carriers — ICN->HRB Jan 1 returned 1 of 3 nonstops (Jeju, no Asiana or
+# China Southern; the full 34-row inventory sat in chunks 2-4). Patch it to
+# parse the chunk with the most flight rows.
+import fli.search.flights as _fli_flights
+from fli.search._wire import iter_wrb_chunks as _iter_wrb_chunks
+
+
+def _parse_richest_wrb_payload(body):
+    best, best_rows = None, -1
+    for inner in _iter_wrb_chunks(body):
+        try:
+            rows = sum(
+                len(inner[i][0])
+                for i in (2, 3)
+                if isinstance(inner[i], list) and inner[i] and isinstance(inner[i][0], list)
+            )
+        except (IndexError, TypeError):
+            rows = 0
+        if rows > best_rows:
+            best, best_rows = inner, rows
+    return best
+
+
+_fli_flights.parse_first_wrb_payload = _parse_richest_wrb_payload
+
+
 _google_warmed = False
 
 
@@ -509,7 +539,9 @@ def resolve_airports(codes: list[str]) -> tuple[list, list[str]]:
 def resolve_airlines(codes: list[str] | None) -> list:
     resolved = []
     for code in codes or []:
-        al = getattr(Airline, code.strip().upper(), None)
+        c = code.strip().upper()
+        # digit-leading IATA codes live under a "_" prefix in fli's enum (7C -> _7C)
+        al = getattr(Airline, c, None) or getattr(Airline, "_" + c, None)
         if al:
             resolved.append(al)
     return resolved
@@ -649,10 +681,16 @@ def route_points(result) -> list[dict]:
     return points
 
 
+def airline_code(airline) -> str | None:
+    # fli's Airline enum prefixes digit-leading IATA codes with "_" (7C -> _7C)
+    # because Python identifiers can't start with a digit; strip for display
+    return airline.name.lstrip("_") if airline else None
+
+
 def serialize_leg(leg) -> dict:
     return {
         "airline": leg.airline.value,
-        "airline_code": leg.airline.name,
+        "airline_code": airline_code(leg.airline),
         "flight_number": leg.flight_number,
         "from": leg.departure_airport.name,
         "to": leg.arrival_airport.name,
@@ -691,7 +729,7 @@ def serialize_flight(result, cabin: str | None = None, ret_date: str | None = No
         if lo["duration"] and lo["duration"] < 45 and not lo["overnight"]:
             warnings.append(f"Tight {lo['duration']}-minute connection in {lo['city']}")
 
-    primary_code = result.primary_airline.name if result.primary_airline else (legs[0]["airline_code"] if legs else None)
+    primary_code = airline_code(result.primary_airline) if result.primary_airline else (legs[0]["airline_code"] if legs else None)
     return {
         "airline": result.primary_airline_name or (legs[0]["airline"] if legs else None),
         "airline_code": primary_code,

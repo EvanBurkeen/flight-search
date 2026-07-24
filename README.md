@@ -153,6 +153,16 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
 
 ## Changelog
 
+**July 24, 2026**
+- MAJOR data fix (Evan's catch: app showed 1 of 3 ICN→HRB Jan 1 nonstops while
+  Google's UI showed all): Google streams GetShoppingResults as progressive
+  wrb chunks in one response (first = early partial snapshot — the "fills in
+  after a few seconds" effect); fli parses only the first chunk. Patched in
+  api/index.py to parse the richest chunk (34 vs 1 result on that route;
+  busy single-chunk routes like JFK→ORD unaffected, 113/113 rows parse)
+- Airline codes with digit-leading IATA (Jeju "_7C") lose fli's enum
+  underscore in display, and airline include/exclude filters resolve them
+
 **July 23, 2026 (night)**
 - Sticky compose bar: input pinned to the viewport bottom (paper background,
   top hairline, safe-area padding) so follow-ups don't require scrolling past
