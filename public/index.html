@@ -294,6 +294,7 @@
       font-size: 0.65rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
       padding: 0.15rem 0.5rem; border-radius: 3px;
     }
+    .badge-best { background: var(--green); color: #f3ecd6; }
     .badge-direct { background: var(--good-bg); color: var(--good); }
     .badge-cheap { background: var(--warn-bg); color: var(--warn); }
     .badge-fast { background: var(--info-bg); color: var(--info); }
@@ -532,7 +533,7 @@
 
                 <div class="filter-bar" x-show="sec._expanded && sec.type !== 'dates'">
                   <select class="fselect" :value="(sec._filters || {}).sort || ''" @change="setF(sec, 'sort', $event.target.value)">
-                    <option value="">Sort: best</option>
+                    <option value="">Sort: best value</option>
                     <option value="price">Sort: price</option>
                     <option value="duration">Sort: duration</option>
                     <option value="departure">Sort: departure</option>
@@ -1400,6 +1401,7 @@
 
         badgeClass(h) {
           const t = (h || '').toLowerCase();
+          if (t.includes('best value')) return 'badge-best';
           if (t.includes('direct')) return 'badge-direct';
           if (t.includes('cheap')) return 'badge-cheap';
           if (t.includes('fast') || t.includes('quick')) return 'badge-fast';

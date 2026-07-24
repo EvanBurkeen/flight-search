@@ -163,6 +163,26 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
 
 ## Changelog
 
+**July 24, 2026 (value ranking)**
+- Results are ordered by VALUE, not fare (Evan's catch: on BOS->FLL Sept 2 the
+  first nonstop sat at rank #21, behind nine near-identical connections that
+  cost $25 less and ran 2 to 9 hours longer; the preview shows 8, so it was
+  invisible). Ordering is by an effective cost: fare + $25/hour over the
+  fastest option + $35 first stop / +$45 each additional + penalties reusing
+  the warnings we already generate (self-transfer $55, airport change $60,
+  tight connection $40, overnight $35). Constants live at the top of
+  `api/index.py` and are a product judgement, tune them there.
+- Guardrails: an explicit "cheapest"/"fastest" request still wins outright,
+  and the cheapest fare is always pinned into the preview (top 4) so a
+  price-first traveler never has to expand the list to find it. The
+  "Best value" badge only appears when we actually ranked by value.
+- This also fixed the ASSISTANT, not just the cards: `compact_for_model` sends
+  Claude the top 6, which were previously the 6 cheapest connections, so it
+  never saw a nonstop. Prompt now tells it to lead with best value and to
+  price the difference in plain terms when the cheapest is not its pick.
+- Frontend: "Sort: best" (which sorted nothing) is now honestly "Sort: best
+  value"; new filled-green Best value badge. Round trips ranked the same way.
+
 **July 24, 2026 (late, streaming reverted)**
 - Reverted the frontend to the non-streaming `/api/search` path (Evan: "not
   fully working right now"). Streaming, progressive card reveal, and

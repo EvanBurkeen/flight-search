@@ -486,6 +486,7 @@ How to handle requests:
 Answering:
 - Voice: you are a seasoned travel concierge. Courteous, composed, precise, warm but never gushing. Write in full sentences, the way a fine hotel's head concierge would speak. NEVER use em dashes or en dashes anywhere in your replies; use commas, periods, or a colon instead.
 - The user sees result cards for every search you run, so don't recite every flight. Lead with your recommendation and the key numbers (totals for multi-leg plans, including a note that hotels/ground costs aren't included), then the trade-offs that matter.
+- Results arrive ranked by value, not by fare: the fare plus what its duration and stops actually cost the traveler. Recommend the best-value option rather than reflexively the cheapest, and when the cheapest fare is not your pick, price the difference in plain terms ("$25 more saves you eight hours and a connection"). Flying is tiring; a long layover to save a few dollars is rarely the favour it looks like. If they ask for the cheapest, give them the cheapest without argument.
 - Mention real caveats from the data: nothing arrives before X, prices are one-way vs round-trip totals, self-transfer risks, tight or overnight layovers.
 - If a search fails or is rate-limited, say so plainly and suggest trying again in a moment.
 - Keep responses short and conversational — a few sentences, not a report.
@@ -531,9 +532,13 @@ def compact_for_model(payload: dict) -> str:
     out = {"kind": "flights", "note": payload.get("message"), "options": rows}
     if len(results) > 6:
         out["sample_note"] = (
-            f"Showing 6 of {len(results)} results by the requested sort. Routings absent from "
-            "this sample may still exist — never claim a hub/airline/routing is unavailable "
-            "unless a via_airports-filtered search says so."
+            f"Showing 6 of {len(results)}, ordered by best value (fare plus the cost of the "
+            "time and stops it asks of the traveler), so option 1 is the one to lead with "
+            "unless they asked for something specific. The cheapest fare is always included "
+            "in this sample: if it is not option 1, say what its lower price costs in hours "
+            "or stops so they can judge. Routings absent from this sample may still exist — "
+            "never claim a hub/airline/routing is unavailable unless a via_airports-filtered "
+            "search says so."
         )
     return json.dumps(out)
 
@@ -992,6 +997,78 @@ def serialize_flight(result, cabin: str | None = None, ret_date: str | None = No
     }
 
 
+# --------------------------------------------------------------------------
+# What a trip actually costs you
+#
+# Ranking by fare alone buries the flight a reasonable person would pick. On
+# BOS->FLL Sept 2 the first nonstop sat at rank #21, behind nine near-identical
+# connections that cost $25 less and took 2 to 9 hours longer — and because the
+# model only sees the top 6, Claude never saw a nonstop either.
+#
+# So the default order is by EFFECTIVE cost: the fare plus a plain dollar value
+# on the time and hassle the itinerary asks of you. The weights are deliberately
+# conservative and legible; they are a product judgement, not a tuned model.
+# Anyone who wants pure price can still say "cheapest" or use the sort control,
+# and the outright cheapest fare is always kept visible in the preview.
+# --------------------------------------------------------------------------
+HOUR_VALUE = 25.0          # one hour of a leisure traveler's day, in USD
+FIRST_STOP_COST = 35.0     # deplaning, re-boarding, misconnect risk
+EXTRA_STOP_COST = 45.0     # each stop beyond the first hurts more than the last
+WARNING_COST = {           # keyed against the warnings we already generate
+    "self-transfer": 55.0,     # you carry the risk if the first leg slips
+    "airport change": 60.0,    # a ground transfer mid-trip
+    "tight": 40.0,             # sub-45-minute connection
+    "overnight": 35.0,         # a night spent in transit
+}
+PREVIEW_GUARANTEE = 4      # the cheapest fare never falls below this position
+# an explicitly requested axis wins over our ranking, and when it does we must
+# not claim the top row is "best value" — we did not rank by value at all
+EXPLICIT_SORTS = ("cheapest", "fastest", "departure_time")
+
+
+def trip_cost(price, duration_min, stops, warnings, fastest_min) -> float:
+    """Fare plus the value of the time and hassle this itinerary costs you."""
+    if price is None:
+        return float("inf")
+    cost = float(price)
+    if duration_min and fastest_min:
+        cost += max(0.0, (duration_min - fastest_min) / 60.0) * HOUR_VALUE
+    if stops:
+        cost += FIRST_STOP_COST + EXTRA_STOP_COST * max(0, int(stops) - 1)
+    for w in warnings or []:
+        low = str(w).lower()
+        for key, penalty in WARNING_COST.items():
+            if key in low:
+                cost += penalty
+                break
+    return cost
+
+
+def order_by_value(rows: list, price_of, duration_of, stops_of, warnings_of,
+                   requested_sort: str | None) -> list:
+    """Best value first, with the outright cheapest fare kept in the preview.
+
+    An explicitly requested axis ("cheapest", "fastest") always wins: if the
+    traveler asked for the cheapest, that is what leads.
+    """
+    if requested_sort in EXPLICIT_SORTS:
+        return rows
+    durations = [d for d in (duration_of(r) for r in rows) if d]
+    fastest = min(durations) if durations else None
+    scored = sorted(rows, key=lambda r: trip_cost(
+        price_of(r), duration_of(r), stops_of(r), warnings_of(r), fastest))
+
+    # A price-first traveler must still see the cheapest fare without expanding
+    # the list, even when its time cost sinks it in the value ranking.
+    priced = [r for r in scored if price_of(r) is not None]
+    if priced:
+        cheapest = min(priced, key=price_of)
+        idx = next(i for i, r in enumerate(scored) if r is cheapest)
+        if idx >= PREVIEW_GUARANTEE:
+            scored.insert(PREVIEW_GUARANTEE - 1, scored.pop(idx))
+    return scored
+
+
 def add_highlights(flights: list[dict]) -> None:
     if not flights:
         return
@@ -1109,7 +1186,17 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
                     "booking_url": out_f["booking_url"],
                 }
             )
+        # round trips get the same treatment: a cheap fare that costs you a
+        # whole extra day across two legs is not the better trip
         itineraries.sort(key=lambda i: i["total_price"] or 1e9)
+        itineraries = order_by_value(
+            itineraries,
+            price_of=lambda it: it.get("total_price"),
+            duration_of=lambda it: (it["outbound"].get("duration") or 0) + (it["return"].get("duration") or 0),
+            stops_of=lambda it: max(it["outbound"].get("stops") or 0, it["return"].get("stops") or 0),
+            warnings_of=lambda it: (it["outbound"].get("warnings") or []) + (it["return"].get("warnings") or []),
+            requested_sort=spec.get("sort"),
+        )
         for i, itin in enumerate(itineraries):
             itin["score"] = round(95 - (i / max(len(itineraries) - 1, 1)) * 55)
             for leg_key in ("outbound", "return"):
@@ -1135,6 +1222,17 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
     # user expand/filter/sort the rest instantly, no re-search needed
     flights = [serialize_flight(r, spec.get("cabin")) for r in results[:50]]
     add_highlights(flights)
+    flights = order_by_value(
+        flights,
+        price_of=lambda f: f.get("price"),
+        duration_of=lambda f: f.get("duration"),
+        stops_of=lambda f: f.get("stops") or 0,
+        warnings_of=lambda f: f.get("warnings"),
+        requested_sort=spec.get("sort"),
+    )
+    if (spec.get("sort") not in EXPLICIT_SORTS
+            and len(flights) > 1 and flights[0].get("price") is not None):
+        flights[0].setdefault("highlights", []).insert(0, "Best value")
     message = f"Found {len(flights)} flights."
     if arrival_note:
         message = f"{arrival_note}\n{message}"

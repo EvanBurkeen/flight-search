@@ -35,7 +35,7 @@ if not os.environ.get("ANTHROPIC_API_KEY"):
         spec = {
             "origins": [codes[0]], "destinations": [codes[1]],
             "trip_type": "round_trip" if "round" in q else "one_way",
-            "departure_date": d1, "return_date": d2, "sort": "cheapest",
+            "departure_date": d1, "return_date": d2,
             "assumptions": ["STUB PARSER (no API key): dates set ~30 days out"],
             "summary": f"{codes[0]} to {codes[1]}" + (" round trip" if "round" in q else " one way"),
         }
@@ -47,7 +47,7 @@ if not os.environ.get("ANTHROPIC_API_KEY"):
             spec["departure_date"] = None
         if "multi" in q and len(codes) >= 3:
             return [{
-                "trip_type": "multi_city", "sort": "cheapest",
+                "trip_type": "multi_city",
                 "summary": "STUB multi-city: " + " -> ".join(codes[:4]),
                 "assumptions": ["STUB PARSER"],
                 "multi_city_segments": [
