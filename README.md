@@ -163,6 +163,24 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
 
 ## Changelog
 
+**July 24, 2026 (book the flight you clicked)**
+- One-way "Book" links now deep-link to the exact itinerary instead of a
+  search page the user has to scan (Evan: clicked a JetBlue fare and "had to
+  go search for it"). Google's booking URLs carry `tfs`, a base64url protobuf
+  naming the itinerary down to airline and flight number; `itinerary_url()`
+  builds it. Schema was recovered from a real Google-issued link and is
+  verified by a test that reproduces that link BYTE FOR BYTE, so a future
+  schema drift shows up immediately.
+- Confirmed in a browser: nonstop and multi-leg (BOS-JFK-FLL) links both open
+  Google straight on that flight with its booking options. The `tfu` token in
+  Google's own URLs is session-scoped and is NOT required.
+- NOT done: round trips. A two-segment tfs with both directions selected is
+  rejected (Google falls back to its home page), so round trips keep the old
+  search-query URL. To finish it, capture a real Google round-trip booking URL
+  and decode its tfs the same way — the return-segment layout is the only
+  unknown. Anything unexpected in the data makes `itinerary_url` return None
+  and the caller falls back, so this can never produce a dead link.
+
 **July 24, 2026 (representative results)**
 - Nonstops could be missing entirely (Evan: "why didn't the nonstops show up?").
   Separate bug from the value ranking: we sliced `results[:50]` BEFORE scoring,

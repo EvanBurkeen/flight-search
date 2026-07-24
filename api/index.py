@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import random
@@ -892,6 +893,84 @@ def multi_city_url(parts: list, cabin: str | None = None) -> str:
     return f"https://www.google.com/travel/flights?q={quote(q)}"
 
 
+# --------------------------------------------------------------------------
+# Deep links to the exact itinerary
+#
+# "Book" used to hand Google a text query ("flights from FLL to JFK on ..."),
+# which lands on a results page where the user has to hunt for the flight they
+# just clicked. Google's own booking URLs carry a `tfs` parameter: a base64url
+# protobuf naming the precise itinerary, right down to airline and flight
+# number. We build that ourselves, so Book opens on the chosen flight with its
+# booking options already showing.
+#
+# Schema recovered from a real Google-issued link and verified by reproducing
+# that link byte for byte (see _tfs_segment for the per-segment layout):
+#   1: 28 (constant)   2: trip type (1 round, 2 one-way, 3 multi-city)
+#   3: segment (repeated)   8: seat class   9: adults
+#   14: 1 (constant)   16: {1: -1} (no max price)   19: 2 (constant)
+# The `tfu` token in Google's own links is session-scoped; it is not required.
+# --------------------------------------------------------------------------
+def _pb_varint(n: int) -> bytes:
+    if n < 0:
+        n += 1 << 64
+    out = b""
+    while True:
+        chunk = n & 0x7F
+        n >>= 7
+        out += bytes([chunk | (0x80 if n else 0)])
+        if not n:
+            return out
+
+
+def _pb_int(field: int, value: int) -> bytes:
+    return _pb_varint(field << 3) + _pb_varint(value)
+
+
+def _pb_str(field: int, value: str) -> bytes:
+    raw = str(value).encode()
+    return _pb_varint((field << 3) | 2) + _pb_varint(len(raw)) + raw
+
+
+def _pb_msg(field: int, body: bytes) -> bytes:
+    return _pb_varint((field << 3) | 2) + _pb_varint(len(body)) + body
+
+
+def _tfs_segment(legs: list) -> bytes:
+    """One flown segment: its date, every leg it is made of, and its endpoints."""
+    first, last = legs[0], legs[-1]
+    body = _pb_str(2, first.departure_datetime.strftime("%Y-%m-%d"))
+    for lg in legs:
+        body += _pb_msg(4, (
+            _pb_str(1, lg.departure_airport.name)
+            + _pb_str(2, lg.departure_datetime.strftime("%Y-%m-%d"))
+            + _pb_str(3, lg.arrival_airport.name)
+            + _pb_str(5, airline_code(lg.airline) or "")
+            + _pb_str(6, str(lg.flight_number))
+        ))
+    body += _pb_msg(13, _pb_int(1, 1) + _pb_str(2, first.departure_airport.name))
+    body += _pb_msg(14, _pb_int(1, 1) + _pb_str(2, last.arrival_airport.name))
+    return body
+
+
+def itinerary_url(segments: list, cabin: str | None = None, trip_type: int = 2,
+                  adults: int = 1) -> str | None:
+    """Deep link straight to these exact flights, or None if we can't build one."""
+    try:
+        seat = CABIN_MAP.get(cabin or "economy", SeatType.ECONOMY).value
+        body = _pb_int(1, 28) + _pb_int(2, trip_type)
+        for legs in segments:
+            if not legs or not legs[0].departure_datetime:
+                return None
+            body += _pb_msg(3, _tfs_segment(legs))
+        body += _pb_int(8, seat) + _pb_int(9, max(1, adults)) + _pb_int(14, 1)
+        body += _pb_msg(16, _pb_int(1, -1))
+        body += _pb_int(19, 2)
+        tfs = base64.urlsafe_b64encode(body).decode().rstrip("=")
+        return f"https://www.google.com/travel/flights?tfs={tfs}"
+    except Exception:
+        return None  # any surprise in the data falls back to the search URL
+
+
 def result_booking_url(result, cabin: str | None = None, ret_date: str | None = None) -> str:
     # built from the itinerary's OWN legs — multi-airport searches mean each
     # result can have a different origin/destination than the search defaults
@@ -901,6 +980,11 @@ def result_booking_url(result, cabin: str | None = None, ret_date: str | None = 
     dep = legs[0].departure_airport.name
     arr = legs[-1].arrival_airport.name
     dep_date = legs[0].departure_datetime.strftime("%Y-%m-%d") if legs[0].departure_datetime else None
+    # one-way deep link; round trips are linked as a pair by the caller
+    if not ret_date:
+        deep = itinerary_url([legs], cabin)
+        if deep:
+            return deep
     return google_flights_url(dep, arr, dep_date, ret_date, cabin)
 
 
@@ -1229,6 +1313,10 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
                         if ret.legs and ret.legs[0].departure_datetime else spec.get("return_date"),
                     )),
                     "return": serialize_flight(ret, spec.get("cabin")),
+                    # NOT deep-linked: a two-segment tfs with both directions
+                    # selected is rejected by Google (it falls back to the
+                    # Flights home page), and the return-segment schema has not
+                    # been recovered. Round trips keep the search-query URL.
                     "booking_url": out_f["booking_url"],
                 }
             )
