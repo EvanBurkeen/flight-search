@@ -153,6 +153,32 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
 
 ## Changelog
 
+**July 24, 2026 (night, latency)**
+- Profiled the turn first (opt-in `debug_timings` on /api/search). Baseline
+  was strictly sequential: simple search 12.8s = claude_1 2.9 + search 6.0 +
+  claude_2 4.0; comparison 15.2s; knowledge question 9.5s (all generation).
+- Search 6.0s -> 0.4-2.3s: `checkout_identity` prefers the most recently
+  SUCCESSFUL identity so its TLS connection through the residential proxy is
+  reused (random choice was paying a fresh handshake nearly every search).
+- Search cache (4 min) with single-flight dedupe: repeats inside a
+  conversation are instant and identical concurrent searches collapse to one
+  upstream request. Key ignores only cosmetic fields, so cabin/dates/stops
+  can never serve the wrong result set.
+- **Streaming** (`/api/search/stream`, SSE): result cards emit the moment a
+  search batch finishes, prose streams while Claude writes it, `text_reset`
+  discards a preamble that turned out to precede a search. /api/search kept
+  for back-compat.
+- First Claude call runs at low effort ONLY when the query is plainly a route
+  search (it just emits a tool call); knowledge questions, answered on that
+  same call, keep full effort. Quality was not traded for speed.
+- Capped breaker waits: an uncapped cooldown put cards on screen at 32s in
+  one measured sample. First attempt now pauses <=1.5s, retries absorb <=8s.
+- Measured after (4 samples/query, medians): time to first useful content
+  12.8s -> 4.6s (search), 15.2s -> 5.5s (comparison), 9.5s -> 1.2s
+  (knowledge). Full completion 12.8 -> ~8s and 15.2 -> ~11.9s. Remaining
+  critical path is ~90% Claude generation; untaken levers are a faster model
+  for the tool-selection call and speculative search (see Roadmap).
+
 **July 24, 2026 (evening)**
 - Full anti-refusal stack. Identity pool: 3 identities, each with its own
   cookie jar + residential exit IP + browser fingerprint (chrome/edge/
