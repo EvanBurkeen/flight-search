@@ -215,13 +215,18 @@ _breaker = {"consecutive": 0, "open_until": 0.0}
 _breaker_lock = threading.Lock()
 
 
-def breaker_wait() -> None:
-    """Block briefly if the process is mid-wave. Bounded so a search never
-    stalls past its own deadline."""
+def breaker_wait(cap: float) -> None:
+    """Pause if the process is mid-wave, but never longer than `cap`.
+
+    The breaker exists to stop US from hammering Google, not to punish the
+    person waiting: a user's FIRST attempt gets at most a token pause, while
+    retries (which are the actual hammering) absorb the real cooldown.
+    Measured the hard way — an uncapped wait put results on screen at 32s.
+    """
     with _breaker_lock:
         remaining = _breaker["open_until"] - time.monotonic()
     if remaining > 0:
-        time.sleep(min(remaining, BREAKER_COOLDOWN))
+        time.sleep(min(remaining, cap))
 
 
 def note_search_outcome(ok: bool) -> None:
@@ -1008,7 +1013,7 @@ def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy
     # and let the breaker impose quiet if the whole process is mid-wave.
     last_exc = None
     for i, attempt_sort in enumerate((sort, sort, SortBy.CHEAPEST, SortBy.CHEAPEST)):
-        breaker_wait()
+        breaker_wait(1.5 if i == 0 else 8.0)
         checkout_identity()
         attempt = filters.model_copy(update={"sort_by": attempt_sort})
         try:
@@ -1217,7 +1222,7 @@ def search_flexible_dates(spec: dict, origins: list, destinations: list, currenc
     date_prices = None
     last_exc = None
     for i in range(3):
-        breaker_wait()
+        breaker_wait(1.5 if i == 0 else 8.0)
         checkout_identity()
         try:
             date_prices = searcher.search(filters, currency="USD")
