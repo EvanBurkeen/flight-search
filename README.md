@@ -163,6 +163,25 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
 
 ## Changelog
 
+**July 24, 2026 (representative results)**
+- Nonstops could be missing entirely (Evan: "why didn't the nonstops show up?").
+  Separate bug from the value ranking: we sliced `results[:50]` BEFORE scoring,
+  and Google hands results back cheapest-first. Measured BOS->FLL Nov 22:
+  Google returned 98 options with 12 nonstops, but 11 priced above the
+  50th-cheapest fare ($227 vs $414/$514), so exactly one survived the cut. The
+  "Nonstop only" filter then reported "1 of 50" and Claude told the user
+  everything else needed a connection - both truthful about the shipped subset,
+  both wrong about reality.
+- Now: score the full pool (RANK_POOL=120) and cut afterwards, and cut with
+  `retain_representative` - value order decides ORDER, but the shipped set
+  always keeps up to NONSTOP_QUOTA=8 nonstops plus the outright cheapest and
+  fastest, because the client-side filters run over whatever we ship and must
+  not lie about the option space. Rescued rows are re-sorted back into value
+  order (filling slots from the back had reversed them).
+- Section message now states true totals ("Found 98 options (showing 50). 12 of
+  them are nonstop, cheapest nonstop $99.") so Claude stops inferring absence
+  from a truncated sample. Round trips get the same pool-then-cut treatment.
+
 **July 24, 2026 (value ranking)**
 - Results are ordered by VALUE, not fare (Evan's catch: on BOS->FLL Sept 2 the
   first nonstop sat at rank #21, behind nine near-identical connections that

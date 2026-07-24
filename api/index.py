@@ -1024,6 +1024,10 @@ PREVIEW_GUARANTEE = 4      # the cheapest fare never falls below this position
 # an explicitly requested axis wins over our ranking, and when it does we must
 # not claim the top row is "best value" — we did not rank by value at all
 EXPLICIT_SORTS = ("cheapest", "fastest", "departure_time")
+RANK_POOL = 120            # how many raw results we score before cutting
+SHIP_LIMIT = 50            # how many we send to the browser after ranking
+COMBO_POOL = 30            # same idea for round-trip combinations
+NONSTOP_QUOTA = 8          # nonstops guaranteed a place in what we ship
 
 
 def trip_cost(price, duration_min, stops, warnings, fastest_min) -> float:
@@ -1067,6 +1071,48 @@ def order_by_value(rows: list, price_of, duration_of, stops_of, warnings_of,
         if idx >= PREVIEW_GUARANTEE:
             scored.insert(PREVIEW_GUARANTEE - 1, scored.pop(idx))
     return scored
+
+
+def retain_representative(rows: list, limit: int, price_of, duration_of, stops_of) -> list:
+    """Cut to `limit` while keeping the list an honest sample of the options.
+
+    The frontend's filters (nonstop only, cheapest, fastest) run over whatever
+    we ship, so the shipped set has to represent the whole option space or the
+    filters quietly lie. Measured BOS->FLL Nov 22: 12 nonstops existed but 11
+    priced above the 50th-cheapest fare, so "Nonstop only" reported "1 of 50"
+    and Claude told the user everything else required a connection.
+
+    Value order still decides the ORDER; this only protects what survives.
+    """
+    if len(rows) <= limit:
+        return rows
+    keep = rows[:limit]
+    present = lambda x: any(r is x for r in keep)
+    slot = limit - 1
+
+    def force(pick):
+        nonlocal slot
+        if pick is None or slot < 0 or present(pick):
+            return
+        keep[slot] = pick
+        slot -= 1
+
+    # nonstops first: it is the most-asked-for filter in flight search, and a
+    # pricier nonstop is a legitimate answer to "just get me there"
+    kept_nonstops = sum(1 for r in keep if stops_of(r) == 0)
+    for r in rows:                       # rows are already value-ordered
+        if kept_nonstops >= NONSTOP_QUOTA:
+            break
+        if stops_of(r) == 0 and not present(r):
+            force(r)
+            kept_nonstops += 1
+    force(min((r for r in rows if price_of(r) is not None), key=price_of, default=None))
+    force(min((r for r in rows if duration_of(r)), key=duration_of, default=None))
+    # forcing fills slots from the back, which would leave the rescued rows in
+    # reverse value order; restore the ranking we computed
+    rank = {id(r): i for i, r in enumerate(rows)}
+    keep.sort(key=lambda r: rank.get(id(r), len(rows)))
+    return keep
 
 
 def add_highlights(flights: list[dict]) -> None:
@@ -1170,7 +1216,7 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
             results = sorted(results, key=lambda c: c[0].legs[-1].arrival_datetime or datetime.max)
 
         itineraries = []
-        for combo in results[:10]:
+        for combo in results[:COMBO_POOL]:   # build a pool, rank it, then cut
             out, ret = combo[0], combo[-1]
             total = max(p for p in [out.price, ret.price, 0] if p is not None)
             itineraries.append(
@@ -1197,6 +1243,12 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
             warnings_of=lambda it: (it["outbound"].get("warnings") or []) + (it["return"].get("warnings") or []),
             requested_sort=spec.get("sort"),
         )
+        itineraries = retain_representative(
+            itineraries, 10,
+            price_of=lambda it: it.get("total_price"),
+            duration_of=lambda it: (it["outbound"].get("duration") or 0) + (it["return"].get("duration") or 0),
+            stops_of=lambda it: max(it["outbound"].get("stops") or 0, it["return"].get("stops") or 0),
+        )
         for i, itin in enumerate(itineraries):
             itin["score"] = round(95 - (i / max(len(itineraries) - 1, 1)) * 55)
             for leg_key in ("outbound", "return"):
@@ -1218,9 +1270,12 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
         arrival_note = "Nothing meets the arrival-day/time constraint exactly — showing the closest arrivals instead."
         results = sorted(results, key=lambda r: r.legs[-1].arrival_datetime or datetime.max)
 
-    # ship the full reasonable list — the frontend previews a few and lets the
-    # user expand/filter/sort the rest instantly, no re-search needed
-    flights = [serialize_flight(r, spec.get("cabin")) for r in results[:50]]
+    # RANK BEFORE TRUNCATING. Google hands results back cheapest-first, so
+    # slicing to 50 up front silently discards every option that costs more
+    # than the 50th-cheapest fare — on BOS->FLL Nov 22 that meant 12 nonstops
+    # existed but 11 sat at price ranks 83-98, so the list we shipped (and the
+    # summary Claude saw) contained exactly one. Score the whole set, then cut.
+    flights = [serialize_flight(r, spec.get("cabin")) for r in results[:RANK_POOL]]
     add_highlights(flights)
     flights = order_by_value(
         flights,
@@ -1233,7 +1288,24 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
     if (spec.get("sort") not in EXPLICIT_SORTS
             and len(flights) > 1 and flights[0].get("price") is not None):
         flights[0].setdefault("highlights", []).insert(0, "Best value")
-    message = f"Found {len(flights)} flights."
+    total_found, total_nonstop = len(flights), sum(1 for f in flights if f["stops"] == 0)
+    cheapest_nonstop = min((f["price"] for f in flights
+                            if f["stops"] == 0 and f.get("price") is not None), default=None)
+    flights = retain_representative(
+        flights, SHIP_LIMIT,
+        price_of=lambda f: f.get("price"),
+        duration_of=lambda f: f.get("duration"),
+        stops_of=lambda f: f.get("stops") or 0,
+    )
+    # state the true totals: the shipped list is a sample, and without this
+    # Claude reads "everything else needs a connection" off a truncated set
+    message = f"Found {total_found} options"
+    message += f" (showing {len(flights)})." if total_found > len(flights) else "."
+    if total_nonstop:
+        message += (f" {total_nonstop} of them are nonstop"
+                    + (f", cheapest nonstop ${cheapest_nonstop:.0f}." if cheapest_nonstop else "."))
+    else:
+        message += " None are nonstop."
     if arrival_note:
         message = f"{arrival_note}\n{message}"
     return {
