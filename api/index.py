@@ -95,6 +95,7 @@ def _new_identity(idx: int) -> dict:
         "session": None,   # built lazily on first use
         "strikes": 0,
         "born": time.monotonic(),
+        "last_ok": 0.0,    # last successful use; drives warm-connection reuse
     }
 
 
@@ -111,12 +112,24 @@ def _identity_session(ident: dict):
 
 
 def checkout_identity() -> dict:
-    """Bind a healthy identity to this thread for the duration of a search."""
+    """Bind a healthy identity to this thread for the duration of a search.
+
+    Prefers the most recently SUCCESSFUL identity: its curl session still
+    holds an open TLS connection to Google through the residential proxy,
+    and re-establishing that costs seconds (measured: searches on a cold
+    identity ran 3.5-6s in production vs 0.3-1.4s direct). Diversity still
+    comes from retirement — a refused identity is destroyed and the next
+    checkout necessarily picks a different one.
+    """
     with _pool_lock:
         while len(_identities) < POOL_SIZE:
             _identities.append(_new_identity(len(_identities)))
         healthy = [i for i in _identities if i["strikes"] < IDENTITY_MAX_STRIKES]
-        ident = random.choice(healthy) if healthy else _retire_all_locked()
+        if not healthy:
+            ident = _retire_all_locked()
+        else:
+            # warm (has a live session) and most recently used wins
+            ident = max(healthy, key=lambda i: (i["session"] is not None, i["last_ok"]))
     _local.identity = ident
     return ident
 
@@ -194,6 +207,8 @@ _fli_client.Client.get = _get_as_identity
 # Sustained volume during a refusal wave is what escalates a cheap session
 # flag into an expensive IP burn, so consecutive refusals buy a pause rather
 # than a faster retry.
+_attempt_stats: dict = {"ok_on_attempt": []}  # profiling: which try succeeded
+
 BREAKER_TRIP_AT = 3          # consecutive refusals across the process
 BREAKER_COOLDOWN = 25.0      # seconds of quiet once tripped
 _breaker = {"consecutive": 0, "open_until": 0.0}
@@ -210,6 +225,10 @@ def breaker_wait() -> None:
 
 
 def note_search_outcome(ok: bool) -> None:
+    if ok:
+        ident = getattr(_local, "identity", None)
+        if ident is not None:
+            ident["last_ok"] = time.monotonic()  # keep this warm connection first in line
     with _breaker_lock:
         if ok:
             _breaker["consecutive"] = 0
@@ -542,6 +561,28 @@ def split_suggestions(text: str) -> tuple[str, list[str]]:
     return text[: m.start()].rstrip(), suggestions
 
 
+_QUESTION_OPENERS = (
+    "what", "why", "how", "is ", "are ", "can ", "do ", "does ", "should ",
+    "which airline", "tell me about", "explain",
+)
+_ROUTE_HINT = re.compile(r"\b([A-Z]{3})\b.*\b([A-Z]{3})\b|\b\w+\s+to\s+\w+", re.I)
+
+
+def looks_like_plain_search(query: str) -> bool:
+    """Conservative: only true for 'fly me from A to B' style requests.
+
+    False negatives just mean we keep full effort (today's behaviour), so the
+    failure mode of this heuristic is 'no speedup', never 'worse answer'.
+    """
+    q = (query or "").strip()
+    if len(q) > 140:
+        return False
+    low = q.lower()
+    if any(low.startswith(op) for op in _QUESTION_OPENERS):
+        return False
+    return bool(_ROUTE_HINT.search(q))
+
+
 def run_assistant(query: str, history: list | None) -> dict:
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"], max_retries=4)
     messages = [
@@ -555,6 +596,13 @@ def run_assistant(query: str, history: list | None) -> dict:
     searches_used = 0
     web_tool = {"type": "web_search_20260209", "name": "web_search", "max_uses": 3}
 
+    # Routing the first call: when the query is plainly "search this route",
+    # that call only has to emit a tool_use, which needs no deep reasoning.
+    # Knowledge questions ("what's Delta's baggage allowance") are ANSWERED on
+    # that same call, so they keep full effort — brevity there would cost the
+    # quality that is the product.
+    first_effort = "low" if looks_like_plain_search(query) else "medium"
+
     started = time.monotonic()
     timings: list = []   # [(phase, seconds, detail)] — surfaced for profiling
     rounds = 0
@@ -567,7 +615,9 @@ def run_assistant(query: str, history: list | None) -> dict:
         response = client.messages.create(
             model="claude-opus-4-8",
             max_tokens=4000,
-            output_config={"effort": "medium"},
+            # synthesis (any call after results are in) always runs at full
+            # effort: that is where the recommendation is actually written
+            output_config={"effort": first_effort if iterations == 1 else "medium"},
             # cache breakpoint on system caches tools+system for every call in
             # the loop and across turns (prompt renders tools -> system -> messages)
             system=[{
@@ -627,7 +677,7 @@ def run_assistant(query: str, history: list | None) -> dict:
             # while still overlapping the slow part of each search
             if delay:
                 time.sleep(delay)
-            return execute_spec(spec)
+            return cached_execute_spec(spec)
 
         _tsearch = time.monotonic()
         futures = {
@@ -948,6 +998,7 @@ def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy
             continue
         if results:
             note_search_outcome(True)
+            _attempt_stats["ok_on_attempt"].append(i + 1)
             return results
         retire_identity()
         note_search_outcome(False)
@@ -1226,6 +1277,72 @@ def roll_past_dates(spec: dict) -> tuple[dict, list[str]]:
     return spec, notes
 
 
+# --------------------------------------------------------------------------
+# Short-lived search cache with single-flight dedupe.
+#
+# Two wins, both free of extra Google load: a repeated search inside the same
+# conversation (stop/supersede, "show me that again", overlapping comparison
+# prongs) returns instantly, and two identical searches issued concurrently
+# collapse into ONE upstream request instead of racing. TTL is deliberately
+# short so a quoted fare is never stale enough to mislead.
+# --------------------------------------------------------------------------
+SEARCH_CACHE_TTL = 240.0
+_search_cache: dict = {}
+_inflight: dict = {}
+_cache_lock = threading.Lock()
+
+# Cosmetic fields don't change what Google is asked, so they must not split
+# the cache key. Everything else does affect the result set.
+_KEY_IGNORE = {"summary", "assumptions"}
+
+
+def _spec_key(spec: dict) -> str:
+    return json.dumps(
+        {k: v for k, v in sorted(spec.items()) if k not in _KEY_IGNORE},
+        sort_keys=True, default=str,
+    )
+
+
+def cached_execute_spec(spec: dict) -> dict:
+    import copy
+
+    key = _spec_key(spec)
+    with _cache_lock:
+        hit = _search_cache.get(key)
+        if hit and hit[0] > time.monotonic():
+            return copy.deepcopy(hit[1])
+        waiter = _inflight.get(key)
+        if waiter is None:
+            waiter = threading.Event()
+            _inflight[key] = waiter
+            owner = True
+        else:
+            owner = False
+
+    if not owner:
+        # someone else is already asking Google this exact question
+        waiter.wait(timeout=45)
+        with _cache_lock:
+            hit = _search_cache.get(key)
+        if hit:
+            return copy.deepcopy(hit[1])
+        # the owner failed; fall through and try it ourselves
+
+    try:
+        payload = execute_spec(spec)
+        if payload.get("results") or payload.get("dates"):
+            with _cache_lock:
+                _search_cache[key] = (time.monotonic() + SEARCH_CACHE_TTL, payload)
+                if len(_search_cache) > 64:  # bound memory in a long-lived process
+                    for k in sorted(_search_cache, key=lambda k: _search_cache[k][0])[:16]:
+                        _search_cache.pop(k, None)
+        return copy.deepcopy(payload)
+    finally:
+        with _cache_lock:
+            _inflight.pop(key, None)
+        waiter.set()
+
+
 def execute_spec(spec: dict) -> dict:
     spec, date_notes = roll_past_dates(spec)
     currency_mc = (spec.get("currency") or "USD").upper()
@@ -1291,6 +1408,8 @@ async def search(request: Request):
                 "cold_process": cold,
                 "since_process_start": round(time.monotonic() - _PROCESS_START, 2),
                 "phases": result.get("timings") or [],
+                "search_ok_on_attempt": _attempt_stats["ok_on_attempt"][-6:],
+                "cached_specs": len(_search_cache),
             }
         return JSONResponse(payload)
 
