@@ -1183,8 +1183,12 @@
 
             const ensureMsg = () => {
               if (!streamMsg) {
-                streamMsg = { role: 'assistant', content: '', sections: [], suggestions: [] };
-                this.messages.push(streamMsg);
+                this.messages.push({ role: 'assistant', content: '', sections: [], suggestions: [] });
+                // read the pushed item BACK out of the array: that returns
+                // Alpine's reactive proxy. Mutating the raw object we pushed
+                // updates no bindings, so the UI would freeze on the first
+                // delta and never show the rest of the reply.
+                streamMsg = this.messages[this.messages.length - 1];
               }
               return streamMsg;
             };
