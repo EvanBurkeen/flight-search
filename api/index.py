@@ -34,67 +34,188 @@ from fli.models.google_flights.base import PriceLimit
 from fli.search import SearchDates, SearchFlights
 from fli.search.exceptions import SearchClientError, SearchHTTPError
 
-# Optional egress proxy for Google traffic (set FLI_PROXY in Vercel env to a
-# proxy URL). Datacenter IPs get throttled by Google in waves; a residential
-# proxy is the durable fix. No proxy -> unchanged behavior.
-if os.environ.get("FLI_PROXY"):
-    import secrets
+# --------------------------------------------------------------------------
+# Passing Google's doorman: identity pool + circuit breaker
+#
+# Measured July 24 2026 (100 interleaved requests, autopsy probes on every
+# failure). Google refuses with HTTP 200 + a ~94-byte body (gRPC code 13),
+# and refusals stack on two independent gates:
+#
+#   1. SESSION gate — binary. Once a cookie jar is flagged it fails 64/64
+#      consecutive requests, while brand-new sessions fired in the same
+#      seconds passed 20/32. Retrying on the same jar can never escape.
+#   2. IP gate — probabilistic, and it ESCALATES with sustained volume from
+#      one address: fresh sessions passed early in the run and were refused
+#      later, purely because the address had accumulated suspicion.
+#
+# Gate 2 is why hammering backfires, and why the response is to back off
+# (circuit breaker) rather than retry harder. Each identity below pairs its
+# own cookie jar + residential exit + browser fingerprint, so a retry is a
+# genuinely different visitor rather than the same one in a new coat.
+# Warmup page-loads showed no benefit in the study, so identities are not
+# pre-warmed (a warmup is ~1.8 MB of proxy bandwidth each).
+# --------------------------------------------------------------------------
+import secrets
+import threading
 
-    from fli.search import client as _fli_client
+from fli.search import client as _fli_client
 
-    _proxy_base = os.environ["FLI_PROXY"]
-    _proxy_state: dict = {}
+_proxy_base = os.environ.get("FLI_PROXY") or ""
 
-    def _make_proxy_url() -> str:
-        # Sticky session (IPRoyal credential suffix): keep one residential exit
-        # for speed and coherent cookies, but rotate_proxy_session() swaps to a
-        # fresh IP whenever an attempt fails.
-        if "iproyal" in _proxy_base and "@" in _proxy_base:
-            creds, host = _proxy_base.rsplit("@", 1)
-            return f"{creds}_session-{secrets.token_hex(4)}_lifetime-30m@{host}"
-        return _proxy_base
+# Distinct, current fingerprints. Identical clones from one address are a
+# pattern; a varied handful is not.
+_IMPERSONATIONS = ("chrome", "chrome136", "chrome142", "edge", "safari180", "firefox135")
 
-    _proxy_state["url"] = _make_proxy_url()
+POOL_SIZE = 3
+IDENTITY_MAX_STRIKES = 1  # session-stickiness is binary: one refusal retires it
 
-    def rotate_proxy_session() -> None:
-        _proxy_state["url"] = _make_proxy_url()
+_identities: list[dict] = []
+_pool_lock = threading.Lock()
+_local = threading.local()
 
-    _orig_session = _fli_client.Client._session
 
-    def _session_with_proxy(self):
-        session = _orig_session(self)
-        session.proxies = {"http": _proxy_state["url"], "https": _proxy_state["url"]}
-        return session
+def _make_proxy_url() -> str:
+    """A fresh residential exit. IPRoyal takes a sticky-session suffix in the
+    credentials; each identity gets its own so they don't share an IP."""
+    if "iproyal" in _proxy_base and "@" in _proxy_base:
+        creds, host = _proxy_base.rsplit("@", 1)
+        return f"{creds}_session-{secrets.token_hex(4)}_lifetime-30m@{host}"
+    return _proxy_base
 
-    _fli_client.Client._session = _session_with_proxy
-else:
-    def rotate_proxy_session() -> None:  # no proxy configured
-        pass
+
+def _new_identity(idx: int) -> dict:
+    return {
+        "idx": idx,
+        "uid": secrets.token_hex(4),  # stable handle for logs and tests
+        "proxy": _make_proxy_url(),
+        "impersonate": random.choice(_IMPERSONATIONS),
+        "session": None,   # built lazily on first use
+        "strikes": 0,
+        "born": time.monotonic(),
+    }
+
+
+def _identity_session(ident: dict):
+    if ident["session"] is None:
+        from curl_cffi import requests as _curl_requests
+
+        s = _curl_requests.Session()
+        s.headers.update(_fli_client.Client.DEFAULT_HEADERS)
+        if _proxy_base:
+            s.proxies = {"http": ident["proxy"], "https": ident["proxy"]}
+        ident["session"] = s
+    return ident["session"]
+
+
+def checkout_identity() -> dict:
+    """Bind a healthy identity to this thread for the duration of a search."""
+    with _pool_lock:
+        while len(_identities) < POOL_SIZE:
+            _identities.append(_new_identity(len(_identities)))
+        healthy = [i for i in _identities if i["strikes"] < IDENTITY_MAX_STRIKES]
+        ident = random.choice(healthy) if healthy else _retire_all_locked()
+    _local.identity = ident
+    return ident
+
+
+def _retire_all_locked() -> dict:
+    """Every identity is flagged — rebuild the bench and hand back a new one."""
+    for i, old in enumerate(_identities):
+        _close_identity(old)
+        _identities[i] = _new_identity(i)
+    return _identities[0]
+
+
+def _close_identity(ident: dict) -> None:
+    s = ident.get("session")
+    if s is not None:
+        try:
+            s.close()
+        except Exception:
+            pass
+    ident["session"] = None
+
+
+def retire_identity() -> None:
+    """Discard the identity this thread is using: new cookies, new exit IP,
+    new fingerprint. Called after any refused attempt."""
+    ident = getattr(_local, "identity", None)
+    if ident is None:
+        return
+    with _pool_lock:
+        _close_identity(ident)
+        if ident in _identities:
+            _identities[_identities.index(ident)] = _new_identity(ident["idx"])
+    _local.identity = None
+
+
+# Back-compat aliases: the retry ladder speaks in these verbs.
+def rotate_proxy_session() -> None:
+    retire_identity()
 
 
 def reset_google_session() -> None:
-    """Discard the current thread's Google session (cookies included).
+    retire_identity()
 
-    The tiny-ErrorResponse failures (HTTP 200, ~94 bytes, gRPC code 13) are
-    SESSION-STICKY, not random: measured July 24 2026, a flagged session
-    failed 64/64 consecutive requests while brand-new sessions fired in the
-    same seconds succeeded 20/32. Retrying on the same cookie jar therefore
-    cannot escape a burst — the retry must arrive as a new visitor. Fresh
-    unwarmed sessions did NOT underperform warmed ones in that study, so no
-    re-warm here (a warmup page is ~1.8 MB of proxy bandwidth).
-    """
-    try:
-        from fli.search.client import get_client
-        c = get_client()
-        session = getattr(c._sessions, "session", None)
-        if session is not None:
-            try:
-                session.close()
-            except Exception:
-                pass
-            c._sessions.session = None
-    except Exception:
-        pass  # best-effort; worst case the old session lives on
+
+# --- fli plumbing: route its requests through this thread's identity --------
+def _session_from_identity(self):
+    ident = getattr(_local, "identity", None) or checkout_identity()
+    return _identity_session(ident)
+
+
+_fli_client.Client._session = _session_from_identity
+
+_orig_post, _orig_get = _fli_client.Client.post, _fli_client.Client.get
+
+
+def _post_as_identity(self, *args, **kwargs):
+    ident = getattr(_local, "identity", None)
+    if ident:
+        kwargs["impersonate"] = ident["impersonate"]
+    return _orig_post(self, *args, **kwargs)
+
+
+def _get_as_identity(self, *args, **kwargs):
+    ident = getattr(_local, "identity", None)
+    if ident:
+        kwargs["impersonate"] = ident["impersonate"]
+    return _orig_get(self, *args, **kwargs)
+
+
+_fli_client.Client.post = _post_as_identity
+_fli_client.Client.get = _get_as_identity
+
+
+# --- circuit breaker -------------------------------------------------------
+# Sustained volume during a refusal wave is what escalates a cheap session
+# flag into an expensive IP burn, so consecutive refusals buy a pause rather
+# than a faster retry.
+BREAKER_TRIP_AT = 3          # consecutive refusals across the process
+BREAKER_COOLDOWN = 25.0      # seconds of quiet once tripped
+_breaker = {"consecutive": 0, "open_until": 0.0}
+_breaker_lock = threading.Lock()
+
+
+def breaker_wait() -> None:
+    """Block briefly if the process is mid-wave. Bounded so a search never
+    stalls past its own deadline."""
+    with _breaker_lock:
+        remaining = _breaker["open_until"] - time.monotonic()
+    if remaining > 0:
+        time.sleep(min(remaining, BREAKER_COOLDOWN))
+
+
+def note_search_outcome(ok: bool) -> None:
+    with _breaker_lock:
+        if ok:
+            _breaker["consecutive"] = 0
+            _breaker["open_until"] = 0.0
+            return
+        _breaker["consecutive"] += 1
+        if _breaker["consecutive"] >= BREAKER_TRIP_AT:
+            _breaker["open_until"] = time.monotonic() + BREAKER_COOLDOWN
+            _breaker["consecutive"] = 0
 
 
 # Google streams GetShoppingResults as PROGRESSIVE wrb chunks in one HTTP
@@ -127,25 +248,9 @@ def _parse_richest_wrb_payload(body):
 _fli_flights.parse_first_wrb_payload = _parse_richest_wrb_payload
 
 
-_google_warmed = False
-
-
-def warm_google_session() -> None:
-    """One cheap page-load before the first real search of this process.
-
-    A fresh session's first POST often gets a consent/bootstrap response that
-    parses to zero results; loading the Flights page once collects the cookies
-    that make the first real search behave like the second.
-    """
-    global _google_warmed
-    if _google_warmed:
-        return
-    _google_warmed = True  # one attempt per process, success or not
-    try:
-        from fli.search.client import get_client
-        get_client().get("https://www.google.com/travel/flights", timeout=8)
-    except Exception:
-        pass  # best-effort; the retry ladder still backstops
+# The old warm_google_session() page-load is gone: the July 24 study found
+# unwarmed fresh sessions matched warmed ones (18/32 vs 14/32), so the warmup
+# bought nothing and cost ~1.8 MB of proxy bandwidth per cold process.
 
 app = FastAPI()
 
@@ -501,7 +606,19 @@ def run_assistant(query: str, history: list | None) -> dict:
         # no context manager: its exit would JOIN hung threads and defeat the
         # timeouts below. shutdown(wait=False) abandons stragglers instead.
         pool = ThreadPoolExecutor(max_workers=4)
-        futures = {tu.id: pool.submit(execute_spec, tu.input) for tu in budgeted}
+
+        def _staggered(spec, delay):
+            # five simultaneous requests from one address is the least human
+            # thing we do; a short ramp keeps the burst off Google's radar
+            # while still overlapping the slow part of each search
+            if delay:
+                time.sleep(delay)
+            return execute_spec(spec)
+
+        futures = {
+            tu.id: pool.submit(_staggered, tu.input, n * 0.4)
+            for n, tu in enumerate(budgeted)
+        }
         batch_deadline = time.monotonic() + 55
 
         for tu in budgeted:
@@ -796,26 +913,28 @@ def add_highlights(flights: list[dict]) -> None:
 
 
 def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy, top_n: int):
-    warm_google_session()
-    # Google's flights backend throws transient internal errors (200 + tiny
-    # ErrorResponse body, parsed to empty) on ~5-10% of requests, in BURSTS —
-    # so retries need spacing and jitter, not rapid fire. 429s (fli raises)
-    # get IP rotation on top.
+    # Refusals come as HTTP 200 + a tiny body (parses to empty) or as raised
+    # client errors. Both gates are answered the same way: retire the identity
+    # (cookies + exit IP + fingerprint) so the retry is a different visitor,
+    # and let the breaker impose quiet if the whole process is mid-wave.
     last_exc = None
     for i, attempt_sort in enumerate((sort, sort, SortBy.CHEAPEST, SortBy.CHEAPEST)):
+        breaker_wait()
+        checkout_identity()
         attempt = filters.model_copy(update={"sort_by": attempt_sort})
         try:
             results = search.search(attempt, top_n=top_n, currency="USD")
         except SearchClientError as e:
             last_exc = e
-            rotate_proxy_session()  # a failing attempt may be a bad exit IP
-            reset_google_session()  # ...and failures are session-sticky: retry as a new visitor
+            retire_identity()
+            note_search_outcome(False)
             time.sleep(2 + 2 * i)
             continue
         if results:
+            note_search_outcome(True)
             return results
-        rotate_proxy_session()
-        reset_google_session()
+        retire_identity()
+        note_search_outcome(False)
         time.sleep(0.6 * (i + 1) + random.uniform(0, 0.5))
     if last_exc:
         raise last_exc
@@ -1005,21 +1124,25 @@ def search_flexible_dates(spec: dict, origins: list, destinations: list, currenc
 
     filters = build_filters(spec, origins, destinations, filters_cls=DateSearchFilters, **extra)
     searcher = SearchDates()
-    warm_google_session()
     date_prices = None
     last_exc = None
     for i in range(3):
+        breaker_wait()
+        checkout_identity()
         try:
             date_prices = searcher.search(filters, currency="USD")
             last_exc = None
         except SearchClientError as e:
             last_exc = e
-            rotate_proxy_session()
+            retire_identity()
+            note_search_outcome(False)
             time.sleep(3 + 3 * i)
             continue
         if date_prices:
+            note_search_outcome(True)
             break
-        rotate_proxy_session()
+        retire_identity()
+        note_search_outcome(False)
         time.sleep(1)
     if last_exc:
         raise last_exc

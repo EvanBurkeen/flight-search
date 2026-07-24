@@ -153,6 +153,19 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
 
 ## Changelog
 
+**July 24, 2026 (evening)**
+- Full anti-refusal stack. Identity pool: 3 identities, each with its own
+  cookie jar + residential exit IP + browser fingerprint (chrome/edge/
+  safari/firefox variants), bound per-thread; any refusal retires the
+  identity so the next attempt is a genuinely different visitor. Circuit
+  breaker: 3 consecutive refusals opens a 25s process-wide pause (sustained
+  volume is what escalates a cheap session flag into an IP burn — hammering
+  makes it worse). Comparison searches now ramp 0.4s apart instead of 5
+  simultaneous requests from one address. Warmup page-load deleted (study
+  showed no benefit, ~1.8MB proxy bandwidth per cold start).
+  Simulated at the measured 1/3 refusal rate: ladder success 65.8% -> 99.0%
+  (the independent-attempt ceiling). 11/11 logic checks; live 3/3.
+
 **July 24, 2026 (later)**
 - Root-caused the transient tiny-ErrorResponse failures (gRPC code 13):
   they are SESSION-STICKY soft-blocks, not random flicker — a flagged
