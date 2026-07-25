@@ -50,15 +50,19 @@ document alone. Everything you need:
   trip memory + login, streaming replies, price-by-date calendar heatmap,
   real booking via Duffel, search-result caching.
 - **Known trade-offs accepted by Evan:** timeline layover dots use naive local
-  times (schematic, not exact); round trips ship ~10 combos (expansion cost);
-  Claude sees only top-6 summaries per search (with truncation warning baked in).
+  times (schematic, not exact); Claude sees only top-6 summaries per search
+  (with truncation warning baked in); the value-ranking weights
+  (`HOUR_VALUE` etc. at the top of `api/index.py`) are a product judgement, not
+  a tuned model — change them there; multi-city is the slow path (leg-2 fan-out
+  is 4–6 candidates), so it is the trip type most likely to hit the 65s turn
+  budget and return partial results.
 
 ## Stack
 
 | Layer | What |
 |---|---|
 | Hosting | Vercel serverless (Python), auto-deploys on push to `main` (`EvanBurkeen/flight-search`) |
-| Backend | [api/index.py](api/index.py) — FastAPI, single `/api/search` endpoint |
+| Backend | [api/index.py](api/index.py) — FastAPI. `/api/search` (JSON) is what the frontend uses; `/api/search/stream` (SSE) still works and is exercised by the parked `streaming-experiment` branch |
 | LLM | `claude-opus-4-8` agent loop, `max_retries=4`, effort `medium`, prompt-cached system+tools |
 | Flight data | [`fli`](https://github.com/punitarani/fli) (PyPI `flights`) — reverse-engineered Google Flights |
 | Web context | Anthropic server-side `web_search` tool (max 3/turn) for event dates, venues, etc. |
@@ -78,25 +82,41 @@ Google traffic through a proxy (see Operations).
 3. `execute_spec` per search: roll past dates forward (with a visible note) →
    resolve airports (multi-airport cities supported) → build fli filters
    (cabin, stops, airlines, alliances, price cap, times, currency pinned USD) →
-   `run_search` (4-attempt jittered retry ladder: sort, sort, CHEAPEST, CHEAPEST;
-   15s fli timeout; proxy IP rotates after any failed attempt; one warmup
-   page-load per cold process) →
+   `run_search` (4-attempt ladder: sort, sort, CHEAPEST, CHEAPEST; 15s fli
+   timeout; **whole ladder bounded by `budget_s`**, 35s default / 45s
+   multi-city, because a retry re-runs the entire search including any
+   fan-out; each failed attempt RETIRES the identity — cookies + exit IP +
+   fingerprint — because refusals are session-sticky; a process-wide circuit
+   breaker imposes quiet after repeated refusals, capped at 1.5s on a user's
+   first attempt. No warmup page-load: the study found warmed sessions did
+   not outperform fresh ones) →
    post-process:
    - `via_airports` filter over the FULL result set (the only trustworthy way to
      assert a routing exists/doesn't)
    - arrival-day + arrival-time enforcement app-side (`arrival_ok`) — Google's own
      arrival filter is clock-hour based and unusable
-   - serialize up to 50 one-ways / 10 round-trip combos / 8 multi-city itineraries,
-     each with true per-itinerary booking URL, alliance tag, aircraft, warnings
-     (tight <45m connections, overnight, self-transfer, airport change), CO2 delta,
-     and `route_points` (with per-stop `layover_min`) for the map.
+   - **rank by value, then cut** (`order_by_value` / `retain_representative`):
+     fare plus a dollar cost for duration over the fastest, stops, and existing
+     warnings. Cutting first would discard options never scored — see Changelog
+     July 24. The cut always keeps up to 8 nonstops plus the outright cheapest
+     and fastest, because the client-side filters run over what we ship.
+   - serialize up to 50 one-ways / ~8 round-trip OUTBOUND groups (each with its
+     own `return_options`, every option priced as the real total for that
+     pairing) / 8 multi-city itineraries (priced BOTH as one ticket and as
+     separate tickets, quoting the cheaper — `price_basis` says which), each
+     with a `tfs` deep link to that exact itinerary, alliance tag, aircraft,
+     warnings (tight <45m connections, overnight, self-transfer, airport
+     change, mixed-carrier separate-ticket risk), CO2 delta, and
+     `route_points` (with per-stop `layover_min`) for the map.
 4. Claude sees a **compact top-6 summary per search** (with route endpoints and an
    explicit truncation warning); the browser gets everything.
 5. Reply text ends with a `SUGGESTIONS: [...]` line → stripped and rendered as
    tappable follow-up chips.
-6. Trip types: one-way, round-trip (priced as complete itineraries), multi-city
-   (2–5 legs, one ticket), flexible-date grids (`SearchDates`, round-trip duration
-   supported).
+6. Trip types: one-way, round-trip (choose an outbound, then a return, with the
+   total moving as you pick — Google's own flow), multi-city (2–5 legs; Google
+   prices them together but mixed carriers are often SEPARATE tickets, so both
+   prices are computed and the cheaper is quoted), flexible-date grids
+   (`SearchDates`, round-trip duration supported).
 
 ### Assistant behavior rules (prompt-enforced)
 
@@ -116,7 +136,10 @@ Google traffic through a proxy (see Operations).
 Chat with stop/supersede (send during a search cancels and re-asks) · Detailed/Compact
 views (global toggle + per-section override) · top-picks preview with "Show all N"
 and instant client-side filters (sort, departure window, duration, airline, alliance,
-stops — options derived from the data) · flexible-date grids show best-value dates
+stops — options derived from the data; they filter only what the server
+shipped, which is why the cut keeps nonstops/cheapest/fastest) · round-trip
+outbound picker with per-return totals and price deltas · Best value badge ·
+Book deep-links straight to the chosen itinerary on Google · flexible-date grids show best-value dates
 first (within 15% of cheapest) · per-flight atlas maps (land+lakes, graticule,
 sequential longitude unwrapping so every leg takes the short way; outbound solid,
 return dashed; layover dots with durations) · timeline layover rings · suggestion
@@ -145,11 +168,18 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
   iad1 → sfo1 → cle1 → pdx1 → fra1). **Durable fix (ACTIVE since July 15, 2026):** `FLI_PROXY` in
   Vercel env holds an IPRoyal rotating US-residential proxy URL (account:
   evanburkeen@gmail.com; ~2GB non-expiring credit bought July 2026; top up in
-  their dashboard when low; searches use ~100-300KB each). The code appends
-  `_session-<random>_lifetime-30m` per process (sticky exit for speed and
-  cookie coherence) and `rotate_proxy_session()` swaps to a fresh IP whenever
-  a search attempt fails. If switching providers, keep the URL format
-  `http://user:pass@host:port`; the sticky suffix is IPRoyal-gated in code.
+  their dashboard when low; searches use ~100-300KB each). If switching
+  providers keep the URL format `http://user:pass@host:port`; the sticky
+  session suffix is IPRoyal-gated in code.
+- **Identity pool (supersedes the old single sticky session).** Each identity
+  bundles its own cookie jar, proxy exit (`_session-<random>_lifetime-30m`) and
+  browser fingerprint. `checkout_identity()` prefers the most recently
+  SUCCESSFUL one so its TLS connection through the proxy is reused — that alone
+  took searches from ~6s to 0.4–2.3s, since a cold residential handshake costs
+  seconds. Any refusal RETIRES that identity, so the retry is a genuinely new
+  visitor. Do not "fix" a refusal by retrying on the same session: refusals are
+  session-sticky (a flagged session failed 64/64 while fresh ones passed 20/32
+  in the same window — see Changelog July 24).
 - Currency is pinned to USD in every search, so non-US regions are safe.
 - Anthropic 429/529 overloads surface as a polite try-again message.
 - **Google backend transience:** ~5-10% of search POSTs return HTTP 200 with a
@@ -162,6 +192,24 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
   lakes; run it, then bump the `?v=N` cache-buster on the script tag in index.html).
 
 ## Changelog
+
+**July 24, 2026 (compose-bar seam)**
+- LOGGED LATE (commit 1e79fea shipped without its entry, which breaks the rule
+  at the top of this file — the entry belongs in the same commit).
+- Fixed a visible line and dark band across the bottom of the landing screen.
+  Three causes at once: the fixed compose bar filled flat `var(--bg)` while the
+  body carried four texture layers (so it was a different shade of cream, with
+  the join reading as a line); its `box-shadow: 0 -8px …` cast UPWARD, smudging
+  dark over empty paper; and with content shorter than the viewport (684 vs
+  720) the body stopped painting texture before the bottom.
+- Now one `--paper` variable is shared by the page and the bar (redefined once
+  for dark mode so they cannot drift), the bar paints it with
+  `background-attachment: fixed` so the texture aligns with what is behind it,
+  `body` gets `min-height: 100vh`, and the divider/shadow appear only when the
+  page is actually scrollable (`syncBar`, kept current by a ResizeObserver).
+  Note: testing "content below the bar's top edge" instead is WRONG — it counts
+  the container's own 8rem bottom padding and re-raises the divider on the
+  empty landing screen.
 
 **July 24, 2026 (tail latency)**
 - Bringing down worst-case turn times. run_search now takes a budget
