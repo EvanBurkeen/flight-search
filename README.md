@@ -302,6 +302,32 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
 
 ## Changelog
 
+**July 25, 2026 (late: the blank-screen root cause — good data was being discarded)**
+Evan: a plain NYC-FLL round trip spun for a minute and showed NOTHING. Layered
+root cause, bottom up:
+- **L0 (Google):** slow-stream/soft-refusal wave on that route-class for our
+  exits (aggravated by the day's test volume). External, real, passes.
+- **L1 (search, the actual bug):** during such a wave the round-trip search is
+  all-or-nothing: the outbound page is small and FAST (succeeds, carries true
+  from-prices for every flight), while the ten return-pricing expansions are
+  heavy and SLOW (all die on timeout). Zero pairings -> the ladder treated the
+  attempt as a total failure, THREW AWAY the good outbound list, retired the
+  identity, refetched everything, and failed the same way, four times. Fix:
+  expansions get patient timeouts on retry attempts (12s -> 22s, wider
+  harvest), and a ladder that ends pairing-less but holds an outbound list
+  ships it instead of discarding it.
+- **L2 (payload):** that case returned "No flights found" — indistinguishable
+  from a true data gap. Now `from_priced_only_payload` ships every outbound
+  (value-ordered, cap 30) with its honest from-total, `spec_echo`, and a
+  message that forbids the model from claiming unavailability. check.py
+  enforces it.
+- **L3 (assistant):** with L2, Claude summarizes real from-prices and says
+  returns price on tap, instead of "nothing came back."
+- **L4 (frontend):** `visibleSections` hid results-less sections entirely —
+  the blank screen itself. Degraded sections now render a notice + one-tap
+  path into the board, where every row prices on demand via `/api/returns`
+  (which retries independently and usually succeeds moments later).
+
 **July 25, 2026 (evening: 'ran long' autopsy — the data was done, the prose was gated)**
 Evan's screenshot: a turn that showed 8 complete cards + 33 outbounds while
 apologizing that "the search ran long." Root causes, in the order they stack:

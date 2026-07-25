@@ -1458,10 +1458,18 @@ class RepresentativeSearch(SearchFlights):
         parent_ident = getattr(_local, "identity", None)
         candidates = list(flights[:top_n])
 
+        # a slow-stream wave makes every expansion miss a tight timeout while
+        # the (small, fast) outbound fetch succeeds; on retry attempts, give
+        # expansions room to actually finish instead of re-dying at 12s
+        attempt = getattr(self, "_attempt", 0)
+        exp_timeout = 12.0 if attempt == 0 else 22.0
+        exp_budget = EXPANSION_BUDGET_S if attempt == 0 else 12.0
+        exp_grace = EXPANSION_GRACE_S if attempt == 0 else 14.0
+
         def expand(outbound):
             if parent_ident is not None:
                 _local.identity = parent_ident  # same visitor, own curl handle
-            _local.fli_timeout = 12.0  # harvest abandons stragglers anyway
+            _local.fli_timeout = exp_timeout  # harvest abandons stragglers anyway
             next_filters = copy.deepcopy(filters)
             next_filters.flight_segments[selected].selected_flight = outbound
             sub = self._fetch_flights(next_filters, currency=currency, language=language,
@@ -1483,15 +1491,15 @@ class RepresentativeSearch(SearchFlights):
         ex = _get_executor()
         pending = {ex.submit(expand, ob) for ob in candidates}
         expansions, first_exc, graced = [], None, False
-        deadline = time.monotonic() + EXPANSION_BUDGET_S
+        deadline = time.monotonic() + exp_budget
         while pending:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 if expansions or graced:
                     break
                 graced = True  # nothing landed yet: extend once, then ship regardless
-                deadline = time.monotonic() + EXPANSION_GRACE_S
-                remaining = EXPANSION_GRACE_S
+                deadline = time.monotonic() + exp_grace
+                remaining = exp_grace
             done, pending = _cf.wait(pending, timeout=remaining,
                                      return_when=_cf.FIRST_COMPLETED)
             for f in done:
@@ -1533,6 +1541,7 @@ def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy
         # attempt 1 fails fast into a fresh identity; retries get room for
         # Google's slow progressive streams to actually finish downloading
         _local.fli_timeout = 12.0 if i == 0 else 28.0
+        search._attempt = i  # expansion patience scales with the attempt too
         attempt = filters.model_copy(update={"sort_by": attempt_sort})
         try:
             results = search.search(attempt, top_n=top_n, currency="USD")
@@ -1554,6 +1563,65 @@ def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy
     return []
 
 
+def _rt_spec_echo(spec: dict, origins: list, destinations: list) -> dict:
+    """Everything /api/returns needs to price any outbound on demand."""
+    dep = spec.get("departure_date")
+    return {k: spec.get(k) for k in
+            ("cabin", "max_stops", "airlines_include", "airlines_exclude",
+             "alliances", "max_price", "adults", "children")
+            } | {"origins": [a.name for a in origins],
+                 "destinations": [a.name for a in destinations],
+                 "departure_date": dep,
+                 "return_date": spec.get("return_date") or dep,
+                 "trip_type": "round_trip"}
+
+
+def from_priced_only_payload(spec: dict, origins: list, destinations: list,
+                             outs: list, currency: str) -> dict | None:
+    """Round-trip degraded mode: Google listed the outbounds (each carrying
+    its true best-achievable round-trip total) but was too slow to price
+    return pairings before our budgets ran out. A slow-stream wave makes
+    exactly this split — the outbound page is small and fast, the ten
+    expansion fetches are heavy and die — and discarding the good half
+    produced July 25's blank 'No flights found' screens on NYC-FLL. Every
+    outbound ships from-priced and tap-to-price instead."""
+    via = {c.strip().upper() for c in spec.get("via_airports") or []}
+    if via:
+        outs = [f for f in outs
+                if any(lo.airport.name in via for lo in (f.layovers or []))]
+    extras = []
+    for f in outs:
+        if f.price is None or not f.legs:
+            continue
+        x = serialize_flight(f, spec.get("cabin"), ret_date=spec.get("return_date"))
+        x["from_total"] = f.price
+        extras.append(x)
+    extras = order_by_value(
+        extras,
+        price_of=lambda x: x.get("from_total"),
+        duration_of=lambda x: x.get("duration"),
+        stops_of=lambda x: x.get("stops") or 0,
+        warnings_of=lambda x: x.get("warnings"),
+        requested_sort=spec.get("sort"),
+    )[:30]
+    if not extras:
+        return None
+    ns = sum(1 for x in extras if (x.get("stops") or 0) == 0)
+    return {
+        "type": "itineraries",
+        "message": (f"Google listed {len(extras)} outbounds"
+                    + (f" ({ns} nonstop)" if ns else "")
+                    + ", each with its true round-trip from-price, but was too slow to price "
+                      "return pairings on this pass. The user IS seeing every outbound and can "
+                      "tap any of them to price its returns on demand. Do NOT claim flights are "
+                      "unavailable and do NOT say nothing came back; summarize the from-prices, "
+                      "say returns price on tap, and offer a re-run for full pairings."),
+        "results": [],
+        "more_outbounds": extras,
+        "spec_echo": _rt_spec_echo(spec, origins, destinations),
+    }
+
+
 def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: str) -> dict:
     filters = build_filters(spec, origins, destinations, show_all_results=True)
     sort = SORT_MAP.get(spec.get("sort"), SortBy.CHEAPEST)
@@ -1561,9 +1629,23 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
     # expansions run genuinely in parallel now (per-thread curl handles), so
     # 10 costs about what 2 did serially; the July 25 multi-airport timeouts
     # were the serialized fan-out, not the count
-    results = run_search(searcher, filters, sort, top_n=10)
+    try:
+        results = run_search(searcher, filters, sort, top_n=10)
+    except SearchClientError:
+        # the ladder failed outright, but if any attempt got the outbound
+        # list, the degraded path below still turns it into a usable answer
+        if spec.get("trip_type") == "round_trip" and getattr(searcher, "last_outbounds", None):
+            results = []
+        else:
+            raise
 
     if not results:
+        if spec.get("trip_type") == "round_trip":
+            degraded = from_priced_only_payload(
+                spec, origins, destinations,
+                getattr(searcher, "last_outbounds", None) or [], currency)
+            if degraded:
+                return degraded
         return {
             "type": "flights",
             "message": "No flights found for that search. Try different dates, nearby airports, or fewer filters.",
@@ -1736,13 +1818,7 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
             "more_outbounds": extras,
             # everything /api/returns needs to price any outbound on demand,
             # so the board never depends on server-side session state
-            "spec_echo": {k: spec.get(k) for k in
-                          ("cabin", "max_stops", "airlines_include", "airlines_exclude",
-                           "alliances", "max_price", "adults", "children")
-                          } | {"origins": [a.name for a in origins],
-                               "destinations": [a.name for a in destinations],
-                               "departure_date": dep_date, "return_date": ret_date,
-                               "trip_type": "round_trip"},
+            "spec_echo": _rt_spec_echo(spec, origins, destinations),
         }
 
     strict = [r for r in results if arrival_ok(r, out_target, aw)]

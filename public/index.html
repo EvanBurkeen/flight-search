@@ -428,6 +428,10 @@
     .rt-tag { font-size: 0.6rem; padding: 0.1rem 0.45rem; border-radius: 999px; background: var(--info-bg); color: var(--info); font-weight: 600; }
     .rt-tag.warn { background: var(--warn-bg); color: var(--warn); }
     .rt-empty { font-size: 0.78rem; opacity: 0.6; padding: 0.6rem 0.2rem; }
+    .rt-degraded {
+      border: 1px dashed var(--line-strong); border-radius: 7px; padding: 0.8rem 0.9rem;
+      font-size: 0.82rem; display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center;
+    }
     .rt-unpriced-panel {
       border: 1px dashed var(--line-strong); border-radius: 7px; padding: 0.9rem;
       font-size: 0.82rem; display: flex; flex-direction: column; gap: 0.6rem; align-items: flex-start;
@@ -906,11 +910,21 @@
                   </div>
                 </template>
 
+                <!-- degraded round trip: Google listed outbounds but priced no
+                     pairings this pass — say so instead of a blank section -->
+                <template x-if="sec.type === 'itineraries' && !sec._expanded && !(sec.results || []).length && (sec.more_outbounds || []).length">
+                  <div class="rt-degraded">
+                    Google listed <b x-text="(sec.more_outbounds || []).length"></b> outbounds
+                    (from-prices shown) but was too slow to pair returns just now.
+                    <button class="chip" @click="sec._expanded = true">Open the board and tap any flight to price its returns</button>
+                  </div>
+                </template>
+
                 <!-- round-trip mix & match board: every outbound on the left
                      (from-priced when returns are unknown), the selected
                      outbound's returns on the right, each priced as the real
                      total for that exact pairing -->
-                <template x-if="sec.type === 'itineraries' && sec.results && sec.results.length && sec._expanded">
+                <template x-if="sec.type === 'itineraries' && sec._expanded && ((sec.results || []).length || (sec.more_outbounds || []).length)">
                   <div class="rt-board-wrap">
                     <div class="rt-board">
                       <div class="rt-col">
@@ -1592,15 +1606,18 @@
 
         visibleSections(msg) {
           // empty searches (transient hiccups the assistant retried) stay out
-          // of the page; the reply text already tells that story
-          return (msg.sections || []).filter(s => (s.results || []).length || (s.dates || []).length);
+          // of the page; the reply text already tells that story. A section
+          // with only from-priced outbounds (degraded round trip) DOES show:
+          // every row is one tap from priced.
+          return (msg.sections || []).filter(s =>
+            (s.results || []).length || (s.dates || []).length || (s.more_outbounds || []).length);
         },
 
         ladder() {
           const items = [];
           for (const m of this.messages) {
             for (const sec of m.sections || []) {
-              if (sec._anchor && ((sec.results || []).length || (sec.dates || []).length)) {
+              if (sec._anchor && ((sec.results || []).length || (sec.dates || []).length || (sec.more_outbounds || []).length)) {
                 items.push({ anchor: sec._anchor, label: this.sectionLabel(sec) });
               }
             }

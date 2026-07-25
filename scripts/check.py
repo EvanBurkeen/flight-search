@@ -261,6 +261,32 @@ check("expansion covers the departure buckets the data offers",
            2 if f.legs[0].departure_datetime.hour < 18 else 3 for f in _kept}) >= 3)
 check("expansion never exceeds its budget", len(_kept) == 10, f"{len(_kept)}")
 
+# a round-trip search that got the outbound list but no pairings must ship
+# the outbounds from-priced (tap-to-price), never "No flights found" — the
+# July 25 NYC-FLL blank screens were the good half of the data being discarded
+_deg_outs = [result([leg("JFK", "FLL", "2026-08-08T07:34", "2026-08-08T10:37", "B6", "1112")], 277.0),
+             result([leg("EWR", "FLL", "2026-08-08T09:00", "2026-08-08T12:05", "UA", "310")], 297.0)]
+_real_run_search = app.run_search
+def _fake_run_search(search, filters, sort, top_n, budget_s=35.0):
+    search.last_outbounds = _deg_outs
+    return []
+app.run_search = _fake_run_search
+_o, _ = app.resolve_airports(["JFK", "EWR"]); _d, _ = app.resolve_airports(["FLL"])
+_deg = app.search_fixed_dates({"trip_type": "round_trip", "origins": ["JFK", "EWR"],
+                               "destinations": ["FLL"], "departure_date": "2026-08-08",
+                               "return_date": "2026-08-11"}, _o, _d, "USD")
+app.run_search = _real_run_search
+check("a pairing-less round trip ships from-priced outbounds, not 'No flights found'",
+      _deg.get("type") == "itineraries" and _deg.get("results") == []
+      and len(_deg.get("more_outbounds") or []) == 2,
+      f"type={_deg.get('type')} more={len(_deg.get('more_outbounds') or [])}")
+check("...each with its honest from-total", (_deg.get("more_outbounds") or [{}])[0].get("from_total") == 277.0)
+check("...and the spec_echo the tap-to-price endpoint needs",
+      (_deg.get("spec_echo") or {}).get("origins") == ["JFK", "EWR"]
+      and (_deg.get("spec_echo") or {}).get("return_date") == "2026-08-11")
+check("...while telling the model it must not claim flights are unavailable",
+      "NOT claim" in (_deg.get("message") or ""))
+
 # unexpanded outbounds must reach the model, or it infers absence from a sample
 _it_payload = {
     "type": "itineraries", "message": "m",
