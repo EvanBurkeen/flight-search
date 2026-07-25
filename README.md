@@ -521,3 +521,5 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
 
 **January 2026**
 - v1–v3: original Next.js + SerpAPI prototypes (two-step round trips, debug eras)
+
+<!-- log line -->

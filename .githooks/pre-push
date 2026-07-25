@@ -1,0 +1,66 @@
+#!/bin/sh
+# Enforces the two rules this project keeps losing to good intentions:
+#   1. code changes ship with a Changelog entry
+#   2. the invariant suite passes
+#
+# Installed with:  git config core.hooksPath .githooks
+# Bypass (only when you mean it):  git push --no-verify
+set -e
+
+ROOT=$(git rev-parse --show-toplevel)
+PY="$ROOT/.venv/bin/python"
+[ -x "$PY" ] || PY=python3
+
+RANGE=""
+while read -r _local_ref _local_sha remote_ref remote_sha; do
+  [ -z "$_local_sha" ] && continue
+  case "$remote_sha" in
+    0000000000000000000000000000000000000000|"") RANGE="origin/main..$_local_sha" ;;
+    *) RANGE="$remote_sha..$_local_sha" ;;
+  esac
+done
+
+# no range (nothing to push, or a delete) -> nothing to check
+[ -z "$RANGE" ] && exit 0
+
+CHANGED=$(git diff --name-only "$RANGE" 2>/dev/null || echo "")
+[ -z "$CHANGED" ] && exit 0
+
+TOUCHED_CODE=$(echo "$CHANGED" | grep -E '^(api/|public/|scripts/|vercel\.json)' || true)
+TOUCHED_LOG=$(echo "$CHANGED" | grep -E '^README\.md$' || true)
+
+if [ -n "$TOUCHED_CODE" ] && [ -z "$TOUCHED_LOG" ]; then
+  cat >&2 <<'MSG'
+
+  PUSH BLOCKED: code is changing but README.md is not.
+
+  Every deployment gets a Changelog entry in the SAME commit — one or two
+  lines naming what changed and the bug or request behind it, newest first.
+  This hook exists because that rule was broken while written in bold at the
+  top of the README; prose could not enforce it, so this does.
+
+  Fix:   edit the Changelog in README.md, then
+         git commit --amend --no-edit   (or add a new commit)
+  Really no log line needed?  git push --no-verify
+
+MSG
+  exit 1
+fi
+
+if [ -n "$TOUCHED_CODE" ]; then
+  echo "pre-push: running invariant checks..."
+  if ! "$PY" "$ROOT/scripts/check.py" >/tmp/flight-check.log 2>&1; then
+    echo >&2
+    echo "  PUSH BLOCKED: scripts/check.py failed." >&2
+    echo >&2
+    tail -25 /tmp/flight-check.log >&2
+    echo >&2
+    echo "  Each check encodes a bug already found in production. Read its" >&2
+    echo "  docstring and the Changelog entry it names before editing the test." >&2
+    echo >&2
+    exit 1
+  fi
+  echo "pre-push: checks passed"
+fi
+
+exit 0
