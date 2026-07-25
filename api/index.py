@@ -1,4 +1,5 @@
 import base64
+import copy
 import json
 import os
 import random
@@ -63,6 +64,7 @@ import secrets
 import threading
 
 from fli.search import client as _fli_client
+from fli.search._concurrency import get_executor as _get_executor
 
 _proxy_base = os.environ.get("FLI_PROXY") or ""
 
@@ -101,15 +103,37 @@ def _new_identity(idx: int) -> dict:
 
 
 def _identity_session(ident: dict):
-    if ident["session"] is None:
-        from curl_cffi import requests as _curl_requests
+    """One curl handle per (identity, thread).
 
-        s = _curl_requests.Session()
-        s.headers.update(_fli_client.Client.DEFAULT_HEADERS)
-        if _proxy_base:
-            s.proxies = {"http": ident["proxy"], "https": ident["proxy"]}
-        ident["session"] = s
-    return ident["session"]
+    A single shared handle SERIALIZED every parallel code path in fli —
+    measured July 25: a round trip's 10 return-expansions took 37s end to
+    end (completions at 1.5s, 2.5s, ... 36.7s) because each request queued
+    on the one libcurl handle. Per-thread handles restore real overlap
+    while still presenting as ONE visitor: same residential exit, same
+    fingerprint, and the primary session's cookies — the same shape as a
+    browser's parallel connections sharing its jar.
+    """
+    tid = threading.get_ident()
+    with _pool_lock:
+        sessions = ident.setdefault("sessions", {})
+        s = sessions.get(tid)
+        if s is None:
+            from curl_cffi import requests as _curl_requests
+
+            s = _curl_requests.Session()
+            s.headers.update(_fli_client.Client.DEFAULT_HEADERS)
+            if _proxy_base:
+                s.proxies = {"http": ident["proxy"], "https": ident["proxy"]}
+            primary = ident.get("session")
+            if primary is None:
+                ident["session"] = s  # first handle owns the visitor's jar
+            else:
+                try:
+                    s.cookies.update(primary.cookies)
+                except Exception:
+                    pass
+            sessions[tid] = s
+    return s
 
 
 def checkout_identity() -> dict:
@@ -144,12 +168,13 @@ def _retire_all_locked() -> dict:
 
 
 def _close_identity(ident: dict) -> None:
-    s = ident.get("session")
-    if s is not None:
+    for s in {id(x): x for x in list((ident.get("sessions") or {}).values())
+              + ([ident["session"]] if ident.get("session") else [])}.values():
         try:
             s.close()
         except Exception:
             pass
+    ident["sessions"] = {}
     ident["session"] = None
 
 
@@ -642,12 +667,15 @@ def run_assistant(query: str, history: list | None, emit=None) -> dict:
     web_tool = {"type": "web_search_20260209", "name": "web_search", "max_uses": 3}
 
     # Routing the first call: when the query is plainly "search this route",
-    # that call only has to emit a tool_use, which needs no deep reasoning.
-    # Knowledge questions ("what's Delta's baggage allowance") are ANSWERED on
-    # that same call, so they keep full effort — brevity there would cost the
-    # quality that is the product.
+    # that call only has to emit a tool_use, which needs no deep reasoning —
+    # Haiku emits it in a fraction of Opus's time (July 25 profile: claude_1
+    # was the single largest fixed cost of a simple turn). A guard below
+    # retries on Opus if Haiku answers in prose instead of calling the tool,
+    # so quality is never traded, only latency. Knowledge questions are
+    # ANSWERED on the first call, so they keep Opus at full effort.
     plain_search = looks_like_plain_search(query)
     first_effort = "low" if plain_search else "medium"
+    haiku_router = plain_search  # flips off after one failed Haiku attempt
     # Streaming the first call's text is a win for questions we answer
     # directly ("what's Delta's baggage allowance" starts appearing in ~1s),
     # but on a route search that text is only a lead-in that text_reset then
@@ -665,22 +693,26 @@ def run_assistant(query: str, history: list | None, emit=None) -> dict:
         iterations += 1
         _t = time.monotonic()
         streamed_any = False
-        with client.messages.stream(
-            model="claude-opus-4-8",
-            max_tokens=4000,
-            # synthesis (any call after results are in) always runs at full
-            # effort: that is where the recommendation is actually written
-            output_config={"effort": first_effort if iterations == 1 else "medium"},
+        use_haiku = haiku_router and iterations == 1
+        call_kwargs: dict = {
+            "model": "claude-haiku-4-5" if use_haiku else "claude-opus-4-8",
+            "max_tokens": 4000,
             # cache breakpoint on system caches tools+system for every call in
             # the loop and across turns (prompt renders tools -> system -> messages)
-            system=[{
+            "system": [{
                 "type": "text",
                 "text": assistant_system_prompt(),
                 "cache_control": {"type": "ephemeral"},
             }],
-            tools=[SEARCH_TOOL, web_tool],
-            messages=messages,
-        ) as stream:
+            "tools": [SEARCH_TOOL, web_tool],
+            "messages": messages,
+        }
+        if not use_haiku:
+            # synthesis (any call after results are in) always runs at full
+            # effort: that is where the recommendation is actually written.
+            # (Haiku 4.5 rejects output_config.effort, so it is Opus-only.)
+            call_kwargs["output_config"] = {"effort": first_effort if iterations == 1 else "medium"}
+        with client.messages.stream(**call_kwargs) as stream:
             show_text = stream_first_text or iterations > 1
             for chunk in stream.text_stream:
                 if chunk and show_text:
@@ -702,6 +734,15 @@ def run_assistant(query: str, history: list | None, emit=None) -> dict:
             continue
 
         tool_uses = [b for b in response.content if b.type == "tool_use"]
+
+        # the Haiku router exists only to emit a search call fast; if it chose
+        # to answer instead, discard that answer and redo the call on Opus so
+        # the reply quality is exactly what it would have been without Haiku
+        if use_haiku and not tool_uses:
+            haiku_router = False
+            iterations -= 1
+            timings.append(("haiku_fallback", 0.0, "no tool call; redoing on opus"))
+            continue
         if tool_uses and streamed_any:
             # whatever was streamed was a lead-in to a search, not the answer
             emit("text_reset", None)
@@ -1250,6 +1291,12 @@ def add_highlights(flights: list[dict]) -> None:
             f["score"] = 40
 
 
+# expansion phase: ship what's priced at the deadline; one grace extension
+# when nothing has landed at all (a cold proxy handshake can eat seconds)
+EXPANSION_BUDGET_S = 8.0
+EXPANSION_GRACE_S = 7.0
+
+
 def representative_outbounds(flights: list, top_n: int) -> list:
     """Choose WHICH outbounds get their returns priced.
 
@@ -1297,19 +1344,86 @@ def representative_outbounds(flights: list, top_n: int) -> list:
     return chosen
 
 
-class RoundTripSearch(SearchFlights):
-    """SearchFlights that expands a REPRESENTATIVE outbound set and keeps the
-    full outbound list, so unexpanded outbounds can still ship with their
-    honest "from" totals instead of vanishing."""
+class RepresentativeSearch(SearchFlights):
+    """SearchFlights with three app-side fixes to next-leg expansion:
+
+    1. Round trips expand a REPRESENTATIVE outbound set (not the N cheapest)
+       and keep the full outbound list so unexpanded outbounds still ship
+       with honest "from" totals.
+    2. Workers INHERIT the search's identity. fli's pool threads had no
+       bound identity, so each worker checked out "the warmest" — usually
+       right, but nondeterministic the moment two searches overlap.
+    3. Expansion fan-out capped at 6 concurrent requests — a browser's
+       per-host connection count — now that per-thread handles actually
+       let them overlap (see _identity_session).
+
+    This reimplements fli's _expand_multi_leg loop; if fli's version grows
+    new behavior, revisit this override.
+    """
 
     last_outbounds: list = []
 
-    def _expand_multi_leg(self, flights, filters, *, top_n, **kw):
+    def _expand_multi_leg(self, flights, filters, *, top_n,
+                          currency=None, language=None, country=None):
+        num_segments = len(filters.flight_segments)
         selected = sum(1 for s in filters.flight_segments if s.selected_flight is not None)
-        if selected == 0 and len(filters.flight_segments) == 2:
+        if selected >= num_segments - 1:
+            return flights
+        if selected == 0 and num_segments == 2:
             self.last_outbounds = list(flights)
             flights = representative_outbounds(flights, top_n)
-        return super()._expand_multi_leg(flights, filters, top_n=top_n, **kw)
+        parent_ident = getattr(_local, "identity", None)
+        candidates = list(flights[:top_n])
+
+        def expand(outbound):
+            if parent_ident is not None:
+                _local.identity = parent_ident  # same visitor, own curl handle
+            next_filters = copy.deepcopy(filters)
+            next_filters.flight_segments[selected].selected_flight = outbound
+            sub = self._fetch_flights(next_filters, currency=currency, language=language,
+                                      country=country, capture_session=False)
+            if sub is None:
+                return outbound, None
+            if selected + 1 < num_segments - 1:
+                return outbound, self._expand_multi_leg(
+                    sub, next_filters, top_n=top_n,
+                    currency=currency, language=language, country=country)
+            return outbound, sub
+
+        # Budgeted harvest: a couple of slow-pathed or retried expansions used
+        # to hold the WHOLE search hostage (runs measured 6.9-17.8s on the
+        # same data). Ship every pairing that's ready at the deadline; the
+        # stragglers simply stay in more_outbounds with from-prices, one tap
+        # from priced. Zero successes extend the wait rather than fail fast.
+        import concurrent.futures as _cf
+        ex = _get_executor()
+        pending = {ex.submit(expand, ob) for ob in candidates}
+        expansions, first_exc, graced = [], None, False
+        deadline = time.monotonic() + EXPANSION_BUDGET_S
+        while pending:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                if expansions or graced:
+                    break
+                graced = True  # nothing landed yet: extend once, then ship regardless
+                deadline = time.monotonic() + EXPANSION_GRACE_S
+                remaining = EXPANSION_GRACE_S
+            done, pending = _cf.wait(pending, timeout=remaining,
+                                     return_when=_cf.FIRST_COMPLETED)
+            for f in done:
+                try:
+                    expansions.append(f.result())
+                except Exception as e:  # noqa: BLE001 — surfaced below if nothing worked
+                    first_exc = first_exc or e
+        combos = []
+        for outbound, nxt in expansions:
+            if nxt is None:
+                continue
+            for n_ in nxt:
+                combos.append((outbound,) + n_ if isinstance(n_, tuple) else (outbound, n_))
+        if not combos and first_exc is not None:
+            raise first_exc  # every expansion failed: let the ladder retire the identity
+        return combos
 
 
 def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy,
@@ -1356,13 +1470,11 @@ def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy
 def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: str) -> dict:
     filters = build_filters(spec, origins, destinations, show_all_results=True)
     sort = SORT_MAP.get(spec.get("sort"), SortBy.CHEAPEST)
-    searcher = RoundTripSearch()
-    # each expansion re-posts the whole query with an outbound selected, so
-    # multi-airport pairs (NYC x London) make every request bigger and slower:
-    # at 10 expansions that burst timed out 3/3 through the proxy on July 25
-    # while single-airport pairs sailed. Scale expansions to request weight.
-    top_n = 10 if len(origins) * len(destinations) == 1 else 8
-    results = run_search(searcher, filters, sort, top_n=top_n)
+    searcher = RepresentativeSearch()
+    # expansions run genuinely in parallel now (per-thread curl handles), so
+    # 10 costs about what 2 did serially; the July 25 multi-airport timeouts
+    # were the serialized fan-out, not the count
+    results = run_search(searcher, filters, sort, top_n=10)
 
     if not results:
         return {
@@ -1441,7 +1553,7 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
             # every return that pairs with THIS outbound, each priced as the
             # real total so the cost of a better time is visible
             options = []
-            for ret, total in g["returns"][:12]:
+            for ret, total in g["returns"][:20]:
                 ret_f = serialize_flight(ret, spec.get("cabin"))
                 ret_f["total_price"] = total
                 ret_f["extra_over_best"] = round((total or 0) - (best_total or 0))
@@ -1535,6 +1647,15 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
             "message": message,
             "results": itineraries,
             "more_outbounds": extras,
+            # everything /api/returns needs to price any outbound on demand,
+            # so the board never depends on server-side session state
+            "spec_echo": {k: spec.get(k) for k in
+                          ("cabin", "max_stops", "airlines_include", "airlines_exclude",
+                           "alliances", "max_price", "adults", "children")
+                          } | {"origins": [a.name for a in origins],
+                               "destinations": [a.name for a in destinations],
+                               "departure_date": dep_date, "return_date": ret_date,
+                               "trip_type": "round_trip"},
         }
 
     strict = [r for r in results if arrival_ok(r, out_target, aw)]
@@ -1701,7 +1822,11 @@ def search_multi_city(spec: dict, currency: str) -> dict:
     with _breaker_lock:
         rough_weather = _breaker["consecutive"] > 0 or _breaker["open_until"] > time.monotonic()
     fanout = 4 if rough_weather else 6
-    results = run_search(SearchFlights(), filters, sort, top_n=fanout, budget_s=45.0)
+    # RepresentativeSearch for the parallel expansion + identity inheritance.
+    # (For 2-leg trips its representative reorder of leg-1 candidates fires
+    # too — deliberate: the expansion set should represent the leg, not just
+    # be its cheapest corner.)
+    results = run_search(RepresentativeSearch(), filters, sort, top_n=fanout, budget_s=45.0)
 
     if not results:
         price_pool.shutdown(wait=False, cancel_futures=True)
@@ -2081,6 +2206,121 @@ async def search_stream(request: Request):
         "Cache-Control": "no-cache",
         "X-Accel-Buffering": "no",  # don't let a proxy sit on the stream
     })
+
+
+def fetch_returns_for_outbound(spec: dict, legs_in: list, from_total=None) -> dict:
+    """Every return Google pairs with ONE outbound, priced as pairing totals.
+
+    This is fli's expansion request, reconstructed statelessly from the
+    spec_echo the search shipped plus the outbound's serialized legs — so
+    the board can price any from-priced row on demand without a model turn
+    and without server-side session state.
+    """
+    import types as _types
+
+    spec = {**spec, "trip_type": "round_trip"}
+    origins, _bad = resolve_airports(spec.get("origins"))
+    destinations, _bad2 = resolve_airports(spec.get("destinations"))
+    if not origins or not destinations:
+        raise ValueError("unrecognized airports in spec")
+    filters = build_filters(spec, origins, destinations, show_all_results=True)
+
+    def leg_ns(l: dict):
+        code = str(l.get("airline_code") or "").strip().upper()
+        airline = getattr(Airline, code, None) or getattr(Airline, "_" + code, None)
+        if airline is None or not l.get("departure"):
+            raise ValueError(f"unrecognized leg: {code} {l.get('flight_number')}")
+        return _types.SimpleNamespace(
+            departure_airport=getattr(Airport, str(l["from"]).upper()),
+            arrival_airport=getattr(Airport, str(l["to"]).upper()),
+            departure_datetime=datetime.fromisoformat(l["departure"]),
+            arrival_datetime=datetime.fromisoformat(l["arrival"]) if l.get("arrival") else None,
+            airline=airline,
+            flight_number=str(l.get("flight_number") or ""),
+        )
+
+    sel_legs = [leg_ns(l) for l in legs_in]
+    filters.flight_segments[0].selected_flight = _types.SimpleNamespace(legs=sel_legs)
+
+    searcher = RepresentativeSearch()
+    rows, last_exc = None, None
+    for i in range(2):
+        breaker_wait(1.5 if i == 0 else 6.0)
+        checkout_identity()
+        try:
+            rows = searcher._fetch_flights(filters, currency="USD", language=None,
+                                           country=None, capture_session=False)
+        except SearchClientError as e:
+            last_exc = e
+            retire_identity()
+            note_search_outcome(False)
+            time.sleep(0.5)
+            continue
+        if rows:
+            note_search_outcome(True)
+            break
+        retire_identity()
+        note_search_outcome(False)
+    if not rows:
+        if last_exc:
+            raise last_exc
+        return {"return_options": [], "cheapest_total": None,
+                "message": "Google returned no pairings for that outbound just now."}
+
+    options, seen = [], set()
+    for ret in rows:
+        if ret.price is None or not ret.legs:
+            continue
+        key = (ret.legs[0].departure_datetime.isoformat() if ret.legs[0].departure_datetime else "",
+               tuple((lg.airline.name, lg.flight_number) for lg in ret.legs))
+        if key in seen:
+            continue
+        seen.add(key)
+        # in an expansion the return row carries the pairing's cumulative total
+        total = max(p for p in [from_total, ret.price, 0] if p is not None)
+        rf = serialize_flight(ret, spec.get("cabin"))
+        rf["total_price"] = total
+        rf["booking_url"] = (itinerary_url([sel_legs, ret.legs], spec.get("cabin"), trip_type=1)
+                             or rf["booking_url"])
+        options.append(rf)
+
+    cheapest = min((o["total_price"] for o in options), default=None)
+    for o in options:
+        o["extra_over_best"] = round((o["total_price"] or 0) - (cheapest or 0))
+    options = order_by_value(
+        options,
+        price_of=lambda r: r.get("total_price"),
+        duration_of=lambda r: r.get("duration"),
+        stops_of=lambda r: r.get("stops") or 0,
+        warnings_of=lambda r: r.get("warnings"),
+        requested_sort=None,
+    )[:40]
+    return {
+        "return_options": options,
+        "cheapest_total": cheapest,
+        "currency": options[0]["currency"] if options else "USD",
+        "count": len(options),
+    }
+
+
+@app.post("/api/returns")
+async def price_returns(request: Request):
+    from starlette.concurrency import run_in_threadpool
+
+    try:
+        body = await request.json()
+        spec = body.get("spec") or {}
+        legs_in = (body.get("outbound") or {}).get("legs") or []
+        if not legs_in or not spec.get("origins") or not spec.get("destinations"):
+            return JSONResponse({"error": "spec and outbound legs are required"}, status_code=400)
+        payload = await run_in_threadpool(
+            fetch_returns_for_outbound, spec, legs_in, body.get("from_total"))
+        return JSONResponse(payload)
+    except SearchClientError:
+        return JSONResponse({"error": "Google is slow right now; try that outbound again in a moment."},
+                            status_code=502)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @app.post("/api/search")

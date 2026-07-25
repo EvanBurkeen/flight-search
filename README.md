@@ -151,8 +151,8 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
 | Layer | What |
 |---|---|
 | Hosting | Vercel serverless (Python), auto-deploys on push to `main` (`EvanBurkeen/flight-search`) |
-| Backend | [api/index.py](api/index.py) — FastAPI. `/api/search` (JSON) is what the frontend uses; `/api/search/stream` (SSE) still works and is exercised by the parked `streaming-experiment` branch |
-| LLM | `claude-opus-4-8` agent loop, `max_retries=4`, effort `medium`, prompt-cached system+tools |
+| Backend | [api/index.py](api/index.py) — FastAPI. `/api/search` (JSON) is what the frontend uses; `/api/returns` prices every return Google pairs with ONE outbound (no model in the loop — the board's tap-to-price, ~1-4s); `/api/search/stream` (SSE) still works and is exercised by the parked `streaming-experiment` branch |
+| LLM | `claude-opus-4-8` agent loop, `max_retries=4`, effort `medium`, prompt-cached system+tools; plainly-route-shaped queries emit their first tool call via `claude-haiku-4-5` (no `output_config` — Haiku rejects effort), with an automatic Opus redo if Haiku answers in prose instead of calling the tool |
 | Flight data | [`fli`](https://github.com/punitarani/fli) (PyPI `flights`) — reverse-engineered Google Flights |
 | Web context | Anthropic server-side `web_search` tool (max 3/turn) for event dates, venues, etc. |
 | Coordinates | `airportsdata` (IATA → lat/lon) for route maps |
@@ -232,11 +232,13 @@ views (global toggle + per-section override) · top-picks preview with "Show all
 and instant client-side filters (sort, departure window, duration, airline, alliance,
 stops — options derived from the data; they filter only what the server
 shipped, which is why the cut keeps nonstops/cheapest/fastest) · round-trip
-**mix & match board** (expanded view: every outbound on the left — from-priced
-rows included, with a one-tap "Price the returns for this flight" that asks the
-assistant — the selected outbound's returns on the right, each priced as the
-real pairing total, sticky chosen-pairing bar with Book; top-pick cards with
-the per-card return picker stay as the collapsed view) · Best value badge ·
+**mix & match board** (expanded view: every outbound on the left — tapping a
+from-priced row prices its returns IN PLACE via `/api/returns`, ~1-4s, no
+model turn, with an ask-the-concierge fallback — the selected outbound's
+returns on the right, each priced as the real pairing total and filterable/
+sortable, "Load every return" for the full Google list, sticky chosen-pairing
+bar with Book; top-pick cards with the per-card return picker stay as the
+collapsed view) · Best value badge ·
 Book deep-links straight to the chosen itinerary on Google · flexible-date grids show best-value dates
 first (within 15% of cheapest) and expand to month calendars heatmapped by price
 (tiers relative to the window's cheapest; cheapest days outlined; round-trip
@@ -277,7 +279,10 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
   browser fingerprint. `checkout_identity()` prefers the most recently
   SUCCESSFUL one so its TLS connection through the proxy is reused — that alone
   took searches from ~6s to 0.4–2.3s, since a cold residential handshake costs
-  seconds. Any refusal RETIRES that identity, so the retry is a genuinely new
+  seconds. An identity holds one curl handle PER THREAD (same exit, same
+  fingerprint, cookies cloned from its primary jar): a single shared handle
+  silently serialized every parallel code path in fli — see Changelog July 25,
+  round trips v2 — so never "simplify" back to one session per identity. Any refusal RETIRES that identity, so the retry is a genuinely new
   visitor. Do not "fix" a refusal by retrying on the same session: refusals are
   session-sticky (a flagged session failed 64/64 while fresh ones passed 20/32
   in the same window — see Changelog July 24).
@@ -293,6 +298,34 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
   lakes; run it, then bump the `?v=N` cache-buster on the script tag in index.html).
 
 ## Changelog
+
+**July 25, 2026 (round trips v2: optionality on demand, and the serialization bug)**
+Evan: still not rich or fast enough to replace Google Flights for round trips.
+Two root causes found and fixed:
+- **THE latency bug: expansions were serial, not parallel.** The identity
+  patch handed ONE shared curl session to every fli worker thread, so the
+  "parallel" return-expansion fan-out queued on a single libcurl handle
+  (measured: 10 expansions completing at 1.5s, 2.5s ... 36.7s — 37.4s total).
+  `_identity_session` now keys handles per (identity, thread) — same exit IP,
+  same fingerprint, cookies cloned from the primary jar, like a browser's
+  parallel connections — and `RepresentativeSearch` reimplements the expansion
+  loop with identity inheritance, a 6-connection browser-like cap, and a
+  budgeted harvest (8s + one 7s grace when nothing landed) that ships every
+  pairing that's ready and leaves stragglers from-priced. Same search:
+  **37.4s -> 1.2-5.5s typical**. Multi-city and separate-ticket leg pricing
+  ride the same fix; the adaptive top_n hack is gone (10 everywhere).
+- **Tap-to-price (`/api/returns`):** any from-priced outbound now prices in
+  place in ~1-4s with no model turn — the endpoint rebuilds fli's expansion
+  request statelessly from `spec_echo` (shipped on every itineraries payload)
+  plus the outbound's serialized legs, and returns Google's FULL return page
+  (up to 40, value-ordered, each with its own tfs deep link). Priced groups
+  get "Load every return" via the same endpoint; initial per-outbound returns
+  raised 12 -> 20; the returns panel now honors the stops/airline/alliance/
+  duration filters and sort. The ask-the-concierge chip remains as fallback.
+- **First-call routing:** plainly-route-shaped queries emit their opening
+  search call via Haiku 4.5 instead of Opus (the single largest fixed cost of
+  a simple turn); if Haiku answers in prose instead of calling the tool, the
+  call is silently redone on Opus, so advice quality is untouched.
 
 **July 25, 2026 (round-trip optionality)** — Evan: the round-trip display
 "doesn't give me enough optionality"; travelers pick per direction, not from

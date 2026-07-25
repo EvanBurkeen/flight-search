@@ -432,6 +432,9 @@
       border: 1px dashed var(--line-strong); border-radius: 7px; padding: 0.9rem;
       font-size: 0.82rem; display: flex; flex-direction: column; gap: 0.6rem; align-items: flex-start;
     }
+    .rt-unpriced-inner { display: flex; flex-direction: column; gap: 0.6rem; align-items: flex-start; }
+    .rt-dot { display: inline-block; vertical-align: middle; margin-right: 0.4rem; }
+    .rt-more { margin-top: 0.15rem; }
     .rt-summary {
       display: flex; justify-content: space-between; align-items: center; gap: 0.9rem; flex-wrap: wrap;
       border: 1px solid var(--line-strong); background: var(--panel); border-radius: 8px;
@@ -934,8 +937,8 @@
                         <div class="rt-col-head">2 · Pick the return <span class="rt-col-note" x-text="rtRetNote(sec)"></span></div>
                         <template x-if="rtSelected(sec) && !rtSelected(sec).unpriced">
                           <div class="rt-rows">
-                            <template x-for="(r, ri) in (rtSelected(sec).return_options || [])" :key="'r' + ri">
-                              <button class="rt-row" :class="isPickedReturn(rtSelected(sec), ri) ? 'sel' : ''" @click="pickReturn(rtSelected(sec), ri)">
+                            <template x-for="(r, ri) in rtReturns(sec)" :key="'r' + ri">
+                              <button class="rt-row" :class="isPickedOpt(rtSelected(sec), r) ? 'sel' : ''" @click="pickReturnOpt(rtSelected(sec), r)">
                                 <div class="rt-row-main">
                                   <span class="rt-times" x-text="formatTime(r.legs[0].departure) + ' → ' + formatTime(r.legs[r.legs.length-1].arrival) + arrivalDay(r)"></span>
                                   <span class="rt-price total" x-text="formatPrice(r.total_price, r.currency)"></span>
@@ -947,12 +950,26 @@
                                 </div>
                               </button>
                             </template>
+                            <div class="rt-empty" x-show="!rtReturns(sec).length">No returns match these filters. Loosen them to see the rest.</div>
+                            <button class="show-all rt-more" x-show="!rtSelected(sec)._full"
+                                    :disabled="rtFetchState(sec) === 'loading'"
+                                    @click="rtFetchReturns(sec, rtSelected(sec))"
+                                    x-text="rtFetchState(sec) === 'loading' ? 'Loading every return…' : 'Load every return Google pairs with this outbound'"></button>
                           </div>
                         </template>
                         <template x-if="rtSelected(sec) && rtSelected(sec).unpriced">
                           <div class="rt-unpriced-panel">
-                            <p>This outbound exists at <b x-text="formatPrice(rtSelected(sec).from_total, rtCurrency(rtSelected(sec)))"></b> round trip, but Google did not price its return pairings in this search.</p>
-                            <button class="chip" @click="rtAskReturns(sec)" :disabled="isLoading">Price the returns for this flight</button>
+                            <template x-if="rtFetchState(sec) === 'loading'">
+                              <p><span class="loading-dot rt-dot"></span> Pricing the returns for this flight…</p>
+                            </template>
+                            <template x-if="rtFetchState(sec) !== 'loading'">
+                              <div class="rt-unpriced-inner">
+                                <p>This outbound exists at <b x-text="formatPrice(rtSelected(sec).from_total, rtCurrency(rtSelected(sec)))"></b> round trip.
+                                  <span x-show="rtFetchState(sec) === 'error'">Google didn't answer just now; it usually does on a second try.</span></p>
+                                <button class="chip" @click="rtPrice(sec)" :disabled="isLoading">Price the returns for this flight</button>
+                                <button class="chip" x-show="rtFetchState(sec) === 'error'" @click="rtAskReturns(sec)" :disabled="isLoading">Ask the concierge instead</button>
+                              </div>
+                            </template>
                           </div>
                         </template>
                         <div class="rt-empty" x-show="!rtSelected(sec)">Pick an outbound on the left.</div>
@@ -1770,8 +1787,12 @@
         },
 
         rtAll(sec) {
-          const more = (sec.more_outbounds || []).map(x =>
-            ({ outbound: x, unpriced: true, from_total: x.from_total, currency: x.currency }));
+          const fetched = sec._fetched || {};
+          const more = (sec.more_outbounds || []).map(x => {
+            const w = { outbound: x, unpriced: true, from_total: x.from_total, currency: x.currency };
+            // a row priced on demand via /api/returns graduates to a full group
+            return fetched[this.rtKey(w)] || w;
+          });
           return (sec.results || []).concat(more);
         },
 
@@ -1809,7 +1830,100 @@
           return !!s && this.rtKey(s) === this.rtKey(g);
         },
 
-        rtSelect(sec, g) { sec._selKey = this.rtKey(g); },
+        rtSelect(sec, g) {
+          sec._selKey = this.rtKey(g);
+          // tapping a from-priced row IS the request to price it
+          if (g.unpriced && sec.spec_echo && !(sec._fetched || {})[sec._selKey]
+              && !(sec._fetching || {})[sec._selKey] && !(sec._fetchErr || {})[sec._selKey]) {
+            this.rtFetchReturns(sec, g);
+          }
+        },
+
+        rtFetchState(sec) {
+          const g = this.rtSelected(sec);
+          if (!g) return 'idle';
+          const key = this.rtKey(g);
+          return (sec._fetching || {})[key] ? 'loading'
+            : (sec._fetchErr || {})[key] ? 'error' : 'idle';
+        },
+
+        rtPrice(sec) {
+          const g = this.rtSelected(sec);
+          if (!g) return;
+          if (sec.spec_echo) this.rtFetchReturns(sec, g);
+          else this.rtAskReturns(sec);   // sections from before spec_echo shipped
+        },
+
+        async rtFetchReturns(sec, g) {
+          const key = this.rtKey(g);
+          if ((sec._fetching || {})[key]) return;
+          sec._fetching = { ...(sec._fetching || {}), [key]: true };
+          const err = { ...(sec._fetchErr || {}) }; delete err[key]; sec._fetchErr = err;
+          try {
+            const resp = await fetch('/api/returns', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                spec: sec.spec_echo,
+                from_total: g.unpriced ? g.from_total : g.cheapest_total,
+                outbound: { legs: (g.outbound.legs || []).map(l => ({
+                  airline_code: l.airline_code, flight_number: l.flight_number,
+                  departure: l.departure, arrival: l.arrival, from: l.from, to: l.to })) },
+              }),
+            });
+            const data = await resp.json();
+            if (!resp.ok || data.error || !(data.return_options || []).length) {
+              throw new Error(data.error || 'no returns');
+            }
+            const best = data.return_options[0];
+            if (g.unpriced) {
+              sec._fetched = { ...(sec._fetched || {}), [key]: {
+                outbound: g.outbound, return_options: data.return_options,
+                cheapest_total: data.cheapest_total, currency: data.currency,
+                total_price: best.total_price, return: best,
+                booking_url: best.booking_url, _full: true,
+              } };
+            } else {
+              // keep the traveler's pick when the fuller list still has it
+              const cur = g.return;
+              g.return_options = data.return_options;
+              const match = cur && data.return_options.find(r =>
+                r.legs[0].departure === cur.legs[0].departure
+                && r.legs[0].flight_number === cur.legs[0].flight_number);
+              const pick = match || best;
+              g.return = pick; g.total_price = pick.total_price;
+              if (pick.booking_url) g.booking_url = pick.booking_url;
+              g._full = true;
+            }
+          } catch (e) {
+            sec._fetchErr = { ...(sec._fetchErr || {}), [key]: true };
+          } finally {
+            const f = { ...(sec._fetching || {}) }; delete f[key]; sec._fetching = f;
+          }
+        },
+
+        rtReturns(sec) {
+          const g = this.rtSelected(sec);
+          if (!g || g.unpriced) return [];
+          const flt = sec._filters || {};
+          let rows = (g.return_options || []).filter(r => this._rowPass(r,
+            { stops: flt.stops, airline: flt.airline, alliance: flt.alliance, maxDur: flt.maxDur }));
+          if (flt.sort === 'price') rows = [...rows].sort((a, b) => (a.total_price ?? 1e9) - (b.total_price ?? 1e9));
+          else if (flt.sort === 'duration') rows = [...rows].sort((a, b) => (a.duration ?? 1e9) - (b.duration ?? 1e9));
+          else if (flt.sort === 'departure') rows = [...rows].sort((a, b) => (a.legs[0].departure || '').localeCompare(b.legs[0].departure || ''));
+          return rows;
+        },
+
+        pickReturnOpt(g, r) {
+          g.return = r;
+          if (r.total_price != null) g.total_price = r.total_price;
+          if (r.booking_url) g.booking_url = r.booking_url;
+        },
+
+        isPickedOpt(g, r) {
+          const c = g.return;
+          return !!c && r.legs[0].departure === c.legs[0].departure
+            && r.legs[0].flight_number === c.legs[0].flight_number;
+        },
 
         rtCurrency(g) { return g.currency || (g.outbound || {}).currency || 'USD'; },
 
@@ -1826,10 +1940,12 @@
         rtRetNote(sec) {
           const g = this.rtSelected(sec);
           if (!g || g.unpriced) return '';
-          const n = (g.return_options || []).length;
+          const total = (g.return_options || []).length;
+          const shown = this.rtReturns(sec).length;
           const legs = (g.return || {}).legs || [];
           const d = legs.length ? this.formatDate((legs[0].departure || '').slice(0, 10)) : '';
-          return '· ' + n + ' option' + (n === 1 ? '' : 's') + (d ? ' · ' + d : '');
+          const count = shown < total ? shown + ' of ' + total + ' options' : total + ' option' + (total === 1 ? '' : 's');
+          return '· ' + count + (d ? ' · ' + d : '');
         },
 
         rtAskReturns(sec) {
