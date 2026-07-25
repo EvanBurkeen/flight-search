@@ -41,6 +41,12 @@
       --brass: #8a6d2f;
       --brass-soft: rgba(138, 109, 47, 0.4);
       --green: #2c4636;
+      /* calendar heat tiers: 0 = at/near the cheapest, 4 = the priciest days */
+      --heat0: rgba(60, 110, 47, 0.24);
+      --heat1: rgba(60, 110, 47, 0.12);
+      --heat2: rgba(28, 26, 21, 0.04);
+      --heat3: rgba(177, 71, 31, 0.10);
+      --heat4: rgba(177, 71, 31, 0.20);
       --card-shadow: 0 1px 2px rgba(90, 70, 40, 0.05), 0 8px 22px -12px rgba(90, 70, 40, 0.28);
       --card-shadow-hover: 0 2px 4px rgba(90, 70, 40, 0.06), 0 14px 30px -12px rgba(90, 70, 40, 0.35);
       --serif: Fraunces, Georgia, "Times New Roman", serif;
@@ -364,6 +370,40 @@
     .date-cell .p { font-size: 0.9rem; font-weight: 700; }
     .date-cell.cheapest .p { color: var(--good); }
 
+    /* expanded flexible-date view: month calendars heatmapped by price */
+    .cal-wrap { display: flex; flex-wrap: wrap; gap: 1.1rem 1.4rem; align-items: flex-start; }
+    .cal-month { flex: 1 1 16rem; min-width: 15rem; max-width: 21rem; }
+    .cal-title { font-family: var(--serif); font-weight: 600; font-size: 0.95rem; margin-bottom: 0.45rem; }
+    .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; }
+    .cal-wd {
+      font-size: 0.56rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
+      opacity: 0.55; text-align: center; padding-bottom: 2px;
+    }
+    .cal-cell {
+      border: 1px solid transparent; border-radius: 5px; background: none;
+      min-height: 2.6rem; padding: 0.22rem 0.1rem 0.28rem;
+      display: flex; flex-direction: column; align-items: center; justify-content: space-between;
+      font-variant-numeric: tabular-nums; transition: border-color 0.15s, box-shadow 0.15s;
+    }
+    .cal-cell .cal-day { font-size: 0.6rem; opacity: 0.6; line-height: 1; }
+    .cal-cell .cal-price { font-size: 0.66rem; font-weight: 700; line-height: 1.1; }
+    .cal-cell.pad { visibility: hidden; }
+    .cal-cell.noprice .cal-day { opacity: 0.28; }
+    .cal-cell.h0, .swatch.h0 { background: var(--heat0); }
+    .cal-cell.h1, .swatch.h1 { background: var(--heat1); }
+    .cal-cell.h2, .swatch.h2 { background: var(--heat2); }
+    .cal-cell.h3, .swatch.h3 { background: var(--heat3); }
+    .cal-cell.h4, .swatch.h4 { background: var(--heat4); }
+    .cal-cell.priced { cursor: pointer; }
+    .cal-cell.priced:hover { border-color: var(--accent); box-shadow: 0 2px 8px rgba(177, 71, 31, 0.12); }
+    .cal-cell.cheapest { border-color: var(--good); }
+    .cal-cell.cheapest .cal-price { color: var(--good); }
+    .cal-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 1.2rem; margin-top: 0.65rem; }
+    .cal-legend { display: flex; align-items: center; gap: 4px; font-size: 0.62rem; opacity: 0.8; }
+    .cal-legend .swatch { width: 1.15rem; height: 0.55rem; border-radius: 3px; border: 1px solid var(--line); }
+    .cal-legend .lab { margin: 0 0.25rem; }
+    .cal-note { font-size: 0.72rem; opacity: 0.65; }
+
     .input-area {
       position: fixed; left: 0; right: 0; bottom: 0; z-index: 7;
       background-color: var(--bg);
@@ -490,6 +530,11 @@
       --brass: #c9a55a;
       --brass-soft: rgba(201, 165, 90, 0.45);
       --green: #3a5747;
+      --heat0: rgba(168, 210, 154, 0.26);
+      --heat1: rgba(168, 210, 154, 0.13);
+      --heat2: rgba(236, 228, 203, 0.05);
+      --heat3: rgba(217, 122, 74, 0.14);
+      --heat4: rgba(217, 122, 74, 0.26);
       --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.25), 0 10px 26px -14px rgba(0, 0, 0, 0.6);
       --card-shadow-hover: 0 2px 4px rgba(0, 0, 0, 0.3), 0 16px 34px -14px rgba(0, 0, 0, 0.7);
       --paper: radial-gradient(circle at 85% -10%, rgba(217, 122, 74, 0.10), transparent 45%);
@@ -890,14 +935,53 @@
                   </div>
                 </template>
 
-                <!-- flexible-date price grid -->
+                <!-- flexible-date prices: best-value chips collapsed, calendar heatmap expanded -->
                 <template x-if="sec.type === 'dates' && sec.dates && sec.dates.length">
-                  <div class="date-grid">
-                    <template x-for="(d, j) in visibleDates(sec)" :key="j">
-                      <button class="date-cell" :class="d.cheapest ? 'cheapest' : ''" @click="pickDate(d)" :disabled="isLoading">
-                        <span class="d" x-text="formatDate(d.date) + (d.return_date ? ' → ' + formatDate(d.return_date) : '')"></span>
-                        <span class="p" x-text="formatPrice(d.price, d.currency)"></span>
-                      </button>
+                  <div>
+                    <template x-if="!sec._expanded">
+                      <div class="date-grid">
+                        <template x-for="(d, j) in visibleDates(sec)" :key="j">
+                          <button class="date-cell" :class="d.cheapest ? 'cheapest' : ''" @click="pickDate(d)" :disabled="isLoading">
+                            <span class="d" x-text="formatDate(d.date) + (d.return_date ? ' → ' + formatDate(d.return_date) : '')"></span>
+                            <span class="p" x-text="formatPrice(d.price, d.currency)"></span>
+                          </button>
+                        </template>
+                      </div>
+                    </template>
+                    <template x-if="sec._expanded">
+                      <div>
+                        <div class="cal-wrap">
+                          <template x-for="m in calendarMonths(sec)" :key="m.key">
+                            <div class="cal-month">
+                              <div class="cal-title" x-text="m.label"></div>
+                              <div class="cal-grid">
+                                <template x-for="(wd, wi) in ['S', 'M', 'T', 'W', 'T', 'F', 'S']" :key="'wd' + wi">
+                                  <div class="cal-wd" x-text="wd"></div>
+                                </template>
+                                <template x-for="(c, ci) in m.cells" :key="'c' + ci">
+                                  <button class="cal-cell"
+                                          :class="c.d ? 'priced h' + c.d.heat + (c.d.cheapest ? ' cheapest' : '') : (c.day ? 'noprice' : 'pad')"
+                                          :disabled="!c.d || isLoading"
+                                          :title="c.d ? calCellTitle(c.d) : ''"
+                                          :aria-label="c.d ? calCellTitle(c.d) : ''"
+                                          @click="c.d && pickDate(c.d)">
+                                    <span class="cal-day" x-text="c.day || ''"></span>
+                                    <span class="cal-price" x-text="c.d ? calPrice(c.d) : ''"></span>
+                                  </button>
+                                </template>
+                              </div>
+                            </div>
+                          </template>
+                        </div>
+                        <div class="cal-foot">
+                          <div class="cal-legend">
+                            <span class="lab">Cheapest</span>
+                            <span class="swatch h0"></span><span class="swatch h1"></span><span class="swatch h2"></span><span class="swatch h3"></span><span class="swatch h4"></span>
+                            <span class="lab">Priciest</span>
+                          </div>
+                          <div class="cal-note" x-text="calNote(sec)"></div>
+                        </div>
+                      </div>
                     </template>
                   </div>
                 </template>
@@ -1156,6 +1240,68 @@
           return all.filter(d => keep.has(d.date + '|' + (d.return_date || '')));
         },
 
+        // the calendar heatmap behind "Show the full calendar": months of the
+        // searched window, each day tinted by how its fare compares to the
+        // window's cheapest (tiers are ratios, so one absurd outlier cannot
+        // wash out the scale)
+        calendarMonths(sec) {
+          const byDate = {};   // departure date -> cheapest pairing that day
+          for (const d of (sec.dates || [])) {
+            const cur = byDate[d.date];
+            if (!cur || d.price < cur.price) byDate[d.date] = d;
+          }
+          const entries = Object.values(byDate);
+          if (!entries.length) return [];
+          const min = Math.min(...entries.map(d => d.price));
+          const heat = p => p <= min * 1.05 ? 0 : p <= min * 1.15 ? 1 : p <= min * 1.35 ? 2 : p <= min * 1.65 ? 3 : 4;
+          const months = [];
+          let cur = null;
+          for (const key of Object.keys(byDate).sort()) {
+            const [y, m, day] = key.split('-').map(Number);
+            if (!cur || cur.y !== y || cur.m !== m) {
+              cur = {
+                key: y + '-' + m, y, m, days: {},
+                label: new Date(y, m - 1, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' }),
+              };
+              months.push(cur);
+            }
+            cur.days[day] = { ...byDate[key], heat: heat(byDate[key].price) };
+          }
+          for (const mo of months) {
+            const firstDow = new Date(mo.y, mo.m - 1, 1).getDay();
+            const nDays = new Date(mo.y, mo.m, 0).getDate();
+            mo.cells = [];
+            for (let i = 0; i < firstDow; i++) mo.cells.push({ day: null, d: null });
+            for (let day = 1; day <= nDays; day++) mo.cells.push({ day, d: mo.days[day] || null });
+          }
+          return months;
+        },
+
+        calCellTitle(d) {
+          let t = this.formatDate(d.date);
+          if (d.return_date) t += ' → ' + this.formatDate(d.return_date);
+          t += ' · ' + this.formatPrice(d.price, d.currency);
+          if (d.return_date) t += ' round trip';
+          return t;
+        },
+
+        calNote(sec) {
+          const withRet = (sec.dates || []).filter(d => d.return_date);
+          if (!withRet.length) return 'Tap a date to see the flights.';
+          const nights = new Set(withRet.map(d =>
+            Math.round((new Date(d.return_date + 'T12:00:00') - new Date(d.date + 'T12:00:00')) / 86400000)));
+          if (nights.size !== 1) return 'Round-trip totals. Hover a date for its return day; tap to see the flights.';
+          const n = [...nights][0];
+          return n === 0
+            ? 'Round-trip totals for same-day returns. Tap a date to see the flights.'
+            : 'Round-trip totals for ' + n + '-night trips. Tap a date to see the flights.';
+        },
+
+        calPrice(d) {
+          if (d.price >= 10000) return '$' + Math.round(d.price / 1000) + 'k';
+          return this.formatPrice(d.price, d.currency);
+        },
+
         canExpand(sec) {
           if (sec.type === 'dates') return (sec.dates || []).length > 12;
           return (sec.results || []).length > (this.sectionView(sec) === 'compact' ? 8 : 5);
@@ -1164,7 +1310,7 @@
         expandLabel(sec) {
           if (sec.type === 'dates') {
             return sec._expanded ? 'Show best-value dates only'
-              : 'Show all ' + (sec.dates || []).length + ' dates';
+              : 'Show the full calendar · all ' + (sec.dates || []).length + ' dates';
           }
           return sec._expanded ? 'Show top picks only'
             : 'Show all ' + this.list(sec).length + ' options · filter & sort';

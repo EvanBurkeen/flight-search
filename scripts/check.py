@@ -237,6 +237,25 @@ check("warns that mixed carriers may be separate tickets",
       any("separate tickets" in w for w in it.get("warnings") or []))
 
 # --------------------------------------------------------------------------
+section("Flexible-date grids  — Changelog: 'round-trip grids priced same-day returns'")
+# --------------------------------------------------------------------------
+# Searched without a duration, Google's date grid prices departing AND flying
+# home on the same date. Every "round trip" fare in the calendar was for a
+# 0-night stay — understated and unbuyable in spirit.
+_flex = {"from_date": "2026-09-01", "to_date": "2026-09-30"}
+_extra, _assumed = app.flex_grid_params(_flex, is_round_trip=True)
+check("a round-trip grid without a trip length prices a real stay, not a same-day return",
+      _extra.get("duration", 0) >= 2, f"duration={_extra.get('duration')}")
+check("...and the assumed nights are surfaced, not silent",
+      _assumed == _extra.get("duration"))
+_extra, _assumed = app.flex_grid_params({**_flex, "trip_length_days": 10}, is_round_trip=True)
+check("an explicit trip length is used verbatim, with nothing to disclose",
+      _extra.get("duration") == 10 and _assumed is None)
+_extra, _assumed = app.flex_grid_params(_flex, is_round_trip=False)
+check("one-way grids take no duration at all",
+      "duration" not in _extra and _assumed is None)
+
+# --------------------------------------------------------------------------
 section("Display details that were each a reported bug")
 # --------------------------------------------------------------------------
 check("digit-leading airline codes lose fli's underscore (_7C -> 7C)",

@@ -26,8 +26,12 @@ if not os.environ.get("ANTHROPIC_API_KEY"):
 
     def stub_parse(query: str):
         q = query.lower()
+        # skip English words that are also real IATA codes ("Show me THE
+        # flights FOR ..." searched Teresina->Fortaleza when a calendar date
+        # was clicked); keep it minimal so DAY/SAT/SUN stay typeable
+        stop = {"THE", "FOR", "AND"}
         codes = [c for c in re.findall(r"\b([A-Z]{3})\b", query.upper())
-                 if hasattr(app_mod.Airport, c)]
+                 if c not in stop and hasattr(app_mod.Airport, c)]
         if len(codes) < 2:
             return []
         d1 = (date.today() + timedelta(days=30)).isoformat()

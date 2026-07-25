@@ -60,8 +60,9 @@ this file, then **"Lessons the hard way"** below before debugging anything.
   gotcha if you go back: mutate Alpine's reactive proxy
   (`this.messages[this.messages.length - 1]`), never the object you pushed.
 - **Roadmap shelf (discussed, not built):** price watches (cron + email),
-  trip memory + login, streaming replies, price-by-date calendar heatmap,
-  real booking via Duffel, search-result caching.
+  trip memory + login, streaming replies, real booking via Duffel.
+  (Search-result caching shipped July 24; the price-by-date calendar heatmap
+  shipped July 25.)
 - **Known trade-offs accepted by Evan:** timeline layover dots use naive local
   times (schematic, not exact); Claude sees only top-6 summaries per search
   (with truncation warning baked in); the value-ranking weights
@@ -138,6 +139,8 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
 - Cabin/dates/stops split the search-cache key; only cosmetic fields do not.
 - Multi-city quotes the cheaper of one-ticket and separate-ticket, and says which.
 - `itinerary_url()` returns None rather than a malformed link; callers fall back.
+- A round-trip date grid prices a real stay (7 nights assumed and disclosed when
+  the model gives none), never Google's same-day-return default.
 
 ## Stack
 
@@ -222,7 +225,9 @@ stops — options derived from the data; they filter only what the server
 shipped, which is why the cut keeps nonstops/cheapest/fastest) · round-trip
 outbound picker with per-return totals and price deltas · Best value badge ·
 Book deep-links straight to the chosen itinerary on Google · flexible-date grids show best-value dates
-first (within 15% of cheapest) · per-flight atlas maps (land+lakes, graticule,
+first (within 15% of cheapest) and expand to month calendars heatmapped by price
+(tiers relative to the window's cheapest; cheapest days outlined; round-trip
+pairings in tooltips) · per-flight atlas maps (land+lakes, graticule,
 sequential longitude unwrapping so every leg takes the short way; outbound solid,
 return dashed; layover dots with durations) · timeline layover rings · suggestion
 chips · search ladder (jump-to index of every results section: fixed rail on
@@ -275,6 +280,22 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
   lakes; run it, then bump the `?v=N` cache-buster on the script tag in index.html).
 
 ## Changelog
+
+**July 25, 2026**
+- Price-by-date calendar heatmap (roadmap item): expanding a flexible-date
+  section now renders real month calendars, each day tinted by how its fare
+  compares to the window's cheapest (ratio tiers, so one outlier cannot wash
+  out the scale); cheapest days outlined, round-trip pairing + total in the
+  tooltip, legend and honest "totals for N-night trips" note. Collapsed
+  best-value chips unchanged.
+- Round-trip date grids no longer price same-day returns: searched without a
+  duration, Google's grid quotes out-and-back-on-one-date fares, so a flexible
+  round trip with no trip_length_days understated every price. Now assumes 7
+  nights and says so to both the user (assumptions line, calendar note) and the
+  model (search-result note). `flex_grid_params` + 4 checks in check.py.
+- Dev stub: English words that are also IATA codes (THE, FOR) are no longer
+  parsed as airports, so clicking a calendar date locally no longer searches
+  Teresina to Fortaleza.
 
 **July 24, 2026** — long session with Evan; grouped. The *causes* are captured
 under "Lessons the hard way" above, which is the part worth reading.

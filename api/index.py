@@ -1675,14 +1675,33 @@ def search_multi_city(spec: dict, currency: str) -> dict:
     }
 
 
+DEFAULT_FLEX_TRIP_NIGHTS = 7
+
+
+def flex_grid_params(flex: dict, is_round_trip: bool) -> tuple[dict, int | None]:
+    """SearchDates params for a flexible window, plus the nights we assumed.
+
+    A round-trip grid searched WITHOUT a duration prices SAME-DAY returns
+    (out and back on one date), which is never what "flexible round trip"
+    means and quietly understates every fare. When the model omits
+    trip_length_days, assume a week and surface the assumption.
+    """
+    extra: dict = {"from_date": flex["from_date"], "to_date": flex["to_date"]}
+    assumed = None
+    if is_round_trip:
+        nights = flex.get("trip_length_days")
+        if not nights:
+            nights = assumed = DEFAULT_FLEX_TRIP_NIGHTS
+        extra["duration"] = nights
+    return extra, assumed
+
+
 def search_flexible_dates(spec: dict, origins: list, destinations: list, currency: str) -> dict:
     flex = spec["flexible_dates"]
     is_round_trip = spec.get("trip_type") == "round_trip"
     spec = {**spec, "departure_date": flex["from_date"], "return_date": flex["from_date"]}
 
-    extra: dict = {"from_date": flex["from_date"], "to_date": flex["to_date"]}
-    if is_round_trip and flex.get("trip_length_days"):
-        extra["duration"] = flex["trip_length_days"]
+    extra, assumed_nights = flex_grid_params(flex, is_round_trip)
 
     filters = build_filters(spec, origins, destinations, filters_cls=DateSearchFilters, **extra)
     searcher = SearchDates()
@@ -1729,11 +1748,18 @@ def search_flexible_dates(spec: dict, origins: list, destinations: list, currenc
     cheapest = min((d["price"] for d in dates), default=None)
     for d in dates:
         d["cheapest"] = d["price"] == cheapest
-    return {
+    payload = {
         "type": "dates",
         "message": "The best-value dates are shown first; expand for the full calendar. Pick one to see actual flights.",
         "dates": dates,
     }
+    if assumed_nights:
+        payload["message"] += (
+            f" Prices are round-trip totals for {assumed_nights}-night trips"
+            " (assumed; re-search with trip_length_days if the user has a different stay in mind)."
+        )
+        payload["assumptions"] = [f"Assumed {assumed_nights}-night trips; tell me your trip length to reprice"]
+    return payload
 
 
 def roll_past_dates(spec: dict) -> tuple[dict, list[str]]:
@@ -1874,7 +1900,8 @@ def execute_spec(spec: dict) -> dict:
 
     if spec.get("summary"):
         payload["message"] = f"{spec['summary']}\n\n{payload['message']}"
-    payload["assumptions"] = (spec.get("assumptions") or []) + date_notes
+    # search fns may add their own notes (e.g. assumed trip length) — keep them
+    payload["assumptions"] = (spec.get("assumptions") or []) + date_notes + (payload.get("assumptions") or [])
     return payload
 
 
