@@ -404,6 +404,48 @@
     .cal-legend .lab { margin: 0 0.25rem; }
     .cal-note { font-size: 0.72rem; opacity: 0.65; }
 
+    /* round-trip mix & match board (expanded itineraries view) */
+    .rt-board { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; align-items: start; }
+    @media (max-width: 880px) { .rt-board { grid-template-columns: 1fr; } }
+    .rt-col-head { font-family: var(--serif); font-weight: 600; font-size: 0.95rem; margin-bottom: 0.45rem; }
+    .rt-col-note { font-size: 0.68rem; opacity: 0.6; font-weight: 400; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+    .rt-rows { display: flex; flex-direction: column; gap: 0.35rem; max-height: 30rem; overflow-y: auto; padding-right: 2px; }
+    .rt-row {
+      text-align: left; border: 1px solid var(--line); background: var(--panel);
+      border-radius: 7px; padding: 0.5rem 0.65rem; cursor: pointer;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+    .rt-row:hover { border-color: var(--accent); box-shadow: 0 2px 8px rgba(177, 71, 31, 0.12); }
+    .rt-row.sel { border-color: var(--good); background: var(--good-bg); box-shadow: none; }
+    .rt-row.unpriced { border-style: dashed; background: transparent; }
+    .rt-row-main { display: flex; justify-content: space-between; gap: 0.5rem; align-items: baseline; }
+    .rt-times { font-weight: 600; font-size: 0.86rem; }
+    .rt-price { font-size: 0.86rem; font-weight: 700; color: var(--accent-dark); white-space: nowrap; }
+    .rt-price .from { font-size: 0.62rem; font-weight: 500; opacity: 0.65; color: var(--ink); }
+    .rt-row.sel .rt-price, .rt-row.sel .rt-price b { color: var(--good); }
+    .rt-row-sub { font-size: 0.7rem; opacity: 0.72; margin-top: 0.15rem; }
+    .rt-row-tags { display: flex; gap: 0.3rem; margin-top: 0.25rem; align-items: center; flex-wrap: wrap; }
+    .rt-tag { font-size: 0.6rem; padding: 0.1rem 0.45rem; border-radius: 999px; background: var(--info-bg); color: var(--info); font-weight: 600; }
+    .rt-tag.warn { background: var(--warn-bg); color: var(--warn); }
+    .rt-empty { font-size: 0.78rem; opacity: 0.6; padding: 0.6rem 0.2rem; }
+    .rt-unpriced-panel {
+      border: 1px dashed var(--line-strong); border-radius: 7px; padding: 0.9rem;
+      font-size: 0.82rem; display: flex; flex-direction: column; gap: 0.6rem; align-items: flex-start;
+    }
+    .rt-summary {
+      display: flex; justify-content: space-between; align-items: center; gap: 0.9rem; flex-wrap: wrap;
+      border: 1px solid var(--line-strong); background: var(--panel); border-radius: 8px;
+      padding: 0.6rem 0.9rem; margin-top: 0.75rem;
+      position: sticky; bottom: calc(5.6rem + env(safe-area-inset-bottom));
+      box-shadow: var(--card-shadow); z-index: 3;
+    }
+    .rt-summary-legs { font-size: 0.78rem; }
+    .rt-summary-price { font-family: var(--serif); font-weight: 600; font-size: 1.05rem; color: var(--accent-dark); }
+    .rt-summary .card-action { margin-top: 0; }
+    html.dark .rt-row.sel { background: rgba(168, 210, 154, 0.10); }
+    html.dark .rt-price, html.dark .rt-summary-price { color: #e08a5a; }
+    html.dark .rt-row.sel .rt-price, html.dark .rt-row.sel .rt-price b { color: #a8d29a; }
+
     .input-area {
       position: fixed; left: 0; right: 0; bottom: 0; z-index: 7;
       background-color: var(--bg);
@@ -611,7 +653,7 @@
               <div :id="sec._anchor">
                 <div class="section-head">
                   <div class="section-label" x-text="sectionLabel(sec)"></div>
-                  <div class="mini-toggle" x-show="sec.results && sec.results.length">
+                  <div class="mini-toggle" x-show="sec.results && sec.results.length && !(sec.type === 'itineraries' && sec._expanded)">
                     <button :class="sectionView(sec) === 'detailed' ? 'active' : ''" @click="sec._view = 'detailed'">Detail</button>
                     <button :class="sectionView(sec) === 'compact' ? 'active' : ''" @click="sec._view = 'compact'">Compact</button>
                   </div>
@@ -654,7 +696,9 @@
                     <option value="0">Nonstop only</option>
                     <option value="1">1 stop max</option>
                   </select>
-                  <span class="fcount" x-text="list(sec).length + ' of ' + (sec.results || []).length + ' options'"></span>
+                  <span class="fcount" x-text="sec.type === 'itineraries'
+                    ? rtOutbounds(sec).length + ' of ' + rtAll(sec).length + ' outbounds'
+                    : list(sec).length + ' of ' + (sec.results || []).length + ' options'"></span>
                 </div>
 
                 <!-- one-way flights, compact -->
@@ -734,8 +778,8 @@
                   </div>
                 </template>
 
-                <!-- round-trip itineraries, compact -->
-                <template x-if="sec.type === 'itineraries' && sec.results && sec.results.length && sectionView(sec) === 'compact'">
+                <!-- round-trip itineraries, compact (top picks; expanding opens the board) -->
+                <template x-if="sec.type === 'itineraries' && sec.results && sec.results.length && sectionView(sec) === 'compact' && !sec._expanded">
                   <div class="compact-grid">
                     <template x-for="(it, j) in visible(sec, 8)" :key="j">
                       <div class="compact-card">
@@ -763,8 +807,8 @@
                   </div>
                 </template>
 
-                <!-- round-trip itineraries, detailed -->
-                <template x-if="sec.type === 'itineraries' && sec.results && sec.results.length && sectionView(sec) === 'detailed'">
+                <!-- round-trip itineraries, detailed (top picks; expanding opens the board) -->
+                <template x-if="sec.type === 'itineraries' && sec.results && sec.results.length && sectionView(sec) === 'detailed' && !sec._expanded">
                   <div class="flight-list">
                     <template x-for="(it, j) in visible(sec, 5)" :key="j">
                       <div class="flight-card">
@@ -856,6 +900,71 @@
                         <a :href="it.booking_url" target="_blank" rel="noopener noreferrer" class="card-action">Book on Google Flights</a>
                       </div>
                     </template>
+                  </div>
+                </template>
+
+                <!-- round-trip mix & match board: every outbound on the left
+                     (from-priced when returns are unknown), the selected
+                     outbound's returns on the right, each priced as the real
+                     total for that exact pairing -->
+                <template x-if="sec.type === 'itineraries' && sec.results && sec.results.length && sec._expanded">
+                  <div class="rt-board-wrap">
+                    <div class="rt-board">
+                      <div class="rt-col">
+                        <div class="rt-col-head">1 · Choose the outbound <span class="rt-col-note" x-text="rtOutCount(sec)"></span></div>
+                        <div class="rt-rows">
+                          <template x-for="g in rtOutbounds(sec)" :key="rtKey(g)">
+                            <button class="rt-row" :class="(rtIsSel(sec, g) ? 'sel ' : '') + (g.unpriced ? 'unpriced' : '')" @click="rtSelect(sec, g)">
+                              <div class="rt-row-main">
+                                <span class="rt-times" x-text="formatTime(g.outbound.legs[0].departure) + ' → ' + formatTime(g.outbound.legs[g.outbound.legs.length-1].arrival) + arrivalDay(g.outbound)"></span>
+                                <span class="rt-price"><span class="from">from</span> <b x-text="formatPrice(g.unpriced ? g.from_total : (g.cheapest_total ?? g.total_price), rtCurrency(g))"></b></span>
+                              </div>
+                              <div class="rt-row-sub" x-text="g.outbound.airline + ' · ' + formatDuration(g.outbound.duration) + ' · ' + stopsText(g.outbound.stops) + viaShort(g.outbound)"></div>
+                              <div class="rt-row-tags" x-show="g.outbound.stops === 0 || g.unpriced || (g.outbound.warnings || []).length">
+                                <span class="badge badge-direct" x-show="g.outbound.stops === 0">Direct</span>
+                                <span class="rt-tag" x-show="g.unpriced">returns not priced yet</span>
+                                <span class="rt-tag warn" x-show="(g.outbound.warnings || []).length" :title="(g.outbound.warnings || []).join('  ·  ')">⚠</span>
+                              </div>
+                            </button>
+                          </template>
+                          <div class="rt-empty" x-show="!rtOutbounds(sec).length">No outbounds match these filters.</div>
+                        </div>
+                      </div>
+                      <div class="rt-col">
+                        <div class="rt-col-head">2 · Pick the return <span class="rt-col-note" x-text="rtRetNote(sec)"></span></div>
+                        <template x-if="rtSelected(sec) && !rtSelected(sec).unpriced">
+                          <div class="rt-rows">
+                            <template x-for="(r, ri) in (rtSelected(sec).return_options || [])" :key="'r' + ri">
+                              <button class="rt-row" :class="isPickedReturn(rtSelected(sec), ri) ? 'sel' : ''" @click="pickReturn(rtSelected(sec), ri)">
+                                <div class="rt-row-main">
+                                  <span class="rt-times" x-text="formatTime(r.legs[0].departure) + ' → ' + formatTime(r.legs[r.legs.length-1].arrival) + arrivalDay(r)"></span>
+                                  <span class="rt-price total" x-text="formatPrice(r.total_price, r.currency)"></span>
+                                </div>
+                                <div class="rt-row-sub" x-text="(r.airline !== rtSelected(sec).outbound.airline ? r.airline + ' · ' : '') + formatDuration(r.duration) + ' · ' + stopsText(r.stops) + viaShort(r) + (r.extra_over_best ? ' · +' + formatPrice(r.extra_over_best, r.currency) + ' vs cheapest pairing' : ' · cheapest pairing')"></div>
+                                <div class="rt-row-tags" x-show="r.stops === 0 || (r.warnings || []).length">
+                                  <span class="badge badge-direct" x-show="r.stops === 0">Direct</span>
+                                  <span class="rt-tag warn" x-show="(r.warnings || []).length" :title="(r.warnings || []).join('  ·  ')">⚠</span>
+                                </div>
+                              </button>
+                            </template>
+                          </div>
+                        </template>
+                        <template x-if="rtSelected(sec) && rtSelected(sec).unpriced">
+                          <div class="rt-unpriced-panel">
+                            <p>This outbound exists at <b x-text="formatPrice(rtSelected(sec).from_total, rtCurrency(rtSelected(sec)))"></b> round trip, but Google did not price its return pairings in this search.</p>
+                            <button class="chip" @click="rtAskReturns(sec)" :disabled="isLoading">Price the returns for this flight</button>
+                          </div>
+                        </template>
+                        <div class="rt-empty" x-show="!rtSelected(sec)">Pick an outbound on the left.</div>
+                      </div>
+                    </div>
+                    <div class="rt-summary" x-show="rtSelected(sec) && !rtSelected(sec).unpriced">
+                      <div class="rt-summary-txt">
+                        <div class="rt-summary-legs" x-text="rtSummaryText(sec)"></div>
+                        <div class="rt-summary-price" x-text="rtSelected(sec) ? formatPrice(rtSelected(sec).total_price, rtCurrency(rtSelected(sec))) + ' total' : ''"></div>
+                      </div>
+                      <a class="card-action rt-book" :href="rtSelected(sec) && rtSelected(sec).booking_url" target="_blank" rel="noopener noreferrer">Book this pairing</a>
+                    </div>
                   </div>
                 </template>
 
@@ -1304,6 +1413,11 @@
 
         canExpand(sec) {
           if (sec.type === 'dates') return (sec.dates || []).length > 12;
+          if (sec.type === 'itineraries') {
+            // the board earns its place whenever there is anything to compose
+            return (sec.results || []).length > 1 || (sec.more_outbounds || []).length > 0
+              || (((sec.results || [])[0] || {}).return_options || []).length > 1;
+          }
           return (sec.results || []).length > (this.sectionView(sec) === 'compact' ? 8 : 5);
         },
 
@@ -1311,6 +1425,10 @@
           if (sec.type === 'dates') {
             return sec._expanded ? 'Show best-value dates only'
               : 'Show the full calendar · all ' + (sec.dates || []).length + ' dates';
+          }
+          if (sec.type === 'itineraries') {
+            return sec._expanded ? 'Show top picks only'
+              : 'Mix & match all ' + this.rtAll(sec).length + ' outbounds · filter & sort';
           }
           return sec._expanded ? 'Show top picks only'
             : 'Show all ' + this.list(sec).length + ' options · filter & sort';
@@ -1639,6 +1757,99 @@
           const cur = it.return;
           return opts[ri] && cur && opts[ri].legs[0].departure === cur.legs[0].departure
             && opts[ri].legs[0].flight_number === cur.legs[0].flight_number;
+        },
+
+        // ---- round-trip mix & match board ----
+        // rows are either priced groups (sec.results members, mutated in
+        // place so the top-pick cards stay in sync) or thin wrappers around
+        // more_outbounds flights; wrappers are rebuilt per render, so
+        // selection is tracked by key, never by object identity
+        rtKey(row) {
+          const legs = (row.outbound || {}).legs || [];
+          return (legs[0] ? legs[0].departure : '') + '|' + legs.map(l => l.airline_code + l.flight_number).join(',');
+        },
+
+        rtAll(sec) {
+          const more = (sec.more_outbounds || []).map(x =>
+            ({ outbound: x, unpriced: true, from_total: x.from_total, currency: x.currency }));
+          return (sec.results || []).concat(more);
+        },
+
+        _rowPass(f, flt) {
+          if (flt.dep) {
+            const h = f.legs && f.legs[0].departure ? parseInt(f.legs[0].departure.slice(11, 13), 10) : 0;
+            const ok = flt.dep === 'early' ? h < 8 : flt.dep === 'morning' ? (h >= 8 && h < 12)
+              : flt.dep === 'afternoon' ? (h >= 12 && h < 18) : h >= 18;
+            if (!ok) return false;
+          }
+          if (flt.maxDur && (f.duration ?? 1e9) > flt.maxDur * 60) return false;
+          if (flt.airline && !(f.legs || []).some(l => l.airline_code === flt.airline)) return false;
+          if (flt.alliance && f.alliance !== flt.alliance) return false;
+          if (flt.stops !== '' && flt.stops != null && (f.stops ?? 9) > +flt.stops) return false;
+          return true;
+        },
+
+        rtOutbounds(sec) {
+          const flt = sec._filters || {};
+          let rows = this.rtAll(sec).filter(g => this._rowPass(g.outbound, flt));
+          const price = g => (g.unpriced ? g.from_total : (g.cheapest_total ?? g.total_price)) ?? 1e9;
+          if (flt.sort === 'price') rows = [...rows].sort((a, b) => price(a) - price(b));
+          else if (flt.sort === 'duration') rows = [...rows].sort((a, b) => (a.outbound.duration ?? 1e9) - (b.outbound.duration ?? 1e9));
+          else if (flt.sort === 'departure') rows = [...rows].sort((a, b) => (a.outbound.legs[0].departure || '').localeCompare(b.outbound.legs[0].departure || ''));
+          return rows;
+        },
+
+        rtSelected(sec) {
+          const rows = this.rtOutbounds(sec);
+          return rows.find(g => this.rtKey(g) === sec._selKey) || rows[0] || null;
+        },
+
+        rtIsSel(sec, g) {
+          const s = this.rtSelected(sec);
+          return !!s && this.rtKey(s) === this.rtKey(g);
+        },
+
+        rtSelect(sec, g) { sec._selKey = this.rtKey(g); },
+
+        rtCurrency(g) { return g.currency || (g.outbound || {}).currency || 'USD'; },
+
+        viaShort(f) {
+          const ls = f.layovers || [];
+          return ls.length ? ' via ' + ls.map(l => l.airport).join(', ') : '';
+        },
+
+        rtOutCount(sec) {
+          const total = this.rtAll(sec).length, shown = this.rtOutbounds(sec).length;
+          return '· ' + (shown === total ? total : shown + ' of ' + total);
+        },
+
+        rtRetNote(sec) {
+          const g = this.rtSelected(sec);
+          if (!g || g.unpriced) return '';
+          const n = (g.return_options || []).length;
+          const legs = (g.return || {}).legs || [];
+          const d = legs.length ? this.formatDate((legs[0].departure || '').slice(0, 10)) : '';
+          return '· ' + n + ' option' + (n === 1 ? '' : 's') + (d ? ' · ' + d : '');
+        },
+
+        rtAskReturns(sec) {
+          const g = this.rtSelected(sec);
+          if (!g) return;
+          const legs = (g.outbound || {}).legs || [];
+          if (!legs.length) return;
+          this.search('Price the returns for the ' + g.outbound.airline + ' outbound departing '
+            + this.formatDate((legs[0].departure || '').slice(0, 10)) + ' at '
+            + this.formatTime(legs[0].departure) + ' from ' + legs[0].from);
+        },
+
+        rtSummaryText(sec) {
+          const g = this.rtSelected(sec);
+          if (!g || g.unpriced) return '';
+          const seg = legs => legs && legs.length
+            ? legs[0].from + ' ' + this.formatTime(legs[0].departure) + ' → '
+              + legs[legs.length - 1].to + ' ' + this.formatTime(legs[legs.length - 1].arrival)
+            : '';
+          return 'Out ' + seg(g.outbound.legs) + '    ·    Back ' + seg((g.return || {}).legs);
         },
 
         pickReturn(it, ri) {

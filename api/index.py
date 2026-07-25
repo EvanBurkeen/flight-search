@@ -536,10 +536,22 @@ def compact_for_model(payload: dict) -> str:
                 "total_price": it["total_price"], "currency": it["currency"],
                 "outbound": _leg_summary(it["outbound"]),
                 "return": _leg_summary(it["return"]),
+                "return_choices": len(it.get("return_options") or []),
             }
             for it in (payload.get("results") or [])[:6]
         ]
-        return json.dumps({"kind": "round_trips", "note": payload.get("message"), "options": rows})
+        data = {"kind": "round_trips", "note": payload.get("message"), "options": rows}
+        more = payload.get("more_outbounds") or []
+        if more:
+            # without this, the model inferred "no nonstops exist" from an
+            # expansion set that simply never included them
+            data["unpriced_outbounds"] = {
+                "count": len(more),
+                "nonstops": sum(1 for m in more if (m.get("stops") or 0) == 0),
+                "cheapest_from": min(m["from_total"] for m in more),
+                "note": "Listed to the user with from-prices; returns not priced this turn.",
+            }
+        return json.dumps(data)
     results = payload.get("results") or []
     rows = [_leg_summary(f) for f in results[:6]]
     out = {"kind": "flights", "note": payload.get("message"), "options": rows}
@@ -1238,6 +1250,68 @@ def add_highlights(flights: list[dict]) -> None:
             f["score"] = 40
 
 
+def representative_outbounds(flights: list, top_n: int) -> list:
+    """Choose WHICH outbounds get their returns priced.
+
+    fli expands flights[:top_n], and the list arrives in the search's sort
+    order (usually cheapest-first), so the expansion set used to be "the N
+    cheapest outbounds" — a $700 nonstop never got its returns priced, and
+    the assistant then told the user nonstops didn't exist. Same disease as
+    cutting before ranking, one stage earlier.
+
+    Keeps, in order: the sort's own top picks (an explicit "cheapest" stays
+    obeyed), nonstops, the fastest, then one flight from any departure
+    bucket (before 6, 6-12, 12-18, after 18) still unrepresented.
+    """
+    if len(flights) <= top_n:
+        return list(flights)
+    chosen: list = []
+    seen: set = set()
+
+    def add(f) -> None:
+        if id(f) not in seen and len(chosen) < top_n:
+            seen.add(id(f))
+            chosen.append(f)
+
+    for f in flights[: max(3, top_n // 3)]:
+        add(f)
+    for f in flights:  # nonstops, cheapest first; leave 2 slots for the rest
+        if len(chosen) >= top_n - 2:
+            break
+        if (f.stops or 0) == 0:
+            add(f)
+    add(min(flights, key=lambda f: f.duration or 1e9))
+
+    def bucket(f) -> int:
+        dt = f.legs[0].departure_datetime if f.legs else None
+        return -1 if dt is None else (0 if dt.hour < 6 else 1 if dt.hour < 12 else 2 if dt.hour < 18 else 3)
+
+    covered = {bucket(f) for f in chosen}
+    for f in flights:
+        b = bucket(f)
+        if b >= 0 and b not in covered:
+            add(f)
+            covered.add(b)
+    for f in flights:  # backfill with the sort's own order
+        add(f)
+    return chosen
+
+
+class RoundTripSearch(SearchFlights):
+    """SearchFlights that expands a REPRESENTATIVE outbound set and keeps the
+    full outbound list, so unexpanded outbounds can still ship with their
+    honest "from" totals instead of vanishing."""
+
+    last_outbounds: list = []
+
+    def _expand_multi_leg(self, flights, filters, *, top_n, **kw):
+        selected = sum(1 for s in filters.flight_segments if s.selected_flight is not None)
+        if selected == 0 and len(filters.flight_segments) == 2:
+            self.last_outbounds = list(flights)
+            flights = representative_outbounds(flights, top_n)
+        return super()._expand_multi_leg(flights, filters, top_n=top_n, **kw)
+
+
 def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy,
                top_n: int, budget_s: float = 35.0):
     # Refusals come as HTTP 200 + a tiny body (parses to empty) or as raised
@@ -1282,7 +1356,8 @@ def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy
 def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: str) -> dict:
     filters = build_filters(spec, origins, destinations, show_all_results=True)
     sort = SORT_MAP.get(spec.get("sort"), SortBy.CHEAPEST)
-    results = run_search(SearchFlights(), filters, sort, top_n=8)
+    searcher = RoundTripSearch()
+    results = run_search(searcher, filters, sort, top_n=10)
 
     if not results:
         return {
@@ -1333,17 +1408,19 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
         # across just 8 outbounds - so flattening and keeping the 10 cheapest
         # showed ten rows that differed only in their return leg, hiding seven
         # outbounds including the only nonstop. Group by outbound instead.
+        def out_key(out):
+            return (
+                out.legs[0].departure_datetime.isoformat() if out.legs and out.legs[0].departure_datetime else "",
+                tuple((lg.airline.name, lg.flight_number) for lg in out.legs),
+            )
+
         grouped: dict = {}
         for combo in results:
             out, ret = combo[0], combo[-1]
             if out.price is None and ret.price is None:
                 continue
             total = max(p for p in [out.price, ret.price, 0] if p is not None)
-            key = (
-                out.legs[0].departure_datetime.isoformat() if out.legs and out.legs[0].departure_datetime else "",
-                tuple((lg.airline.name, lg.flight_number) for lg in out.legs),
-            )
-            g = grouped.setdefault(key, {"out": out, "returns": []})
+            g = grouped.setdefault(out_key(out), {"out": out, "returns": []})
             g["returns"].append((ret, total))
 
         itineraries = []
@@ -1411,13 +1488,48 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
             for leg_key in ("outbound", "return"):
                 if itin[leg_key]["stops"] == 0:
                     itin[leg_key]["highlights"].append("Direct")
-        message = f"Found {len(itineraries)} round-trip options. Prices are the real total for both directions."
+
+        # every outbound Google listed but we did not expand still ships, with
+        # its honest "from" total (the outbound row of a round-trip search IS
+        # the best total from that outbound). The shipped set must represent
+        # the option space: "no nonstops" must never again be an artifact of
+        # which handful of flights got their returns priced.
+        extras = []
+        for f in getattr(searcher, "last_outbounds", None) or []:
+            if out_key(f) in grouped or f.price is None:
+                continue
+            if via and not routes_via(f):
+                continue
+            if not arrival_ok(f, out_target, aw):
+                continue
+            x = serialize_flight(f, spec.get("cabin"), ret_date=spec.get("return_date"))
+            x["from_total"] = f.price
+            extras.append(x)
+        extras = order_by_value(
+            extras,
+            price_of=lambda x: x.get("from_total"),
+            duration_of=lambda x: x.get("duration"),
+            stops_of=lambda x: x.get("stops") or 0,
+            warnings_of=lambda x: x.get("warnings"),
+            requested_sort=spec.get("sort"),
+        )[:24]
+
+        pairings = sum(len(it["return_options"]) for it in itineraries)
+        message = (f"Found {len(itineraries)} outbounds with returns priced "
+                   f"({pairings} pairings; every price is the real total for that exact pairing).")
+        if extras:
+            ns = sum(1 for x in extras if (x.get("stops") or 0) == 0)
+            message += (f" {len(extras)} more outbounds are listed with from-prices only"
+                        + (f", including {ns} nonstop{'s' if ns != 1 else ''}" if ns else "")
+                        + ". Their returns were NOT priced this turn, so never claim those options "
+                          "do not exist; to price one, re-search with departure_time narrowed to its hour.")
         if arrival_note:
             message = f"{arrival_note}\n{message}"
         return {
             "type": "itineraries",
             "message": message,
             "results": itineraries,
+            "more_outbounds": extras,
         }
 
     strict = [r for r in results if arrival_ok(r, out_target, aw)]

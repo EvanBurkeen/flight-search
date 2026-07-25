@@ -237,6 +237,44 @@ check("warns that mixed carriers may be separate tickets",
       any("separate tickets" in w for w in it.get("warnings") or []))
 
 # --------------------------------------------------------------------------
+section("Round-trip expansion breadth  — Changelog: 'the board, and representative expansion'")
+# --------------------------------------------------------------------------
+# fli expands flights[:top_n] in sort order (usually cheapest-first), so the
+# expansion set was "the N cheapest outbounds": a pricier nonstop never got
+# returns priced, and the assistant told the user nonstops did not exist.
+def _ob(price, dur, stops, hour):
+    return types.SimpleNamespace(price=price, duration=dur, stops=stops,
+                                 legs=[types.SimpleNamespace(
+                                     departure_datetime=datetime(2026, 11, 17, hour, 0))])
+
+_obs = [_ob(600 + i, 500, 1, 19) for i in range(15)] + \
+       [_ob(900, 420, 0, 8), _ob(950, 400, 0, 14), _ob(880, 380, 1, 7)]
+_kept = app.representative_outbounds(_obs, 10)
+check("expansion keeps every nonstop, not just the N cheapest outbounds",
+      sum(1 for f in _kept if f.stops == 0) == 2, f"{sum(1 for f in _kept if f.stops == 0)} of 2")
+check("expansion keeps the fastest outbound", any(f.duration == 380 for f in _kept))
+check("the sort's own top pick still leads (an explicit 'cheapest' stays obeyed)",
+      _kept[0].price == 600)
+check("expansion covers the departure buckets the data offers",
+      len({0 if f.legs[0].departure_datetime.hour < 6 else
+           1 if f.legs[0].departure_datetime.hour < 12 else
+           2 if f.legs[0].departure_datetime.hour < 18 else 3 for f in _kept}) >= 3)
+check("expansion never exceeds its budget", len(_kept) == 10, f"{len(_kept)}")
+
+# unexpanded outbounds must reach the model, or it infers absence from a sample
+_it_payload = {
+    "type": "itineraries", "message": "m",
+    "results": [{"total_price": 609, "currency": "USD",
+                 "outbound": {"airline": "FI", "legs": [], "duration": 500, "stops": 1, "warnings": []},
+                 "return": {"airline": "FI", "legs": [], "duration": 500, "stops": 1, "warnings": []},
+                 "return_options": [1, 2]}],
+    "more_outbounds": [{"stops": 0, "from_total": 745.0}, {"stops": 1, "from_total": 700.0}],
+}
+_compact = app.compact_for_model(_it_payload)
+check("the model is told about outbounds whose returns were not priced",
+      '"unpriced_outbounds"' in _compact and '"nonstops": 1' in _compact and '"cheapest_from": 700.0' in _compact)
+
+# --------------------------------------------------------------------------
 section("Flexible-date grids  — Changelog: 'round-trip grids priced same-day returns'")
 # --------------------------------------------------------------------------
 # Searched without a duration, Google's date grid prices departing AND flying

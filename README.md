@@ -141,6 +141,10 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
 - `itinerary_url()` returns None rather than a malformed link; callers fall back.
 - A round-trip date grid prices a real stay (7 nights assumed and disclosed when
   the model gives none), never Google's same-day-return default.
+- Round-trip expansion picks a REPRESENTATIVE outbound set (nonstops, fastest,
+  cheapest anchors, departure spread), and the model is told about outbounds
+  whose returns were not priced — it must never infer "no nonstops" from the
+  expansion sample.
 
 ## Stack
 
@@ -185,9 +189,14 @@ Google traffic through a proxy (see Operations).
      warnings. Cutting first would discard options never scored — see Changelog
      July 24. The cut always keeps up to 8 nonstops plus the outright cheapest
      and fastest, because the client-side filters run over what we ship.
-   - serialize up to 50 one-ways / ~8 round-trip OUTBOUND groups (each with its
-     own `return_options`, every option priced as the real total for that
-     pairing) / 8 multi-city itineraries (priced BOTH as one ticket and as
+   - serialize up to 50 one-ways / ~10 round-trip OUTBOUND groups (a
+     REPRESENTATIVE set — cheapest anchors, nonstops, fastest, departure-time
+     spread via `representative_outbounds`, because fli expands `flights[:top_n]`
+     in sort order and "the 10 cheapest" once hid every nonstop; each group
+     carries its own `return_options`, every option priced as the real total
+     for that pairing, PLUS up to 24 `more_outbounds` — every outbound Google
+     listed but we did not expand, shipped with its honest "from" total) /
+     8 multi-city itineraries (priced BOTH as one ticket and as
      separate tickets, quoting the cheaper — `price_basis` says which), each
      with a `tfs` deep link to that exact itinerary, alliance tag, aircraft,
      warnings (tight <45m connections, overnight, self-transfer, airport
@@ -223,7 +232,11 @@ views (global toggle + per-section override) · top-picks preview with "Show all
 and instant client-side filters (sort, departure window, duration, airline, alliance,
 stops — options derived from the data; they filter only what the server
 shipped, which is why the cut keeps nonstops/cheapest/fastest) · round-trip
-outbound picker with per-return totals and price deltas · Best value badge ·
+**mix & match board** (expanded view: every outbound on the left — from-priced
+rows included, with a one-tap "Price the returns for this flight" that asks the
+assistant — the selected outbound's returns on the right, each priced as the
+real pairing total, sticky chosen-pairing bar with Book; top-pick cards with
+the per-card return picker stay as the collapsed view) · Best value badge ·
 Book deep-links straight to the chosen itinerary on Google · flexible-date grids show best-value dates
 first (within 15% of cheapest) and expand to month calendars heatmapped by price
 (tiers relative to the window's cheapest; cheapest days outlined; round-trip
@@ -280,6 +293,26 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
   lakes; run it, then bump the `?v=N` cache-buster on the script tag in index.html).
 
 ## Changelog
+
+**July 25, 2026 (round-trip optionality)** — Evan: the round-trip display
+"doesn't give me enough optionality"; travelers pick per direction, not from
+pre-paired cards.
+- **Mix & match board:** expanding a round-trip section now shows every
+  outbound on the left (value-ranked, filterable) and the selected outbound's
+  returns on the right, each priced as the real total for that exact pairing,
+  with a sticky chosen-pairing bar and per-pairing Book deep link. Top-pick
+  cards stay as the collapsed view.
+- **Representative expansion (data bug):** fli expands `flights[:top_n]` in
+  sort order, so only the N cheapest outbounds ever got returns priced — the
+  assistant then claimed "no nonstops" on routes with a dozen. Expansion now
+  covers cheapest anchors + nonstops + fastest + departure-time spread
+  (`representative_outbounds`, top_n 8 -> 10), and every unexpanded outbound
+  still ships in `more_outbounds` with its honest Google "from" total (JFK-LHR
+  test: 8 mostly one-stop cards -> 34 outbounds, 21 of them nonstop).
+- Unpriced rows carry a one-tap "Price the returns for this flight" that asks
+  the assistant (a departure-window search); `compact_for_model` now tells
+  Claude how many unpriced outbounds and nonstops exist so its prose can never
+  again infer absence from the expansion sample. Checks added for both.
 
 **July 25, 2026**
 - Price-by-date calendar heatmap (roadmap item): expanding a flexible-date
