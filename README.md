@@ -165,7 +165,10 @@ Google traffic through a proxy (see Operations).
 ## How a turn works
 
 1. Frontend POSTs `{query, history}` (history = last 12 user/assistant text turns).
-2. `run_assistant` runs an agent loop (≤3 search rounds, ≤8 API calls, **65s turn budget**):
+2. `run_assistant` runs an agent loop (≤3 search rounds, ≤8 API calls, **58s
+   budget for NEW search rounds** — when the budget dies with data on screen,
+   a guaranteed tool-less wrap-up call still writes a real reply from a
+   per-search status log, stating exactly what is or is not missing):
    Claude converses and calls `search_flights` (up to 5/turn, executed **concurrently**)
    and/or `web_search`. `pause_turn` (server-side search) is resumed automatically.
 3. `execute_spec` per search: roll past dates forward (with a visible note) →
@@ -298,6 +301,34 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
   lakes; run it, then bump the `?v=N` cache-buster on the script tag in index.html).
 
 ## Changelog
+
+**July 25, 2026 (evening: 'ran long' autopsy — the data was done, the prose was gated)**
+Evan's screenshot: a turn that showed 8 complete cards + 33 outbounds while
+apologizing that "the search ran long." Root causes, in the order they stack:
+- **The canned line WAS the bug.** "That search ran long..." was a hardcoded
+  string returned when the turn budget expired — even when every search had
+  completed and 100% of the data was on screen; the final Claude call was
+  simply never made. Now a budget exit with data ALWAYS runs one tool-less
+  wrap-up call (tool_choice "none", same tools list so the prompt cache
+  holds, ~5s, cannot start new work) fed a per-search status log, so the
+  reply states exactly what completed and what, if anything, is missing —
+  and is forbidden from apologizing when nothing is. Canned line remains
+  only as the exception fallback. Turn budget 65s -> 58s (`TURN_BUDGET_S`).
+- **fli's hidden inner retries**: tenacity (3 attempts, exponential) around
+  every POST retried ON THE SAME SESSION — doctrine-violating (refusals are
+  session-sticky) and up to ~48s inside ONE ladder attempt during timeout
+  waves. Bypassed via `__wrapped__`; the identity-rotating ladder is the
+  retry layer.
+- **The 15s timeout is TOTAL, not idle** — heavy queries STREAM their
+  progressive chunks slowly, and a 51KB nearly-complete response was killed
+  mid-download and refetched from scratch, attempt after attempt. Timeouts
+  are now per-attempt: 12s first (fail fast into a fresh identity), 28s on
+  retries (let a slow stream finish); expansions 12s (harvest bounds them).
+- **Measured for the record:** the NYC(3)xFLL outbound fetch costs 0.5-0.8s
+  and returns 185 outbounds when Google is healthy — multi-airport is NOT
+  inherently slow; slow turns are wave-timeouts x retry-stacking, so no
+  structural/API change is warranted. Per-search outcomes now ride in
+  `debug_timings` phases for the next autopsy.
 
 **July 25, 2026 (round trips v2: optionality on demand, and the serialization bug)**
 Evan: still not rich or fast enough to replace Google Flights for round trips.

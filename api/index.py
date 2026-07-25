@@ -208,13 +208,26 @@ def _session_from_identity(self):
 
 _fli_client.Client._session = _session_from_identity
 
-_orig_post, _orig_get = _fli_client.Client.post, _fli_client.Client.get
+# fli wraps post/get in tenacity (3 attempts, exponential backoff) ON THE
+# SAME SESSION. Refusals are session-sticky and a slow wave means 15s
+# timeouts, so those inner retries stack up to ~48s of same-identity waiting
+# inside ONE ladder attempt — the July 25 NYC turns that "ran long" were
+# largely this. The app's ladder (fresh identity per attempt) is the correct
+# retry layer; bypass tenacity and let failures surface immediately.
+_orig_post = getattr(_fli_client.Client.post, "__wrapped__", _fli_client.Client.post)
+_orig_get = getattr(_fli_client.Client.get, "__wrapped__", _fli_client.Client.get)
 
 
 def _post_as_identity(self, *args, **kwargs):
     ident = getattr(_local, "identity", None)
     if ident:
         kwargs["impersonate"] = ident["impersonate"]
+    # fli's 15s timeout is TOTAL time, not idle time — heavy queries STREAM
+    # their progressive chunks slowly, and a nearly-complete 50KB response was
+    # being killed mid-download and re-fetched from scratch, attempt after
+    # attempt. The ladder sets a per-attempt value: fail fast first (a fresh
+    # identity usually fixes it), then leave room for a slow stream to finish.
+    kwargs.setdefault("timeout", getattr(_local, "fli_timeout", None) or 15.0)
     return _orig_post(self, *args, **kwargs)
 
 
@@ -663,6 +676,7 @@ def run_assistant(query: str, history: list | None, emit=None) -> dict:
     messages.append({"role": "user", "content": query})
 
     sections: list[dict] = []
+    search_log: list[str] = []  # per-search outcome lines; feeds the wrap-up call
     searches_used = 0
     web_tool = {"type": "web_search_20260209", "name": "web_search", "max_uses": 3}
 
@@ -687,9 +701,13 @@ def run_assistant(query: str, history: list | None, emit=None) -> dict:
     timings: list = []   # [(phase, seconds, detail)] — surfaced for profiling
     rounds = 0
     iterations = 0
-    # hard turn budget: past ~65s, stop searching and answer with what we have
-    # (a Google throttle wave otherwise compounds into multi-minute hangs)
-    while rounds < 3 and iterations < 8 and time.monotonic() - started < 65:
+    # turn budget bounds NEW SEARCH ROUNDS only (a Google throttle wave
+    # otherwise compounds into multi-minute hangs). It no longer bounds the
+    # final prose: when data is on screen, the wrap-up call below ALWAYS runs
+    # — the July 25 'ran long' turns had 100% of their data and still ended
+    # on a canned line because prose was gated behind this check.
+    turn_budget_s = float(os.environ.get("TURN_BUDGET_S") or 58)
+    while rounds < 3 and iterations < 8 and time.monotonic() - started < turn_budget_s:
         iterations += 1
         _t = time.monotonic()
         streamed_any = False
@@ -804,14 +822,19 @@ def run_assistant(query: str, history: list | None, emit=None) -> dict:
         batch_deadline = time.monotonic() + 55
 
         for tu in budgeted:
+            label = (tu.input or {}).get("summary") or "search"
             try:
                 payload = futures[tu.id].result(timeout=max(1.0, batch_deadline - time.monotonic()))
                 sections.append(payload)
+                n = len(payload.get("results") or payload.get("dates") or [])
+                search_log.append(f"'{label}': completed, {n} options on screen"
+                                  if n else f"'{label}': came back EMPTY (transient hiccup or no service)")
                 tool_results_by_id[tu.id] = {
                     "type": "tool_result", "tool_use_id": tu.id,
                     "content": compact_for_model(payload),
                 }
             except FuturesTimeout:
+                search_log.append(f"'{label}': TIMED OUT, no data")
                 tool_results_by_id[tu.id] = {
                     "type": "tool_result", "tool_use_id": tu.id,
                     "content": "Search timed out: Google Flights is responding very slowly right now. Tell the user plainly and suggest trying again shortly; do not retry now.",
@@ -820,11 +843,13 @@ def run_assistant(query: str, history: list | None, emit=None) -> dict:
             except SearchHTTPError as e:
                 detail = "Google Flights is rate-limiting right now (HTTP 429)." if e.status_code == 429 \
                     else f"Google Flights returned HTTP {e.status_code}."
+                search_log.append(f"'{label}': FAILED ({detail})")
                 tool_results_by_id[tu.id] = {
                     "type": "tool_result", "tool_use_id": tu.id,
                     "content": detail, "is_error": True,
                 }
             except SearchClientError:
+                search_log.append(f"'{label}': FAILED (couldn't reach Google)")
                 tool_results_by_id[tu.id] = {
                     "type": "tool_result", "tool_use_id": tu.id,
                     "content": "Couldn't reach Google Flights for this search.", "is_error": True,
@@ -837,23 +862,67 @@ def run_assistant(query: str, history: list | None, emit=None) -> dict:
                     "is_error": True,
                 }
         pool.shutdown(wait=False, cancel_futures=True)
-        timings.append((f"searches_{rounds}", round(time.monotonic() - _tsearch, 2), f"n={len(budgeted)}"))
+        timings.append((f"searches_{rounds}", round(time.monotonic() - _tsearch, 2),
+                        f"n={len(budgeted)} | " + " | ".join(search_log[-len(budgeted):])))
         # cards can render now, well before the prose that describes them
         fresh = [s for s in sections if (s.get("results") or s.get("dates"))]
         if fresh:
             emit("sections", fresh)
         messages.append({"role": "user", "content": [tool_results_by_id[tu.id] for tu in tool_uses]})
 
+    # Out of budget for more searching. If data landed, the user still gets a
+    # real recommendation: one final call with tool_choice "none" (same tools
+    # list keeps the prompt-cache prefix; "none" means it cannot start more
+    # work, so this adds ~5s, never a hang). The status note makes the prose
+    # precise about what, if anything, is actually missing.
     if sections:
+        try:
+            status = "; ".join(search_log) or "none"
+            messages.append({"role": "user", "content": (
+                "[turn status: no time left for additional searches this turn. "
+                f"Search outcomes: {status}. Write your reply now from the completed "
+                "results above. State plainly whether anything the user asked for is "
+                "missing; if every requested search completed, do NOT apologize or "
+                "mention slowness at all. If something is missing, name exactly what, "
+                "and offer to fetch it as a follow-up.]"
+            )})
+            _t = time.monotonic()
+            with client.messages.stream(
+                model="claude-opus-4-8",
+                max_tokens=4000,
+                output_config={"effort": "medium"},
+                system=[{
+                    "type": "text",
+                    "text": assistant_system_prompt(),
+                    "cache_control": {"type": "ephemeral"},
+                }],
+                tools=[SEARCH_TOOL, web_tool],
+                tool_choice={"type": "none"},
+                messages=messages,
+            ) as stream:
+                for chunk in stream.text_stream:
+                    if chunk:
+                        emit("text_delta", chunk)
+                response = stream.get_final_message()
+            timings.append(("claude_wrapup", round(time.monotonic() - _t, 2), ""))
+            text = "\n".join(b.text for b in response.content if b.type == "text").strip()
+            text, suggestions = split_suggestions(text)
+            if text:
+                return {"message": text, "sections": sections,
+                        "suggestions": suggestions or ["keep digging"], "timings": timings}
+        except Exception:
+            pass  # canned fallback below; never lose the data over prose
         return {
             "message": "That search ran long, so here is what I have so far. The cards below are live results; say the word and I'll keep digging.",
             "sections": sections,
             "suggestions": ["keep digging"],
+            "timings": timings,
         }
     return {
         "message": "Google Flights is responding slowly at the moment and that search ran past my patience. Give it a minute and try again; your question was perfectly fine.",
         "sections": [],
         "suggestions": ["try again"],
+        "timings": timings,
     }
 
 
@@ -1392,6 +1461,7 @@ class RepresentativeSearch(SearchFlights):
         def expand(outbound):
             if parent_ident is not None:
                 _local.identity = parent_ident  # same visitor, own curl handle
+            _local.fli_timeout = 12.0  # harvest abandons stragglers anyway
             next_filters = copy.deepcopy(filters)
             next_filters.flight_segments[selected].selected_flight = outbound
             sub = self._fetch_flights(next_filters, currency=currency, language=language,
@@ -1460,6 +1530,9 @@ def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy
             break  # out of time: surface what we have rather than dig the hole deeper
         breaker_wait(1.5 if i == 0 else 6.0)
         checkout_identity()
+        # attempt 1 fails fast into a fresh identity; retries get room for
+        # Google's slow progressive streams to actually finish downloading
+        _local.fli_timeout = 12.0 if i == 0 else 28.0
         attempt = filters.model_copy(update={"sort_by": attempt_sort})
         try:
             results = search.search(attempt, top_n=top_n, currency="USD")
@@ -2261,6 +2334,7 @@ def fetch_returns_for_outbound(spec: dict, legs_in: list, from_total=None) -> di
     for i in range(2):
         breaker_wait(1.5 if i == 0 else 6.0)
         checkout_identity()
+        _local.fli_timeout = 12.0 if i == 0 else 24.0
         try:
             rows = searcher._fetch_flights(filters, currency="USD", language=None,
                                            country=None, capture_session=False)
