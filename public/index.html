@@ -957,7 +957,7 @@
                                   <span class="rt-times" x-text="formatTime(r.legs[0].departure) + ' → ' + formatTime(r.legs[r.legs.length-1].arrival) + arrivalDay(r)"></span>
                                   <span class="rt-price total" x-text="formatPrice(r.total_price, r.currency)"></span>
                                 </div>
-                                <div class="rt-row-sub" x-text="(r.airline !== rtSelected(sec).outbound.airline ? r.airline + ' · ' : '') + formatDuration(r.duration) + ' · ' + stopsText(r.stops) + viaShort(r) + (r.extra_over_best ? ' · +' + formatPrice(r.extra_over_best, r.currency) + ' vs cheapest pairing' : ' · cheapest pairing')"></div>
+                                <div class="rt-row-sub" x-text="r.airline + ' · ' + formatDuration(r.duration) + ' · ' + stopsText(r.stops) + viaShort(r) + (r.extra_over_best ? ' · +' + formatPrice(r.extra_over_best, r.currency) + ' vs cheapest pairing' : ' · cheapest pairing')"></div>
                                 <div class="rt-row-tags" x-show="r.stops === 0 || (r.warnings || []).length">
                                   <span class="badge badge-direct" x-show="r.stops === 0">Direct</span>
                                   <span class="rt-tag warn" x-show="(r.warnings || []).length" :title="(r.warnings || []).join('  ·  ')">⚠</span>

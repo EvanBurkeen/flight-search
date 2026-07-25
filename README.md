@@ -302,6 +302,11 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
 
 ## Changelog
 
+**July 25, 2026 (board polish)**
+- Return rows on the mix & match board always name the airline (Evan's catch:
+  they omitted it when it matched the chosen outbound, which read as unlabeled
+  rather than same-carrier).
+
 **July 25, 2026 (late: the blank-screen root cause — good data was being discarded)**
 Evan: a plain NYC-FLL round trip spun for a minute and showed NOTHING. Layered
 root cause, bottom up:
