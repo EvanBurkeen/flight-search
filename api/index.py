@@ -521,6 +521,9 @@ def compact_for_model(payload: dict) -> str:
         rows = [
             {
                 "total_price": it["total_price"], "currency": it["currency"],
+                "price_basis": it.get("price_basis"),
+                "one_ticket_price": it.get("combined_price"),
+                "separate_tickets_price": it.get("separate_price"),
                 "legs": [_leg_summary(p) for p in it["parts"]],
                 **({"ticketing_warning": it["warnings"][0]} if it.get("warnings") else {}),
             }
@@ -1458,6 +1461,60 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
     }
 
 
+def format_money(amount, currency: str = "USD") -> str:
+    try:
+        return f"${amount:,.0f}" if (currency or "USD") == "USD" else f"{amount:,.0f} {currency}"
+    except Exception:
+        return str(amount)
+
+
+def flight_signature(result) -> tuple:
+    """Identify a specific itinerary by the flights it is actually made of.
+
+    Uses the display airline code so a signature built from a raw fli result
+    matches one built from our serialized form (fli prefixes digit-leading
+    codes with an underscore: _7C).
+    """
+    return tuple((airline_code(lg.airline), str(lg.flight_number)) for lg in (result.legs or []))
+
+
+def serialized_signature(flight: dict) -> tuple:
+    return tuple((lg.get("airline_code"), str(lg.get("flight_number")))
+                 for lg in (flight.get("legs") or []))
+
+
+def leg_price_index(origins: list, destinations: list, date_: str, cabin: str | None,
+                    dep_window: dict | None = None) -> dict:
+    """Standalone one-way price for every flight on this leg, by signature.
+
+    Multi-city prices an itinerary as ONE ticket. When the carriers do not
+    ticket jointly that joint fare can be absurd next to simply buying each
+    leg: measured FLL->ICN->HRB, Google quoted $2,207 combined for flights
+    that cost $844 + $182 = $1,026 bought separately, which is exactly what
+    Google's own booking page sells them as. So we price the legs separately
+    too and quote whichever is actually purchasable.
+    """
+    # goes through the shared search cache, so a leg the user already searched
+    # on its own costs nothing here
+    try:
+        payload = cached_execute_spec({
+            "trip_type": "one_way", "departure_date": date_,
+            "origins": list(origins), "destinations": list(destinations),
+            "cabin": cabin, "departure_time": dep_window,
+        })
+    except Exception:
+        return {}
+    idx: dict = {}
+    for r in payload.get("results") or []:
+        price = r.get("price")
+        sig = serialized_signature(r)
+        if price is None or not sig:
+            continue
+        if sig not in idx or price < idx[sig]:
+            idx[sig] = price
+    return idx
+
+
 def search_multi_city(spec: dict, currency: str) -> dict:
     resolved = []
     invalid: list[str] = []
@@ -1514,11 +1571,38 @@ def search_multi_city(spec: dict, currency: str) -> dict:
             "results": [],
         }
 
+    # price every leg standalone, in parallel, so we can quote the cheaper of
+    # "one ticket" and "buy each leg" the way Google's booking page does
+    indexes: list = [{} for _ in resolved]  # per-leg standalone prices
+    pool = ThreadPoolExecutor(max_workers=min(4, len(resolved)))
+    raw_segs = (spec.get("multi_city_segments") or [])[:5]
+    futs = [pool.submit(leg_price_index, seg.get("origins") or [], seg.get("destinations") or [],
+                        seg.get("date"), spec.get("cabin"), seg.get("departure_time"))
+            for seg in raw_segs]
+    for i, fu in enumerate(futs):
+        try:
+            indexes[i] = fu.result(timeout=15) or {}
+        except Exception:
+            indexes[i] = {}
+    pool.shutdown(wait=False, cancel_futures=True)
+
     itineraries = []
     for combo in results[:8]:
         parts = list(combo) if isinstance(combo, tuple) else [combo]
         prices = [p.price for p in parts if p.price]
         serialized = [serialize_flight(p, spec.get("cabin")) for p in parts]
+
+        # what these exact flights cost bought leg by leg
+        separate_total, all_matched = 0.0, bool(indexes) and len(parts) == len(indexes)
+        if all_matched:
+            for part, idx in zip(parts, indexes):
+                standalone = idx.get(flight_signature(part))
+                if standalone is None:
+                    all_matched = False
+                    break
+                separate_total += standalone
+        combined_total = max(prices) if prices else None
+        separate_total = round(separate_total) if all_matched else None
         # Ticketing honesty: Google prices these as a combined trip, but when
         # the legs are on carriers that do not ticket jointly it sells them as
         # SEPARATE tickets (its own booking page says "must be booked
@@ -1534,8 +1618,23 @@ def search_multi_city(spec: dict, currency: str) -> dict:
                 "separate tickets, so bags and onward connections may not be protected. "
                 "Check the booking page."
             )
+        # quote what is actually purchasable, not the joint fare nobody buys
+        candidates = [p for p in (combined_total, separate_total) if p is not None]
+        best_total = min(candidates) if candidates else None
+        if (separate_total is not None and combined_total is not None
+                and separate_total < combined_total * 0.97):
+            ticket_warnings.insert(0, (
+                f"Cheaper booked as two separate tickets: {format_money(separate_total, currency)} "
+                f"leg by leg versus {format_money(combined_total, currency)} on one ticket. "
+                "Separate tickets mean no through-checked bags and no protection if a leg is late."
+            ))
+
         itineraries.append({
-            "total_price": max(prices) if prices else None,
+            "total_price": best_total,
+            "combined_price": combined_total,
+            "separate_price": separate_total,
+            "price_basis": ("separate tickets" if best_total == separate_total
+                            and separate_total is not None else "one ticket"),
             "currency": parts[0].currency or currency,
             "parts": serialized,
             "warnings": ticket_warnings,
@@ -1549,10 +1648,10 @@ def search_multi_city(spec: dict, currency: str) -> dict:
     return {
         "type": "multicity",
         "message": (
-            f"Found {len(itineraries)} combined itineraries ({route_text}). Prices are Google's "
-            "quote for the whole trip at search time; the final price varies by seller (booking "
-            "direct with the airlines can cost more than an agency). Mixed-carrier combinations "
-            "may be issued as separate tickets."
+            f"Found {len(itineraries)} itineraries ({route_text}). total_price is the CHEAPER of "
+            "buying one combined ticket or buying each leg separately (price_basis says which, and "
+            "both numbers are given). Google's search-time quote varies by seller. Mixed-carrier "
+            "combinations are often issued as separate tickets: no through bags, no delay cover."
         ),
         "results": itineraries,
     }

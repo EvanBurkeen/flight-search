@@ -807,7 +807,7 @@
                         <template x-for="(p, k) in it.parts" :key="k">
                           <div class="compact-leg"><span class="lbl" x-text="'Leg ' + (k+1)"></span><span x-text="p.legs[0].from + '→' + p.legs[p.legs.length-1].to + ' · ' + formatTime(p.legs[0].departure) + '–' + formatTime(p.legs[p.legs.length-1].arrival) + ' · ' + stopsText(p.stops)"></span></div>
                         </template>
-                        <div class="compact-sub" x-text="'combined trip' + ((it.warnings || []).length ? ' · ⚠ separate tickets possible' : '')"></div>
+                        <div class="compact-sub" x-text="(it.price_basis === 'separate tickets' ? 'as 2 separate tickets' : 'one combined ticket') + ((it.warnings || []).length ? ' · ⚠' : '')"></div>
                         <a :href="it.booking_url" target="_blank" rel="noopener noreferrer" class="compact-book">Book →</a>
                       </div>
                     </template>
@@ -829,7 +829,7 @@
                           </div>
                           <div>
                             <div class="card-price" x-text="formatPrice(it.total_price, it.currency)"></div>
-                            <div class="card-price-note">total, all legs</div>
+                            <div class="card-price-note" x-text="'total, all legs · ' + (it.price_basis || 'one ticket')"></div>
                           </div>
                         </div>
                         <template x-for="(p, k) in it.parts" :key="k">

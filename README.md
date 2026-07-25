@@ -163,6 +163,30 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
 
 ## Changelog
 
+**July 24, 2026 (multi-city prices: quote what you can actually buy)**
+- Evan: "the 635 is 1022, not 2207". Root cause found by dumping raw part
+  prices. In a multi-city expansion, parts[0].price is the "from" total for
+  the BEST completion of that leg-1 and parts[-1].price is the total for that
+  SPECIFIC pairing, so `max()` correctly reads the JOINT-TICKET price. The
+  problem is the joint fare itself: for FLL->ICN (6:35 Delta) + ICN->HRB
+  (Asiana) Google quotes $2,207 as one ticket, while the same two flights
+  bought leg by leg are $844 + $182 = $1,026 - which is what Google's own
+  booking page sells and displays as "Lowest total price / Separate tickets".
+  We were quoting a fare nobody would buy.
+- Multi-city now prices every leg standalone as well (through the shared
+  search cache, so a leg already searched on its own is free) and quotes
+  `min(one ticket, separate tickets)`. Payload carries `combined_price`,
+  `separate_price` and `price_basis`; when separate is >3% cheaper the card
+  and Claude get an explicit warning naming both numbers and the loss of
+  through-bags / delay cover. Falls back to the joint price whenever a leg's
+  flights can't be matched, so it can never invent a number.
+- flight_signature now uses the display airline code so signatures built from
+  raw fli results match serialized ones (fli writes _7C for 7C).
+- Caveat: multi-city turns are slow (expansion fan-out plus per-leg pricing)
+  and can exceed the 65s turn budget, surfacing partial results. Per-leg
+  pricing is bounded at 15s each, runs in parallel, and degrades to the
+  joint price on timeout.
+
 **July 24, 2026 (multi-city truthfulness)**
 - Two Evan catches on the FLL-ICN-HRB trip. (1) The best one-way (6:35 Delta)
   never appeared in combined results: multi-city expands only the first
