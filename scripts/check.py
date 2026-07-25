@@ -144,6 +144,14 @@ check("a nonstop beats a cheaper option that costs hours",
       f"{app.trip_cost(154,200,0,[],fastest):.0f} vs {app.trip_cost(129,719,1,[],fastest):.0f}")
 check("a huge fare premium does NOT buy a small time saving",
       app.trip_cost(900, 200, 0, [], fastest) > app.trip_cost(300, 320, 1, [], fastest))
+# HOUR_VALUE=0 slipped past an earlier version of these checks because the
+# stop penalty alone still ordered the BOS->FLL example correctly. This case has
+# no stop difference, so it fails the moment time stops being valued.
+check("time is genuinely priced (a cheaper flight 10h longer must lose)",
+      app.trip_cost(200, 200, 0, [], fastest) < app.trip_cost(150, 800, 0, [], fastest),
+      f"{app.trip_cost(200,200,0,[],fastest):.0f} vs {app.trip_cost(150,800,0,[],fastest):.0f}")
+check("HOUR_VALUE is a real, documented product weight (>= $10/hour)",
+      app.HOUR_VALUE >= 10, f"HOUR_VALUE={app.HOUR_VALUE}")
 check("documented warnings raise the effective cost",
       app.trip_cost(200, 200, 1, ["Self-transfer: separate tickets"], fastest)
       > app.trip_cost(200, 200, 1, [], fastest))

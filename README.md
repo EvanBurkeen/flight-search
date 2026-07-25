@@ -10,11 +10,24 @@ talk to Claude, which pulls live Google Flights data to search, compare, and rec
 ## For AI assistants picking this up
 
 You (an AI coding assistant) are expected to maintain this project from this
-document alone. Everything you need:
+document alone. Start with [CLAUDE.md](CLAUDE.md) (it loads automatically), then
+this file, then **"Lessons the hard way"** below before debugging anything.
 
 - **NON-NEGOTIABLE RULE: every deployment gets a Changelog entry in this README,
-  in the same commit.** One or two lines: what changed and why (the context or
-  bug that motivated it), newest day first. No push without its log line.
+  in the same commit.** One or two lines: what changed and why, newest day first.
+  Now **enforced by `.githooks/pre-push`** rather than trusted: the rule was
+  broken on July 24, 2026 while written in bold right here, which is the whole
+  argument for mechanism over instruction.
+- **`.venv/bin/python scripts/check.py` before every push** (the hook runs it):
+  offline checks, each encoding a bug already found in production. A failure
+  means you reintroduced one — read its docstring, do not route around it.
+  **When you fix a real bug, add a check.** A weak check is worse than none: an
+  earlier version passed while `HOUR_VALUE` was zeroed, and that reached prod.
+- **Fresh clone, one-time:** `git config core.hooksPath .githooks` (hooks are not
+  cloned, and `check.py` fails until you set it).
+- **Never `git reset --hard` with uncommitted work** and never `git add -A` for a
+  throwaway commit; both cost real work here on July 24, 2026. Commit or stash
+  the good work first, and stage probe files explicitly.
 
 - **Owner:** Evan Burkeen. Product goal: *"the flight tool I use instead of
   Google Flights/Kayak."* Voice of the in-app assistant: concierge, no em dashes.
@@ -56,6 +69,75 @@ document alone. Everything you need:
   a tuned model — change them there; multi-city is the slow path (leg-2 fan-out
   is 4–6 candidates), so it is the trip type most likely to hit the 65s turn
   budget and return partial results.
+
+## Lessons the hard way
+
+Non-obvious things this project already paid for. **Read the relevant part before
+debugging in its area** — each cost a real investigation, and several are
+counterintuitive enough that a fresh assistant will otherwise repeat the bug.
+`scripts/check.py` guards the testable ones.
+
+**Google's data layer**
+- **Results arrive as PROGRESSIVE chunks inside one HTTP response.** `GetShoppingResults`
+  returns several `wrb.fr` chunks, each a fuller snapshot (this is why the real UI
+  "fills in"). `fli` parses only the first; we patch it to take the richest.
+  Symptom if this regresses: whole carriers missing on thin routes.
+- **Refusals are SESSION-STICKY soft blocks, not random flakiness.** HTTP 200 with a
+  ~94-byte body (gRPC code 13). A flagged session failed 64/64 consecutive requests
+  while brand-new sessions in the same seconds passed 20/32. Retrying on the same
+  cookie jar cannot escape it: retire the identity.
+- **Retrying harder makes it worse.** Sustained volume escalates a cheap session
+  flag into an IP-level block. That is what the circuit breaker is for; do not
+  "fix" refusals by adding attempts.
+- **Multi-leg prices are cumulative, not per-leg.** In an expansion the first leg
+  carries the best achievable total ("from") and the later leg carries that
+  pairing's total. And Google's *joint* fare can sit far above buying the legs
+  separately ($2,207 vs $1,026 for identical flights) — separate tickets are what
+  its own booking page sells when the carriers do not interline.
+- `SortBy.BEST` intermittently returns None (ladder falls back to CHEAPEST), and
+  transient tiny-error bodies arrive in bursts (~5-10%).
+
+**Booking deep links (`tfs`)**
+- The `tfs` param is base64url protobuf naming the exact itinerary. **`f19` is the
+  trip type (1 round, 2 one-way, 3 multi-city); `f2` is a constant 2.** Putting the
+  trip type in `f2` makes Google reject the URL and fall back to its home page.
+- Repeated `f3` = journey segments; a segment's repeated `f4` = the connecting
+  flights within it. Endpoints take `{1:1, 2:"IATA"}` or `{1:3, 2:"/m/..."}` for a
+  city entity; we always emit airports. The `tfu` token is session-scoped and
+  **not required**.
+
+**Ranking and truthfulness**
+- **Rank BEFORE truncating.** Google returns results cheapest-first, so cutting
+  first silently discards options that were never scored (12 nonstops existed; 11
+  priced above the 50th-cheapest fare and vanished).
+- **Client-side filters only filter what the server shipped**, so the shipped set
+  must represent the option space or "Nonstop only" lies.
+- **The model only sees `compact_for_model`'s top 6**, so a ranking bug is an
+  *advice* bug: Claude confidently described nonstops it had never been shown.
+- **A displayed price must belong to the itinerary displayed beside it.** Both the
+  round-trip picker and multi-city broke this in different ways.
+
+**Frontend**
+- **Alpine:** mutate the reactive proxy (`this.messages[this.messages.length-1]`),
+  never the raw object you pushed, or the DOM freezes after the first render while
+  the data updates invisibly.
+- **The browser serves a stale `index.html`** more often than you expect. Assert a
+  string from your edit is in the loaded page before trusting a screenshot.
+- **An occluded preview pane reports `viewportH: 0`**, returns junk from
+  `getComputedStyle`, throttles `setTimeout` to ~1/s and pauses smooth scrolling.
+  Several "bugs" were only that. Cross-check with a screenshot or `curl`.
+
+## Invariants (`scripts/check.py` enforces these)
+
+- One-way `tfs` links stay byte-identical to a real Google-issued URL.
+- Time is genuinely priced: a cheaper flight that is hours longer must lose.
+- An explicit "cheapest"/"fastest" request is obeyed verbatim, and "Best value"
+  only appears when we actually ranked by value.
+- The outright cheapest stays inside the preview; the shipped cut always keeps the
+  cheapest, the fastest, and up to 8 nonstops, in value order.
+- Cabin/dates/stops split the search-cache key; only cosmetic fields do not.
+- Multi-city quotes the cheaper of one-ticket and separate-ticket, and says which.
+- `itinerary_url()` returns None rather than a malformed link; callers fall back.
 
 ## Stack
 
@@ -152,6 +234,7 @@ styling (Fraunces serif, brass fittings, boarding-pass dividers, greeting).
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt uvicorn
 .venv/bin/python scripts/dev_server.py   # API + frontend on :8123
+.venv/bin/python scripts/check.py       # invariant checks (the hook runs these)
 ```
 
 No `ANTHROPIC_API_KEY` locally → the Claude loop is stubbed by a pattern parser
@@ -193,172 +276,41 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
 
 ## Changelog
 
-**July 24, 2026 (compose-bar seam)**
-- LOGGED LATE (commit 1e79fea shipped without its entry, which breaks the rule
-  at the top of this file — the entry belongs in the same commit).
-- Fixed a visible line and dark band across the bottom of the landing screen.
-  Three causes at once: the fixed compose bar filled flat `var(--bg)` while the
-  body carried four texture layers (so it was a different shade of cream, with
-  the join reading as a line); its `box-shadow: 0 -8px …` cast UPWARD, smudging
-  dark over empty paper; and with content shorter than the viewport (684 vs
-  720) the body stopped painting texture before the bottom.
-- Now one `--paper` variable is shared by the page and the bar (redefined once
-  for dark mode so they cannot drift), the bar paints it with
-  `background-attachment: fixed` so the texture aligns with what is behind it,
-  `body` gets `min-height: 100vh`, and the divider/shadow appear only when the
-  page is actually scrollable (`syncBar`, kept current by a ResizeObserver).
-  Note: testing "content below the bar's top edge" instead is WRONG — it counts
-  the container's own 8rem bottom padding and re-raises the divider on the
-  empty landing screen.
-
-**July 24, 2026 (tail latency)**
-- Bringing down worst-case turn times. run_search now takes a budget
-  (35s default, 45s multi-city) and stops retrying when it is out of time:
-  retries re-run the ENTIRE search, and for multi-city that meant four
-  attempts x a ~25s fan-out plus 2/4/6s sleeps = 100s+ tails that blew the
-  65s turn budget. Ladder sleeps cut to ~0.5-1.3s (worst-case pure sleep
-  ~4s, was 12s): each retry is a NEW identity now, so long per-search
-  cooling is redundant with the process-wide breaker.
-- Multi-city standalone leg pricing runs CONCURRENTLY with the expansion
-  (it ran after, adding its whole runtime to the tail); 6s harvest grace,
-  degrades to joint price. Fan-out adapts to weather: 6 normally, 4 when
-  the breaker has seen recent refusals, so optional work shrinks before
-  required work misses the budget. fli expansions already run 10-wide.
-- Verified deterministically (budget stops a stubbed always-failing ladder
-  at 2 attempts). Local live checks impossible: the dev IP is hard-timing
-  out after a full day of testing; production rides the proxy.
-
-**July 24, 2026 (multi-city prices: quote what you can actually buy)**
-- Evan: "the 635 is 1022, not 2207". Root cause found by dumping raw part
-  prices. In a multi-city expansion, parts[0].price is the "from" total for
-  the BEST completion of that leg-1 and parts[-1].price is the total for that
-  SPECIFIC pairing, so `max()` correctly reads the JOINT-TICKET price. The
-  problem is the joint fare itself: for FLL->ICN (6:35 Delta) + ICN->HRB
-  (Asiana) Google quotes $2,207 as one ticket, while the same two flights
-  bought leg by leg are $844 + $182 = $1,026 - which is what Google's own
-  booking page sells and displays as "Lowest total price / Separate tickets".
-  We were quoting a fare nobody would buy.
-- Multi-city now prices every leg standalone as well (through the shared
-  search cache, so a leg already searched on its own is free) and quotes
-  `min(one ticket, separate tickets)`. Payload carries `combined_price`,
-  `separate_price` and `price_basis`; when separate is >3% cheaper the card
-  and Claude get an explicit warning naming both numbers and the loss of
-  through-bags / delay cover. Falls back to the joint price whenever a leg's
-  flights can't be matched, so it can never invent a number.
-- flight_signature now uses the display airline code so signatures built from
-  raw fli results match serialized ones (fli writes _7C for 7C).
-- Caveat: multi-city turns are slow (expansion fan-out plus per-leg pricing)
-  and can exceed the 65s turn budget, surfacing partial results. Per-leg
-  pricing is bounded at 15s each, runs in parallel, and degrades to the
-  joint price on timeout.
-
-**July 24, 2026 (multi-city truthfulness)**
-- Two Evan catches on the FLL-ICN-HRB trip. (1) The best one-way (6:35 Delta)
-  never appeared in combined results: multi-city expands only the first
-  `top_n` leg-1 candidates and it sat at rank 5+ among same-price ties.
-  Fan-out is now 6, and multi_city_segments accept a per-leg departure_time
-  window so a specific departure can be forced into the expansion ("what
-  about the 6:35?" now works; it priced at $2,207 combined, which is WHY
-  cheapest-first hid it). (2) We claimed "one ticket" and quoted a single
-  price; Google's own booking page said "Separate tickets - must be booked
-  individually" (Delta=SkyTeam + Asiana=Star don't interline) and showed a
-  seller spread ($1,022 OTA vs $1,166 airline-direct vs our $1,042 quote).
-- Now: mixed-carrier itineraries whose alliances differ (or a carrier has
-  none) carry an explicit separate-tickets warning on the card, in Claude's
-  summary, and in the section message; prices are framed as Google's
-  search-time quote with seller variance; the prompt forbids promising
-  through-bags or misconnect protection on mixed-carrier combinations.
-  Same-alliance pairings (Delta + China Eastern) correctly stay unflagged.
-
-**July 24, 2026 (deep links for every trip type)**
-- Round-trip and multi-city Book links now open the exact itinerary too, so
-  all three trip types are deep-linked. The earlier round-trip failure was a
-  misread of the schema: **f2 is a constant 2 and f19 is the TRIP TYPE**
-  (1 round trip, 2 one-way, 3 multi-city). Putting the trip type in f2 made
-  Google reject the URL and fall back to its home page.
-- Confirmed by decoding real Google links Evan supplied for all three types.
-  Repeated f3 = journey segments; a segment's repeated f4 entries are the
-  connecting flights inside it (so multi-city FLL-ATL-ICN is one segment with
-  two f4s). f13/f14 endpoints take {1:1, 2:"IATA"} for an airport or
-  {1:3, 2:"/m/..."} for a Knowledge-Graph city; we always emit airports.
-- Browser-verified: round trip opens with BOTH legs selected, multi-city
-  opens as a "Multi-city trip" with every segment selected and vendors listed.
-  The one-way byte-for-byte test still passes, so the encoder is pinned.
-- Each round-trip RETURN OPTION carries its own booking link, and picking one
-  swaps the card's link, so Book always opens the pairing on screen.
-
-**July 24, 2026 (round-trip picker)**
-- Round trips now work like Google's: you choose an OUTBOUND, then a RETURN,
-  and the total moves with the choice (Evan: "it's giving me the cheapest
-  combos instead of letting me choose"). Previously we flattened combos and
-  kept the 10 cheapest, so a search returning 94 combos across 8 outbounds
-  showed ten rows that differed only in return leg - hiding seven outbounds
-  including the only nonstop.
-- `search_fixed_dates` groups combos by outbound; each card is one outbound
-  with its own `return_options`, every option carrying the real
-  `total_price` for that pairing plus `extra_over_best` vs the group's floor.
-  Clicking a return swaps the leg in place and updates the headline.
-- The headline price is always the total for the pairing ON SCREEN, never the
-  group floor (an earlier build quoted $228 while displaying a $257 pairing).
-  `cheapest_total` is kept separately for reference; the floor option is
-  labelled "cheapest", not "best", since value ranking may prefer another.
-
-**July 24, 2026 (book the flight you clicked)**
-- One-way "Book" links now deep-link to the exact itinerary instead of a
-  search page the user has to scan (Evan: clicked a JetBlue fare and "had to
-  go search for it"). Google's booking URLs carry `tfs`, a base64url protobuf
-  naming the itinerary down to airline and flight number; `itinerary_url()`
-  builds it. Schema was recovered from a real Google-issued link and is
-  verified by a test that reproduces that link BYTE FOR BYTE, so a future
-  schema drift shows up immediately.
-- Confirmed in a browser: nonstop and multi-leg (BOS-JFK-FLL) links both open
-  Google straight on that flight with its booking options. The `tfu` token in
-  Google's own URLs is session-scoped and is NOT required.
-- NOT done: round trips. A two-segment tfs with both directions selected is
-  rejected (Google falls back to its home page), so round trips keep the old
-  search-query URL. To finish it, capture a real Google round-trip booking URL
-  and decode its tfs the same way — the return-segment layout is the only
-  unknown. Anything unexpected in the data makes `itinerary_url` return None
-  and the caller falls back, so this can never produce a dead link.
-
-**July 24, 2026 (representative results)**
-- Nonstops could be missing entirely (Evan: "why didn't the nonstops show up?").
-  Separate bug from the value ranking: we sliced `results[:50]` BEFORE scoring,
-  and Google hands results back cheapest-first. Measured BOS->FLL Nov 22:
-  Google returned 98 options with 12 nonstops, but 11 priced above the
-  50th-cheapest fare ($227 vs $414/$514), so exactly one survived the cut. The
-  "Nonstop only" filter then reported "1 of 50" and Claude told the user
-  everything else needed a connection - both truthful about the shipped subset,
-  both wrong about reality.
-- Now: score the full pool (RANK_POOL=120) and cut afterwards, and cut with
-  `retain_representative` - value order decides ORDER, but the shipped set
-  always keeps up to NONSTOP_QUOTA=8 nonstops plus the outright cheapest and
-  fastest, because the client-side filters run over whatever we ship and must
-  not lie about the option space. Rescued rows are re-sorted back into value
-  order (filling slots from the back had reversed them).
-- Section message now states true totals ("Found 98 options (showing 50). 12 of
-  them are nonstop, cheapest nonstop $99.") so Claude stops inferring absence
-  from a truncated sample. Round trips get the same pool-then-cut treatment.
-
-**July 24, 2026 (value ranking)**
-- Results are ordered by VALUE, not fare (Evan's catch: on BOS->FLL Sept 2 the
-  first nonstop sat at rank #21, behind nine near-identical connections that
-  cost $25 less and ran 2 to 9 hours longer; the preview shows 8, so it was
-  invisible). Ordering is by an effective cost: fare + $25/hour over the
-  fastest option + $35 first stop / +$45 each additional + penalties reusing
-  the warnings we already generate (self-transfer $55, airport change $60,
-  tight connection $40, overnight $35). Constants live at the top of
-  `api/index.py` and are a product judgement, tune them there.
-- Guardrails: an explicit "cheapest"/"fastest" request still wins outright,
-  and the cheapest fare is always pinned into the preview (top 4) so a
-  price-first traveler never has to expand the list to find it. The
-  "Best value" badge only appears when we actually ranked by value.
-- This also fixed the ASSISTANT, not just the cards: `compact_for_model` sends
-  Claude the top 6, which were previously the 6 cheapest connections, so it
-  never saw a nonstop. Prompt now tells it to lead with best value and to
-  price the difference in plain terms when the cheapest is not its pick.
-- Frontend: "Sort: best" (which sorted nothing) is now honestly "Sort: best
-  value"; new filled-green Best value badge. Round trips ranked the same way.
+**July 24, 2026** — long session with Evan; grouped. The *causes* are captured
+under "Lessons the hard way" above, which is the part worth reading.
+- **Data completeness:** parse the richest `wrb.fr` chunk (carriers were missing on
+  thin routes); rank before truncating and cut with `retain_representative` so
+  nonstops/cheapest/fastest always survive; state true totals so Claude stops
+  inferring absence from a sample.
+- **Ranking:** ordered by effective cost (fare + time + stops + warnings) instead
+  of fare, with a "Best value" badge and an honest "Sort: best value" label.
+  Guardrails: explicit sorts win; the cheapest stays visible.
+- **Round trips:** pick an outbound, then a return, with per-option totals and
+  deltas — 94 combos across 8 outbounds had been flattened to the 10 cheapest, all
+  sharing one outbound. The headline price always matches the pairing shown.
+- **Multi-city:** per-leg departure windows so a specific departure can be forced
+  into the expansion; priced both as one ticket and separately, quoting the cheaper
+  (`price_basis`) with mixed-carrier warnings. We had been promising through-bags
+  and delay cover that Google does not sell.
+- **Booking:** `tfs` deep links for all three trip types (round-trip return options
+  each carry their own link), so Book opens the exact itinerary.
+- **Reliability:** identity pool (cookies + exit IP + fingerprint, retired on
+  refusal) after proving refusals are session-sticky; circuit breaker; staggering;
+  capped breaker waits (uncapped put cards on screen at 32s).
+- **Latency:** warm-connection reuse took searches ~6s -> 0.4-2.3s; search cache
+  with single-flight dedupe; effort routing; ladder budgets. Time to first useful
+  content 12.8s -> ~4.6s.
+- **Display:** "Boeing 737MAX 8 Passenger" -> "Boeing 737 MAX 8"; `_7C` -> `7C`.
+- **UI:** facelift (card depth, serif headers, dark mode with light default and a
+  theme toggle), sticky compose bar + "results ready" nudge, and a fix for the
+  seam/dark band that introduced at the bottom of short pages.
+- **Process:** `scripts/check.py`, `.githooks/pre-push` (enforces the Changelog
+  rule and the checks), and `CLAUDE.md` so a fresh assistant is oriented
+  automatically. Two incidents drove this: the seam fix shipped with no Changelog
+  entry despite the bold rule, and a verification probe that deliberately zeroed
+  `HOUR_VALUE` reached production for ~2 minutes because the value check was too
+  weak to notice (the stop penalty alone still ordered the example correctly).
+  Reverted, and the check now asserts time is priced at all.
 
 **July 24, 2026 (late, streaming reverted)**
 - Reverted the frontend to the non-streaming `/api/search` path (Evan: "not
@@ -521,5 +473,3 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
 
 **January 2026**
 - v1–v3: original Next.js + SerpAPI prototypes (two-step round trips, debug eras)
-
-<!-- log line -->

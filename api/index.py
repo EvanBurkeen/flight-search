@@ -1112,7 +1112,7 @@ def serialize_flight(result, cabin: str | None = None, ret_date: str | None = No
 # Anyone who wants pure price can still say "cheapest" or use the sort control,
 # and the outright cheapest fare is always kept visible in the preview.
 # --------------------------------------------------------------------------
-HOUR_VALUE = 0.0          # one hour of a leisure traveler's day, in USD
+HOUR_VALUE = 25.0          # one hour of a leisure traveler's day, in USD
 FIRST_STOP_COST = 35.0     # deplaning, re-boarding, misconnect risk
 EXTRA_STOP_COST = 45.0     # each stop beyond the first hurts more than the last
 WARNING_COST = {           # keyed against the warnings we already generate
