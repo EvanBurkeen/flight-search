@@ -163,6 +163,23 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
 
 ## Changelog
 
+**July 24, 2026 (tail latency)**
+- Bringing down worst-case turn times. run_search now takes a budget
+  (35s default, 45s multi-city) and stops retrying when it is out of time:
+  retries re-run the ENTIRE search, and for multi-city that meant four
+  attempts x a ~25s fan-out plus 2/4/6s sleeps = 100s+ tails that blew the
+  65s turn budget. Ladder sleeps cut to ~0.5-1.3s (worst-case pure sleep
+  ~4s, was 12s): each retry is a NEW identity now, so long per-search
+  cooling is redundant with the process-wide breaker.
+- Multi-city standalone leg pricing runs CONCURRENTLY with the expansion
+  (it ran after, adding its whole runtime to the tail); 6s harvest grace,
+  degrades to joint price. Fan-out adapts to weather: 6 normally, 4 when
+  the breaker has seen recent refusals, so optional work shrinks before
+  required work misses the budget. fli expansions already run 10-wide.
+- Verified deterministically (budget stops a stubbed always-failing ladder
+  at 2 attempts). Local live checks impossible: the dev IP is hard-timing
+  out after a full day of testing; production rides the proxy.
+
 **July 24, 2026 (multi-city prices: quote what you can actually buy)**
 - Evan: "the 635 is 1022, not 2207". Root cause found by dumping raw part
   prices. In a multi-city expansion, parts[0].price is the "from" total for

@@ -1238,14 +1238,25 @@ def add_highlights(flights: list[dict]) -> None:
             f["score"] = 40
 
 
-def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy, top_n: int):
+def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy,
+               top_n: int, budget_s: float = 35.0):
     # Refusals come as HTTP 200 + a tiny body (parses to empty) or as raised
     # client errors. Both gates are answered the same way: retire the identity
     # (cookies + exit IP + fingerprint) so the retry is a different visitor,
     # and let the breaker impose quiet if the whole process is mid-wave.
+    #
+    # budget_s bounds the WHOLE ladder. Retries re-run the entire search —
+    # for multi-city that includes the full leg-2 fan-out, so four attempts of
+    # a 25s expansion plus the old 2/4/6s sleeps produced 100s+ tails that
+    # blew the 65s turn budget and reached the user as "that ran long".
+    # Sleeps between attempts are short now: each retry is a NEW identity, so
+    # per-search cooling is redundant with the process-wide breaker.
+    started = time.monotonic()
     last_exc = None
     for i, attempt_sort in enumerate((sort, sort, SortBy.CHEAPEST, SortBy.CHEAPEST)):
-        breaker_wait(1.5 if i == 0 else 8.0)
+        if i > 0 and time.monotonic() - started > budget_s:
+            break  # out of time: surface what we have rather than dig the hole deeper
+        breaker_wait(1.5 if i == 0 else 6.0)
         checkout_identity()
         attempt = filters.model_copy(update={"sort_by": attempt_sort})
         try:
@@ -1254,7 +1265,7 @@ def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy
             last_exc = e
             retire_identity()
             note_search_outcome(False)
-            time.sleep(2 + 2 * i)
+            time.sleep(0.5 + 0.4 * i + random.uniform(0, 0.4))
             continue
         if results:
             note_search_outcome(True)
@@ -1262,7 +1273,7 @@ def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy
             return results
         retire_identity()
         note_search_outcome(False)
-        time.sleep(0.6 * (i + 1) + random.uniform(0, 0.5))
+        time.sleep(0.4 * (i + 1) + random.uniform(0, 0.4))
     if last_exc:
         raise last_exc
     return []
@@ -1555,36 +1566,43 @@ def search_multi_city(spec: dict, currency: str) -> dict:
         show_all_results=True,
     )
     sort = SORT_MAP.get(spec.get("sort"), SortBy.CHEAPEST)
-    # multi-city expands every leg chain — keep the fan-out small to stay inside
-    # the serverless time budget
+
+    # start standalone leg pricing NOW, beside the expansion rather than after
+    # it — run serially it added its whole runtime to the multi-city tail
+    raw_segs = (spec.get("multi_city_segments") or [])[:5]
+    price_pool = ThreadPoolExecutor(max_workers=min(4, max(1, len(raw_segs))))
+    price_futs = [price_pool.submit(leg_price_index, seg.get("origins") or [],
+                                    seg.get("destinations") or [], seg.get("date"),
+                                    spec.get("cabin"), seg.get("departure_time"))
+                  for seg in raw_segs]
+
     # fan-out: only this many leg-1 candidates get expanded into full
     # itineraries. 4 lost the best one-way (a 6:35 departure sat at rank 5
-    # among eight same-price ties); warm-connection reuse made expansions
-    # cheap enough to widen. Time-window refinement narrows WHICH candidates
-    # get expanded, so a specific departure can always be forced in.
-    results = run_search(SearchFlights(), filters, sort, top_n=6)
+    # among eight same-price ties); warm-connection reuse made expansions cheap
+    # enough to widen. In bad weather (the breaker has seen refusals) do less
+    # optional work so the required work still fits the turn budget.
+    with _breaker_lock:
+        rough_weather = _breaker["consecutive"] > 0 or _breaker["open_until"] > time.monotonic()
+    fanout = 4 if rough_weather else 6
+    results = run_search(SearchFlights(), filters, sort, top_n=fanout, budget_s=45.0)
 
     if not results:
+        price_pool.shutdown(wait=False, cancel_futures=True)
         return {
             "type": "multicity",
             "message": "No multi-city itineraries found. Try shifting a date or splitting the legs into separate one-way searches.",
             "results": [],
         }
 
-    # price every leg standalone, in parallel, so we can quote the cheaper of
-    # "one ticket" and "buy each leg" the way Google's booking page does
-    indexes: list = [{} for _ in resolved]  # per-leg standalone prices
-    pool = ThreadPoolExecutor(max_workers=min(4, len(resolved)))
-    raw_segs = (spec.get("multi_city_segments") or [])[:5]
-    futs = [pool.submit(leg_price_index, seg.get("origins") or [], seg.get("destinations") or [],
-                        seg.get("date"), spec.get("cabin"), seg.get("departure_time"))
-            for seg in raw_segs]
-    for i, fu in enumerate(futs):
+    # harvest the leg prices that finished while the expansion ran; anything
+    # still pending gets only a short grace before we degrade to joint prices
+    indexes: list = [{} for _ in raw_segs]  # per-leg standalone prices
+    for i, fu in enumerate(price_futs):
         try:
-            indexes[i] = fu.result(timeout=15) or {}
+            indexes[i] = fu.result(timeout=6) or {}
         except Exception:
             indexes[i] = {}
-    pool.shutdown(wait=False, cancel_futures=True)
+    price_pool.shutdown(wait=False, cancel_futures=True)
 
     itineraries = []
     for combo in results[:8]:
@@ -1680,7 +1698,7 @@ def search_flexible_dates(spec: dict, origins: list, destinations: list, currenc
             last_exc = e
             retire_identity()
             note_search_outcome(False)
-            time.sleep(3 + 3 * i)
+            time.sleep(0.6 + 0.6 * i)
             continue
         if date_prices:
             note_search_outcome(True)
