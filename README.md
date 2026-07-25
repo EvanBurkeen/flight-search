@@ -324,8 +324,13 @@ Two root causes found and fixed:
   duration filters and sort. The ask-the-concierge chip remains as fallback.
 - **First-call routing:** plainly-route-shaped queries emit their opening
   search call via Haiku 4.5 instead of Opus (the single largest fixed cost of
-  a simple turn); if Haiku answers in prose instead of calling the tool, the
-  call is silently redone on Opus, so advice quality is untouched.
+  a simple turn); if Haiku answers in prose instead of calling the tool, OR
+  the API rejects the Haiku call at all, it is silently redone on Opus, so
+  advice quality is untouched. Hotfixed minutes after deploy: Haiku 4.5
+  rejects web_search_20260209 (an Opus/Sonnet-tier tool), which 400'd every
+  plain search until the router call dropped the web tool and gained the
+  hard Opus fallback. Lesson: a cheaper model is a different API surface,
+  not just a different price.
 
 **July 25, 2026 (round-trip optionality)** — Evan: the round-trip display
 "doesn't give me enough optionality"; travelers pick per direction, not from

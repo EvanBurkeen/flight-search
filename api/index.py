@@ -704,7 +704,11 @@ def run_assistant(query: str, history: list | None, emit=None) -> dict:
                 "text": assistant_system_prompt(),
                 "cache_control": {"type": "ephemeral"},
             }],
-            "tools": [SEARCH_TOOL, web_tool],
+            # Haiku 4.5 rejects web_search_20260209 (Opus/Sonnet-tier tool) —
+            # the router call only exists to emit search_flights anyway; if
+            # the query turns out to need web context, the no-tool-call guard
+            # below redoes it on Opus with the full toolset
+            "tools": [SEARCH_TOOL] if use_haiku else [SEARCH_TOOL, web_tool],
             "messages": messages,
         }
         if not use_haiku:
@@ -712,13 +716,23 @@ def run_assistant(query: str, history: list | None, emit=None) -> dict:
             # effort: that is where the recommendation is actually written.
             # (Haiku 4.5 rejects output_config.effort, so it is Opus-only.)
             call_kwargs["output_config"] = {"effort": first_effort if iterations == 1 else "medium"}
-        with client.messages.stream(**call_kwargs) as stream:
-            show_text = stream_first_text or iterations > 1
-            for chunk in stream.text_stream:
-                if chunk and show_text:
-                    streamed_any = True
-                    emit("text_delta", chunk)
-            response = stream.get_final_message()
+        try:
+            with client.messages.stream(**call_kwargs) as stream:
+                show_text = stream_first_text or iterations > 1
+                for chunk in stream.text_stream:
+                    if chunk and show_text:
+                        streamed_any = True
+                        emit("text_delta", chunk)
+                response = stream.get_final_message()
+        except anthropic.APIStatusError:
+            if not use_haiku:
+                raise
+            # the router is an optimization, never a failure mode: any API
+            # rejection of the Haiku call redoes it on Opus
+            haiku_router = False
+            iterations -= 1
+            timings.append(("haiku_fallback", round(time.monotonic() - _t, 2), "api error; redoing on opus"))
+            continue
 
         u = getattr(response, "usage", None)
         timings.append((
