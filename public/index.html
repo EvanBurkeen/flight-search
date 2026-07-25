@@ -428,6 +428,22 @@
     .rt-tag { font-size: 0.6rem; padding: 0.1rem 0.45rem; border-radius: 999px; background: var(--info-bg); color: var(--info); font-weight: 600; }
     .rt-tag.warn { background: var(--warn-bg); color: var(--warn); }
     .rt-empty { font-size: 0.78rem; opacity: 0.6; padding: 0.6rem 0.2rem; }
+    /* streaming: a quiet caret while the recommendation types itself out,
+       then the cards rise in after the prose lands */
+    .msg-text.streaming::after {
+      content: '▍'; margin-left: 1px; color: var(--accent);
+      animation: caret-blink 0.9s steps(1) infinite;
+    }
+    @keyframes caret-blink { 50% { opacity: 0; } }
+    .sec-appear { animation: sec-rise 0.32s ease both; }
+    @keyframes sec-rise {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: none; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .sec-appear { animation: none; }
+    }
+
     .rt-degraded {
       border: 1px dashed var(--line-strong); border-radius: 7px; padding: 0.8rem 0.9rem;
       font-size: 0.82rem; display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center;
@@ -654,10 +670,11 @@
           <div x-show="msg.role === 'note'" class="msg-note" x-text="msg.content"></div>
 
           <div x-show="msg.role === 'assistant'" class="msg-assistant">
-            <div class="msg-text" x-html="renderText(msg.content)"></div>
+            <div class="msg-text" :class="msg._streaming ? 'streaming' : ''"
+                 x-show="msg.content || !msg._streaming" x-html="renderText(msg.content)"></div>
 
             <template x-for="(sec, si) in visibleSections(msg)" :key="sec._anchor || si">
-              <div :id="sec._anchor">
+              <div :id="sec._anchor" class="sec-appear" :style="'animation-delay:' + (si * 70) + 'ms'">
                 <div class="section-head">
                   <div class="section-label" x-text="sectionLabel(sec)"></div>
                   <div class="mini-toggle" x-show="sec.results && sec.results.length && !(sec.type === 'itineraries' && sec._expanded)">
@@ -1525,6 +1542,9 @@
           this.controller?.abort();
           this.isLoading = false;
           this.stopLoadingCycle();
+          // an interrupted streaming reply keeps its partial text, minus the caret
+          const last = this.messages[this.messages.length - 1];
+          if (last && last._streaming) last._streaming = false;
           // mark the interruption so Claude reads the next message as a correction
           this.history.push({ role: 'assistant', content: '(Search interrupted by the user before results came back.)' });
           this.history = this.history.slice(-12);
@@ -1554,36 +1574,28 @@
           this.history.push({ role: 'user', content: q });
 
           try {
-            // Non-streaming: the whole turn arrives at once. The SSE version
-            // (progressive cards + letter-by-letter typing) lives on the
-            // `streaming-experiment` branch; /api/search/stream is still
-            // served, so switching back is a change to this fetch alone.
-            const res = await fetch('/api/search', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ query: q, history: this.history.slice(0, -1) }),
-              signal: this.controller.signal,
-            });
-            const data = await res.json();
-            if (data.error) throw new Error(data.error);
-            if (myReq !== this.reqId) return; // superseded by a newer request
-
-            this.history.push({ role: 'assistant', content: data.message });
-            this.history = this.history.slice(-12);
-
-            (data.sections || []).forEach(sec => { sec._anchor = 'sec-' + (++this.sectionSeq); });
-            this.messages.push({
-              role: 'assistant',
-              content: data.message,
-              sections: data.sections || [],
-              suggestions: data.suggestions || [],
-            });
-            this.maybeNudge();
+            // Streaming first: the recommendation types out as Claude writes
+            // it, the cards land after the prose. Any transport problem falls
+            // back to the plain JSON turn, so streaming can only ever add.
+            await this.streamTurn(q, myReq);
           } catch (err) {
             if (err.name === 'AbortError') return; // stop() already recorded the interruption
             if (myReq !== this.reqId) return;
-            this.messages.push({ role: 'assistant', content: `Something went wrong: ${err.message}. Try again in a moment.`, sections: [] });
-            this.maybeNudge();
+            this.dropStreamingMsg();
+            if (err.serverTurn) {
+              // the turn itself failed server-side; re-running it would just
+              // pay for the same failure again
+              this.messages.push({ role: 'assistant', content: `Something went wrong: ${err.message}. Try again in a moment.`, sections: [] });
+              this.maybeNudge();
+            } else {
+              try {
+                await this.plainTurn(q, myReq);
+              } catch (err2) {
+                if (err2.name === 'AbortError' || myReq !== this.reqId) return;
+                this.messages.push({ role: 'assistant', content: `Something went wrong: ${err2.message}. Try again in a moment.`, sections: [] });
+                this.maybeNudge();
+              }
+            }
           } finally {
             if (myReq === this.reqId) {
               this.isLoading = false;
@@ -1591,6 +1603,152 @@
               // no auto-scroll on completion — stay where the reader is
             }
           }
+        },
+
+        // the pre-streaming turn, kept verbatim as the fallback path
+        async plainTurn(q, myReq) {
+          const res = await fetch('/api/search', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ query: q, history: this.history.slice(0, -1) }),
+            signal: this.controller.signal,
+          });
+          const data = await res.json();
+          if (data.error) throw new Error(data.error);
+          if (myReq !== this.reqId) return; // superseded by a newer request
+
+          this.history.push({ role: 'assistant', content: data.message });
+          this.history = this.history.slice(-12);
+
+          (data.sections || []).forEach(sec => { sec._anchor = 'sec-' + (++this.sectionSeq); });
+          this.messages.push({
+            role: 'assistant',
+            content: data.message,
+            sections: data.sections || [],
+            suggestions: data.suggestions || [],
+          });
+          this.maybeNudge();
+        },
+
+        async streamTurn(q, myReq) {
+          this._streamBuf = '';
+          this._doneData = null;
+          this._typing = false;
+          this._finalized = false;
+          this._drainResolve = null;
+          this.messages.push({ role: 'assistant', content: '', sections: [], suggestions: [], _streaming: true });
+
+          const res = await fetch('/api/search/stream', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ query: q, history: this.history.slice(0, -1) }),
+            signal: this.controller.signal,
+          });
+          if (!res.ok || !res.body || !(res.headers.get('content-type') || '').includes('text/event-stream')) {
+            throw new Error('stream unavailable');
+          }
+          const reader = res.body.getReader();
+          const dec = new TextDecoder();
+          let acc = '';
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (myReq !== this.reqId) { reader.cancel().catch(() => {}); return; }
+            acc += dec.decode(value, { stream: true });
+            let idx;
+            while ((idx = acc.indexOf('\n\n')) >= 0) {
+              const frame = acc.slice(0, idx); acc = acc.slice(idx + 2);
+              let ev = 'message', data = '';
+              for (const line of frame.split('\n')) {
+                if (line.startsWith('event:')) ev = line.slice(6).trim();
+                else if (line.startsWith('data:')) data += line.slice(5).trim();
+              }
+              let body = null;
+              if (data) { try { body = JSON.parse(data); } catch { continue; } }
+              if (ev === 'text_delta') {
+                this._streamBuf += (body || '');
+                this.startTyping(myReq);
+              } else if (ev === 'text_reset') {
+                // whatever streamed was a lead-in to a search, not the answer
+                this._streamBuf = '';
+                this.liveMsg().content = '';
+              } else if (ev === 'done') {
+                this._doneData = body || {};
+              } else if (ev === 'error') {
+                const e = new Error((body && body.error) || 'server error');
+                e.serverTurn = true;
+                throw e;
+              }
+              // 'sections' frames are deliberately not rendered here: the
+              // reveal order is prose first, then cards — 'done' carries all
+            }
+          }
+          if (!this._doneData) throw new Error('stream ended without a result');
+          this.startTyping(myReq); // covers a turn that streamed no text at all
+          await new Promise(resolve => {
+            this._drainResolve = resolve;
+            this.maybeFinishStream(myReq);
+          });
+        },
+
+        liveMsg() { return this.messages[this.messages.length - 1]; },
+
+        startTyping(myReq) {
+          if (this._typing) return;
+          this._typing = true;
+          // rAF gives the smooth 60fps cadence, but browsers starve rAF in
+          // hidden or occluded tabs — without the timer watchdog, a reply
+          // would never finish typing (or finalize) in a background tab
+          const schedule = (fn) => {
+            let ran = false;
+            const run = () => { if (ran) return; ran = true; fn(); };
+            const t = setTimeout(run, 120);
+            requestAnimationFrame(() => { clearTimeout(t); run(); });
+          };
+          const tick = () => {
+            if (myReq !== this.reqId) { this._typing = false; return; }
+            const buf = this._streamBuf;
+            if (buf.length) {
+              // adaptive cadence: a deeper backlog lands more characters per
+              // frame, so the typing can never fall behind the network; a
+              // hidden page flushes outright — no one is watching the animation
+              const n = document.hidden ? buf.length
+                : Math.max(2, Math.round(buf.length / (this._doneData ? 5 : 12)));
+              this.liveMsg().content += buf.slice(0, n);
+              this._streamBuf = buf.slice(n);
+              schedule(tick);
+              return;
+            }
+            this._typing = false;
+            if (this._doneData) this.maybeFinishStream(myReq);
+            // buffer empty mid-turn: go idle; the next text_delta restarts us
+          };
+          schedule(tick);
+        },
+
+        maybeFinishStream(myReq) {
+          const release = () => {
+            const r = this._drainResolve; this._drainResolve = null; if (r) r();
+          };
+          if (myReq !== this.reqId || this._finalized) { release(); return; }
+          if (!this._doneData || this._streamBuf.length || this._typing) return;
+          const d = this._doneData;
+          const msg = this.liveMsg();
+          msg.content = d.message || msg.content;   // 'done' is authoritative
+          (d.sections || []).forEach(sec => { sec._anchor = 'sec-' + (++this.sectionSeq); });
+          msg.sections = d.sections || [];
+          msg.suggestions = d.suggestions || [];
+          msg._streaming = false;
+          this._finalized = true;
+          this.history.push({ role: 'assistant', content: d.message || '' });
+          this.history = this.history.slice(-12);
+          this.maybeNudge();
+          release();
+        },
+
+        dropStreamingMsg() {
+          const last = this.messages[this.messages.length - 1];
+          if (last && last.role === 'assistant' && last._streaming) this.messages.pop();
         },
 
         pickDate(d) {

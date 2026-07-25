@@ -49,20 +49,19 @@ this file, then **"Lessons the hard way"** below before debugging anything.
   (IPRoyal rotating US-residential proxy; the fix for Google throttling).
 - **Costs Evan cares about:** Anthropic per-turn (~cents), IPRoyal bandwidth
   (~$6/GB, ~2GB purchased July 2026, months of runway at current usage).
-- **Parked work — `streaming-experiment` branch** (`git -C <path> checkout
-  streaming-experiment`): SSE turn delivery with progressive result cards,
-  held-back reveal after the intro sentence, and letter-by-letter typing.
-  Shelved July 24, 2026 because it was not fully reliable in practice. The
-  `/api/search/stream` endpoint and `run_assistant(..., emit=...)` are STILL
-  ON MAIN and still work, so returning to it is a one-line change in
-  `public/index.html` (fetch `/api/search/stream` instead of `/api/search`)
-  plus restoring that branch's frontend stream handler and typewriter. Known
-  gotcha if you go back: mutate Alpine's reactive proxy
-  (`this.messages[this.messages.length - 1]`), never the object you pushed.
+- **Streaming is LIVE on main since July 25, 2026** (Evan's spec: the
+  recommendation types out first, THEN the cards land). The frontend consumes
+  `/api/search/stream` with a hard auto-fallback to `/api/search` on any
+  transport problem, so streaming can only ever add. The old
+  `streaming-experiment` branch (progressive cards, different reveal order) is
+  history only — do not restore its handler. Gotchas already paid for: mutate
+  Alpine's reactive proxy, never the pushed object; and the typewriter MUST
+  NOT depend on requestAnimationFrame alone (browsers starve rAF in hidden
+  tabs — a reply would never finish typing or finalize; the watchdog timer in
+  `startTyping` is load-bearing).
 - **Roadmap shelf (discussed, not built):** price watches (cron + email),
-  trip memory + login, streaming replies, real booking via Duffel.
-  (Search-result caching shipped July 24; the price-by-date calendar heatmap
-  shipped July 25.)
+  trip memory + login, real booking via Duffel. (Search-result caching shipped
+  July 24; the calendar heatmap and streaming replies shipped July 25.)
 - **Known trade-offs accepted by Evan:** timeline layover dots use naive local
   times (schematic, not exact); Claude sees only top-6 summaries per search
   (with truncation warning baked in); the value-ranking weights
@@ -301,6 +300,17 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
   lakes; run it, then bump the `?v=N` cache-buster on the script tag in index.html).
 
 ## Changelog
+
+**July 25, 2026 (streaming, unshelved)**
+- Replies now stream (Evan's green light + spec): the recommendation types out
+  letter by letter with an adaptive cadence that speeds up with backlog (the
+  typing can never lag the network), and the result cards rise in AFTER the
+  prose lands — prose first, then cards, then suggestion chips. Any transport
+  problem falls back to the plain JSON turn automatically; a server-side turn
+  failure is reported, not re-run. Fixed in the process: a typewriter driven
+  by requestAnimationFrame alone never finishes in a hidden tab (browsers
+  starve rAF) — a watchdog timer keeps it progressing and a hidden page
+  flushes instantly.
 
 **July 25, 2026 (board polish)**
 - Return rows on the mix & match board always name the airline (Evan's catch:
