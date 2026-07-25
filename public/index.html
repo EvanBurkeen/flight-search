@@ -44,15 +44,22 @@
       --card-shadow: 0 1px 2px rgba(90, 70, 40, 0.05), 0 8px 22px -12px rgba(90, 70, 40, 0.28);
       --card-shadow-hover: 0 2px 4px rgba(90, 70, 40, 0.06), 0 14px 30px -12px rgba(90, 70, 40, 0.35);
       --serif: Fraunces, Georgia, "Times New Roman", serif;
+      /* one definition of the paper, shared by the page and the fixed compose
+         bar: when the bar had a flat fill it read as a different shade of
+         cream and the join showed as a band across the bottom */
+      --paper:
+        repeating-linear-gradient(0deg, rgba(28,26,21,0.014) 0 1px, transparent 1px 3px),
+        repeating-linear-gradient(90deg, rgba(28,26,21,0.014) 0 1px, transparent 1px 3px),
+        radial-gradient(circle at 85% -10%, rgba(177, 71, 31, 0.08), transparent 45%);
     }
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       background-color: var(--bg);
-      background-image:
-        repeating-linear-gradient(0deg, rgba(28,26,21,0.014) 0 1px, transparent 1px 3px),
-        repeating-linear-gradient(90deg, rgba(28,26,21,0.014) 0 1px, transparent 1px 3px),
-        radial-gradient(circle at 85% -10%, rgba(177, 71, 31, 0.08), transparent 45%);
+      background-image: var(--paper);
+      /* short pages (the landing screen) otherwise stop painting the texture
+         partway down, leaving an untextured strip at the bottom */
+      min-height: 100vh;
       color: var(--ink);
       -webkit-font-smoothing: antialiased;
     }
@@ -359,10 +366,21 @@
 
     .input-area {
       position: fixed; left: 0; right: 0; bottom: 0; z-index: 7;
-      background: var(--bg); border-top: 1px solid var(--line);
+      background-color: var(--bg);
+      background-image: var(--paper);
+      background-attachment: fixed;   /* aligns the texture with the page behind */
       padding: 0.8rem 0 calc(0.8rem + env(safe-area-inset-bottom));
+      border-top: 1px solid transparent;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    /* only when something is genuinely hidden behind the bar does a divider
+       earn its place; on a short page it was drawing a line and an upward
+       shadow smudge across empty paper */
+    .input-area.raised {
+      border-top-color: var(--line);
       box-shadow: 0 -8px 20px -14px rgba(28, 26, 21, 0.35);
     }
+    html.dark .input-area.raised { box-shadow: 0 -8px 20px -14px rgba(0, 0, 0, 0.7); }
     .input-inner { max-width: 58rem; margin: 0 auto; padding: 0 1.5rem; }
     .new-below {
       position: fixed; left: 50%; transform: translateX(-50%);
@@ -474,9 +492,10 @@
       --green: #3a5747;
       --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.25), 0 10px 26px -14px rgba(0, 0, 0, 0.6);
       --card-shadow-hover: 0 2px 4px rgba(0, 0, 0, 0.3), 0 16px 34px -14px rgba(0, 0, 0, 0.7);
+      --paper: radial-gradient(circle at 85% -10%, rgba(217, 122, 74, 0.10), transparent 45%);
     }
     html.dark body {
-      background-image: radial-gradient(circle at 85% -10%, rgba(217, 122, 74, 0.10), transparent 45%);
+      background-image: var(--paper);
     }
     html.dark .header h1 em { color: #d97a4a; }
     html.dark .card-price, html.dark .compact-price, html.dark .hero .hello,
@@ -488,7 +507,7 @@
     html.dark .badge-plain { background: rgba(236, 228, 203, 0.10); color: var(--ink); }
     html.dark .text-input::placeholder { color: rgba(236, 228, 203, 0.38); }
     html.dark .route-map { box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35); }
-    html.dark .input-area { box-shadow: 0 -8px 20px -14px rgba(0, 0, 0, 0.7); }
+
   </style>
 </head>
 <body>
@@ -911,7 +930,7 @@
       <div x-ref="bottom"></div>
     </div>
 
-    <div class="input-area">
+    <div class="input-area" :class="barRaised ? 'raised' : ''">
       <div class="input-inner">
         <form @submit.prevent="search()">
           <div class="input-row">
@@ -962,6 +981,7 @@
         viewMode: localStorage.getItem('flightViewMode') || 'detailed',
         theme: localStorage.getItem('flightTheme') === 'dark' ? 'dark' : 'light',
         newBelow: false,
+        barRaised: false,
         loadingText: 'Thinking…',
         loadingTimer: null,
         controller: null,
@@ -974,14 +994,31 @@
             holder.innerHTML = `<svg style="position:absolute;width:0;height:0" aria-hidden="true"><defs><path id="worldpath" d="${WORLD_PATH}"/><path id="lakespath" d="${LAKES_PATH}"/></defs></svg>`;
             document.body.appendChild(holder.firstChild);
           }
+          // the compose bar only earns its divider when content actually runs
+          // underneath it; ResizeObserver catches replies growing the page
+          this.syncBar();
+          window.addEventListener('resize', () => this.syncBar());
+          try {
+            new ResizeObserver(() => this.syncBar()).observe(document.querySelector('.container'));
+          } catch (e) { /* older browsers: scroll + resize still cover it */ }
+
           // scrolling the new reply into view dismisses the "results ready" nudge
           window.addEventListener('scroll', () => {
+            this.syncBar();
             if (this.newBelow === false) return;
             const el = document.getElementById('msg-' + this.newBelow);
             if (!el || el.getBoundingClientRect().top < window.innerHeight - 120) this.newBelow = false;
           }, { passive: true });
         },
 
+
+        syncBar() {
+          // Scrollable means real content can pass under the bar, which is the
+          // only time a divider is telling the truth. Measuring "content below
+          // the bar's top edge" instead would count the container's own bottom
+          // padding and raise the divider even on the empty landing screen.
+          this.barRaised = document.documentElement.scrollHeight > window.innerHeight + 2;
+        },
 
         maybeNudge() {
           // no auto-scroll on completion by design; instead, offer a jump
