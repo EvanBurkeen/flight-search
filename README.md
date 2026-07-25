@@ -313,6 +313,10 @@ pre-paired cards.
   the assistant (a departure-window search); `compact_for_model` now tells
   Claude how many unpriced outbounds and nonstops exist so its prose can never
   again infer absence from the expansion sample. Checks added for both.
+- Post-deploy fix: expansions scale with request weight (10 single-airport
+  pairs, 8 multi-airport) — each expansion re-posts the whole multi-airport
+  query, and 10 of those timed out 3/3 on NYC->London through the proxy while
+  JFK->LHR at 10 sailed.
 
 **July 25, 2026**
 - Price-by-date calendar heatmap (roadmap item): expanding a flexible-date

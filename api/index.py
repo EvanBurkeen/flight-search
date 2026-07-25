@@ -1357,7 +1357,12 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
     filters = build_filters(spec, origins, destinations, show_all_results=True)
     sort = SORT_MAP.get(spec.get("sort"), SortBy.CHEAPEST)
     searcher = RoundTripSearch()
-    results = run_search(searcher, filters, sort, top_n=10)
+    # each expansion re-posts the whole query with an outbound selected, so
+    # multi-airport pairs (NYC x London) make every request bigger and slower:
+    # at 10 expansions that burst timed out 3/3 through the proxy on July 25
+    # while single-airport pairs sailed. Scale expansions to request weight.
+    top_n = 10 if len(origins) * len(destinations) == 1 else 8
+    results = run_search(searcher, filters, sort, top_n=top_n)
 
     if not results:
         return {
