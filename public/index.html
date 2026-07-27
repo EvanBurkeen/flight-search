@@ -428,6 +428,33 @@
     .rt-tag { font-size: 0.6rem; padding: 0.1rem 0.45rem; border-radius: 999px; background: var(--info-bg); color: var(--info); font-weight: 600; }
     .rt-tag.warn { background: var(--warn-bg); color: var(--warn); }
     .rt-empty { font-size: 0.78rem; opacity: 0.6; padding: 0.6rem 0.2rem; }
+    /* share: quiet links on cards; an overlay with the rendered boarding pass */
+    .share-quiet {
+      background: none; border: none; cursor: pointer;
+      font-size: 0.7rem; font-weight: 600; letter-spacing: 0.14em;
+      text-transform: uppercase; color: var(--brass);
+      padding: 0.48rem 0.4rem; margin-left: 0.55rem;
+    }
+    .share-quiet:hover { text-decoration: underline; }
+    .share-overlay {
+      position: fixed; inset: 0; z-index: 40; display: flex;
+      align-items: center; justify-content: center; padding: 1.2rem;
+      background: rgba(28, 26, 21, 0.45);
+    }
+    .share-panel {
+      background: var(--panel); border: 1px solid var(--line-strong);
+      border-radius: 12px; box-shadow: var(--card-shadow-hover);
+      max-width: 46rem; width: 100%; padding: 1.1rem 1.2rem 1.2rem;
+      max-height: calc(100vh - 2.4rem); overflow: auto;
+    }
+    .share-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 0.7rem; }
+    .share-title { font-family: var(--serif); font-weight: 600; font-size: 1.05rem; }
+    .share-close { background: none; border: none; cursor: pointer; font-size: 1rem; color: var(--ink); opacity: 0.6; }
+    .share-close:hover { opacity: 1; }
+    .share-preview { width: 100%; border-radius: 8px; display: block; box-shadow: 0 6px 18px -8px rgba(90, 70, 40, 0.4); }
+    .share-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.85rem; align-items: center; }
+    .share-toast { font-size: 0.75rem; color: var(--good); font-weight: 600; margin-left: auto; }
+
     /* streaming: a quiet caret while the recommendation types itself out,
        then the cards rise in after the prose lands */
     .msg-text.streaming::after {
@@ -740,7 +767,7 @@
                           <template x-for="(h, k) in f.highlights" :key="k"><span class="badge" :class="badgeClass(h)" x-text="h"></span></template>
                         </div>
                         <div class="compact-warn" x-show="(f.warnings || []).length" x-text="'⚠ ' + (f.warnings || []).length + ' caveat' + (f.warnings.length > 1 ? 's' : '') + ' — see Detailed'"></div>
-                        <a :href="f.booking_url" target="_blank" rel="noopener noreferrer" class="compact-book">Book →</a>
+                        <a :href="f.booking_url" target="_blank" rel="noopener noreferrer" class="compact-book">Book →</a><button class="share-quiet" @click="shareFlight(f)">Share</button>
                       </div>
                     </template>
                   </div>
@@ -796,7 +823,7 @@
                         <template x-for="(w, k) in (f.warnings || [])" :key="'w'+k">
                           <div class="warning" x-text="w"></div>
                         </template>
-                        <a :href="f.booking_url" target="_blank" rel="noopener noreferrer" class="card-action">Book on Google Flights</a>
+                        <a :href="f.booking_url" target="_blank" rel="noopener noreferrer" class="card-action">Book on Google Flights</a><button class="share-quiet" @click="shareFlight(f)">Share</button>
                       </div>
                     </template>
                   </div>
@@ -825,7 +852,7 @@
                         <div class="compact-badges" x-show="it.outbound.stops === 0 && it.return.stops === 0">
                           <span class="badge badge-direct">Direct both ways</span>
                         </div>
-                        <a :href="it.booking_url" target="_blank" rel="noopener noreferrer" class="compact-book">Book →</a>
+                        <a :href="it.booking_url" target="_blank" rel="noopener noreferrer" class="compact-book">Book →</a><button class="share-quiet" @click="sharePairing(it)">Share</button>
                       </div>
                     </template>
                   </div>
@@ -921,7 +948,7 @@
                         <template x-for="(w, k) in (it.outbound.warnings || []).concat(it.return.warnings || [])" :key="'w'+k">
                           <div class="warning" x-text="w"></div>
                         </template>
-                        <a :href="it.booking_url" target="_blank" rel="noopener noreferrer" class="card-action">Book on Google Flights</a>
+                        <a :href="it.booking_url" target="_blank" rel="noopener noreferrer" class="card-action">Book on Google Flights</a><button class="share-quiet" @click="sharePairing(it)">Share</button>
                       </div>
                     </template>
                   </div>
@@ -1011,7 +1038,7 @@
                         <div class="rt-summary-legs" x-text="rtSummaryText(sec)"></div>
                         <div class="rt-summary-price" x-text="rtSelected(sec) ? formatPrice(rtSelected(sec).total_price, rtCurrency(rtSelected(sec))) + ' total' : ''"></div>
                       </div>
-                      <a class="card-action rt-book" :href="rtSelected(sec) && rtSelected(sec).booking_url" target="_blank" rel="noopener noreferrer">Book this pairing</a>
+                      <a class="card-action rt-book" :href="rtSelected(sec) && rtSelected(sec).booking_url" target="_blank" rel="noopener noreferrer">Book this pairing</a><button class="share-quiet" @click="sharePairing(rtSelected(sec))">Share</button>
                     </div>
                   </div>
                 </template>
@@ -1029,7 +1056,7 @@
                           <div class="compact-leg"><span class="lbl" x-text="'Leg ' + (k+1)"></span><span x-text="p.legs[0].from + '→' + p.legs[p.legs.length-1].to + ' · ' + formatTime(p.legs[0].departure) + '–' + formatTime(p.legs[p.legs.length-1].arrival) + ' · ' + stopsText(p.stops)"></span></div>
                         </template>
                         <div class="compact-sub" x-text="(it.price_basis === 'separate tickets' ? 'as 2 separate tickets' : 'one combined ticket') + ((it.warnings || []).length ? ' · ⚠' : '')"></div>
-                        <a :href="it.booking_url" target="_blank" rel="noopener noreferrer" class="compact-book">Book →</a>
+                        <a :href="it.booking_url" target="_blank" rel="noopener noreferrer" class="compact-book">Book →</a><button class="share-quiet" @click="shareMulti(it)">Share</button>
                       </div>
                     </template>
                   </div>
@@ -1086,7 +1113,7 @@
                           <div class="warning" x-text="w"></div>
                         </template>
                         <div class="route-map" x-show="multiCityPoints(it).length > 1" x-html="mapSvg(multiCityPoints(it))"></div>
-                        <a :href="it.booking_url" target="_blank" rel="noopener noreferrer" class="card-action">Book on Google Flights</a>
+                        <a :href="it.booking_url" target="_blank" rel="noopener noreferrer" class="card-action">Book on Google Flights</a><button class="share-quiet" @click="shareMulti(it)">Share</button>
                       </div>
                     </template>
                   </div>
@@ -1171,6 +1198,25 @@
       <div x-ref="bottom"></div>
     </div>
 
+<!-- share overlay: the rendered boarding pass + copy/save/share actions -->
+    <div class="share-overlay" style="display: none" x-show="share.open"
+         @click.self="closeShare()" @keydown.escape.window="closeShare()">
+      <div class="share-panel">
+        <div class="share-head">
+          <div class="share-title">Send this flight</div>
+          <button class="share-close" @click="closeShare()" aria-label="Close">✕</button>
+        </div>
+        <img class="share-preview" :src="share.imgUrl" x-show="share.imgUrl" alt="Flight card" />
+        <div class="share-actions">
+          <button class="card-action" x-show="share.canNative" @click="shareNative()">Share…</button>
+          <button class="card-action" @click="shareCopyImage()">Copy image</button>
+          <button class="card-action" @click="shareCopyText()">Copy text</button>
+          <button class="card-action" @click="shareDownload()">Save image</button>
+          <span class="share-toast" x-show="share.toast" x-text="share.toast"></span>
+        </div>
+      </div>
+    </div>
+
     <div class="input-area" :class="barRaised ? 'raised' : ''">
       <div class="input-inner">
         <form @submit.prevent="search()">
@@ -1224,6 +1270,7 @@
         newBelow: false,
         barRaised: false,
         loadingText: 'Thinking…',
+        share: { open: false, imgUrl: null, blob: null, text: '', toast: '', canNative: false },
         loadingTimer: null,
         controller: null,
         reqId: 0,
@@ -1749,6 +1796,206 @@
         dropStreamingMsg() {
           const last = this.messages[this.messages.length - 1];
           if (last && last.role === 'assistant' && last._streaming) this.messages.pop();
+        },
+
+        // ---- share: a boarding-pass PNG drawn on canvas with the page's own
+        // fonts; the card stays cream in every theme, like the route maps ----
+        shareFlight(f) {
+          const legs = f.legs || [];
+          this.openShare({
+            kind: 'one way',
+            route: legs[0].from + ' → ' + legs[legs.length - 1].to,
+            segs: [this._shareSeg('Flight', f)],
+            price: this.formatPrice(f.price, f.currency),
+            priceNote: 'one way, per person', url: f.booking_url,
+          });
+        },
+        sharePairing(it) {
+          if (!it) return;
+          const o = it.outbound.legs;
+          this.openShare({
+            kind: 'round trip',
+            route: o[0].from + ' → ' + o[o.length - 1].to,
+            segs: [this._shareSeg('Out', it.outbound), this._shareSeg('Back', it.return)],
+            price: this.formatPrice(it.total_price, it.currency),
+            priceNote: 'round trip total, per person', url: it.booking_url,
+          });
+        },
+        shareMulti(it) {
+          const parts = it.parts || [];
+          const chain = parts.map(p => p.legs[0].from);
+          chain.push(parts[parts.length - 1].legs[parts[parts.length - 1].legs.length - 1].to);
+          this.openShare({
+            kind: 'multi-city',
+            route: chain.join(' → '),
+            segs: parts.map((p, i) => this._shareSeg('Leg ' + (i + 1), p)),
+            price: this.formatPrice(it.total_price, it.currency),
+            priceNote: 'total, per person' + (it.price_basis === 'separate tickets' ? ', as separate tickets' : ''),
+            url: it.booking_url,
+          });
+        },
+        _shareSeg(tag, f) {
+          const legs = f.legs || [];
+          const a = legs[0], b = legs[legs.length - 1];
+          const codes = legs.map(l => l.airline_code + ' ' + l.flight_number).slice(0, 2).join(' · ');
+          return {
+            tag,
+            date: this.formatDate((a.departure || '').slice(0, 10)),
+            times: this.formatTime(a.departure) + ' ' + a.from + '  →  ' + this.formatTime(b.arrival) + ' ' + b.to + this.arrivalDay(f),
+            meta: f.airline + ' · ' + codes + (legs.length > 2 ? ' +' : '') + ' · ' + this.stopsText(f.stops) + this.viaShort(f),
+          };
+        },
+
+        async openShare(trip) {
+          this.share.open = true;
+          this.share.toast = '';
+          this.share.imgUrl = null;
+          this.share.blob = null;
+          this.share.text = this._shareText(trip);
+          try {
+            await document.fonts.ready;
+            const canvas = this._drawTripCard(trip);
+            const blob = await new Promise(r => canvas.toBlob(r, 'image/png'));
+            this.share.blob = blob;
+            this.share.imgUrl = URL.createObjectURL(blob);
+            this.share.canNative = !!(navigator.canShare && blob
+              && navigator.canShare({ files: [new File([blob], 'flight.png', { type: 'image/png' })] }));
+          } catch (e) {
+            this.share.canNative = false;
+            this._toast('Could not render the card');
+          }
+        },
+        closeShare() {
+          this.share.open = false;
+          if (this.share.imgUrl) { URL.revokeObjectURL(this.share.imgUrl); this.share.imgUrl = null; }
+        },
+        _shareText(t) {
+          const lines = ["Let's book this flight", t.route + ' · ' + t.kind];
+          for (const s of t.segs) {
+            lines.push((t.segs.length > 1 ? s.tag + ': ' : '') + s.date + ' · '
+              + s.times.replace(/\s+/g, ' ') + ' · ' + s.meta);
+          }
+          lines.push(t.price + ' ' + t.priceNote);
+          if (t.url && t.url !== '#') lines.push('Book: ' + t.url);
+          lines.push('found on flights.evanburkeen.com');
+          return lines.join('\n');
+        },
+
+        async shareCopyImage() {
+          try {
+            await navigator.clipboard.write([
+              new ClipboardItem({ 'image/png': Promise.resolve(this.share.blob) })]);
+            this._toast('Image copied');
+          } catch (e) {
+            this.shareDownload();
+            this._toast('Clipboard blocked, saved the image instead');
+          }
+        },
+        async shareCopyText() {
+          try { await navigator.clipboard.writeText(this.share.text); this._toast('Text copied'); }
+          catch (e) { this._toast('Copy blocked by the browser'); }
+        },
+        shareDownload() {
+          const a = document.createElement('a');
+          a.href = this.share.imgUrl;
+          a.download = 'flight.png';
+          a.click();
+        },
+        async shareNative() {
+          try {
+            await navigator.share({
+              files: [new File([this.share.blob], 'flight.png', { type: 'image/png' })],
+              text: this.share.text,
+            });
+          } catch (e) { /* user closed the sheet */ }
+        },
+        _toast(msg) {
+          this.share.toast = msg;
+          clearTimeout(this._toastTimer);
+          this._toastTimer = setTimeout(() => { this.share.toast = ''; }, 2400);
+        },
+
+        _drawTripCard(t) {
+          const S = 2, W = 1040, H = 196 + t.segs.length * 78 + 54;
+          const c = document.createElement('canvas');
+          c.width = W * S; c.height = H * S;
+          const x = c.getContext('2d');
+          x.scale(S, S);
+          const ls = v => { try { x.letterSpacing = v; } catch (e) {} };
+          x.fillStyle = '#f7eed2'; x.fillRect(0, 0, W, H);          // paper
+          const P = 18, R = 14, stubX = W - 290;
+          x.save();                                                  // panel
+          x.shadowColor = 'rgba(90,70,40,0.28)'; x.shadowBlur = 20; x.shadowOffsetY = 5;
+          x.fillStyle = '#fffdf4';
+          this._rr(x, P, P, W - P * 2, H - P * 2, R); x.fill();
+          x.restore();
+          x.strokeStyle = 'rgba(28,26,21,0.18)'; x.lineWidth = 1;
+          this._rr(x, P, P, W - P * 2, H - P * 2, R); x.stroke();
+          x.setLineDash([4, 6]);                                     // perforation
+          x.strokeStyle = 'rgba(28,26,21,0.3)';
+          x.beginPath(); x.moveTo(stubX, P + 14); x.lineTo(stubX, H - P - 14); x.stroke();
+          x.setLineDash([]);
+          for (const ny of [P, H - P]) {                             // notches
+            x.fillStyle = '#f7eed2';
+            x.beginPath(); x.arc(stubX, ny, 9, 0, 7); x.fill();
+            x.strokeStyle = 'rgba(28,26,21,0.18)';
+            x.beginPath(); x.arc(stubX, ny, 9, 0, 7); x.stroke();
+          }
+          const L = P + 28, mainW = stubX - L - 24;
+          ls('3px');
+          x.fillStyle = '#8a6d2f'; x.font = '600 13px Inter';
+          x.fillText("LET'S BOOK THIS FLIGHT", L, P + 42);
+          ls('0px');
+          x.fillStyle = '#1c1a15'; x.font = '600 44px Fraunces, Georgia, serif';
+          x.fillText(this._fit(x, t.route, mainW), L, P + 94);
+          x.fillStyle = 'rgba(28,26,21,0.6)'; x.font = '500 15px Inter';
+          x.fillText(t.kind, L, P + 120);
+          let y = P + 162;
+          for (const s of t.segs) {
+            ls('2px');
+            x.fillStyle = '#0f4c5c'; x.font = '700 12px Inter';
+            x.fillText(s.tag.toUpperCase(), L, y);
+            ls('0px');
+            x.fillStyle = '#1c1a15'; x.font = '600 21px Inter';
+            x.fillText(this._fit(x, s.date + ' · ' + s.times, mainW), L, y + 27);
+            x.fillStyle = 'rgba(28,26,21,0.58)'; x.font = '400 15px Inter';
+            x.fillText(this._fit(x, s.meta, mainW), L, y + 50);
+            y += 78;
+          }
+          ls('2px');
+          x.fillStyle = '#8a6d2f'; x.font = '600 11px Inter';
+          x.fillText('FLIGHTS.EVANBURKEEN.COM', L, H - P - 18);
+          ls('0px');
+          const px = stubX + 26;                                     // stub
+          x.fillStyle = '#8a3416'; x.font = '600 40px Fraunces, Georgia, serif';
+          x.fillText(this._fit(x, t.price, W - px - P - 14), px, P + 94);
+          x.fillStyle = 'rgba(28,26,21,0.6)'; x.font = '500 13px Inter';
+          this._wrap(x, t.priceNote, px, P + 118, W - px - P - 14, 18);
+          return c;
+        },
+        _rr(x, a, b, w, h, r) {
+          x.beginPath();
+          x.moveTo(a + r, b);
+          x.arcTo(a + w, b, a + w, b + h, r);
+          x.arcTo(a + w, b + h, a, b + h, r);
+          x.arcTo(a, b + h, a, b, r);
+          x.arcTo(a, b, a + w, b, r);
+          x.closePath();
+        },
+        _fit(x, text, maxW) {
+          let s = text || '';
+          if (x.measureText(s).width <= maxW) return s;
+          while (s.length > 1 && x.measureText(s + '…').width > maxW) s = s.slice(0, -1);
+          return s + '…';
+        },
+        _wrap(x, text, a, b, maxW, lh) {
+          let line = '', yy = b;
+          for (const w of (text || '').split(' ')) {
+            const test = line ? line + ' ' + w : w;
+            if (x.measureText(test).width > maxW && line) { x.fillText(line, a, yy); line = w; yy += lh; }
+            else line = test;
+          }
+          if (line) x.fillText(line, a, yy);
         },
 
         pickDate(d) {

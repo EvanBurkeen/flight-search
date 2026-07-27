@@ -301,6 +301,16 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
 
 ## Changelog
 
+**July 26, 2026 (send this flight)**
+- Every Book action now has a quiet Share beside it (cards, board pairing bar,
+  multi-city): it renders a boarding-pass PNG on a canvas with the page's own
+  fonts (no library, no backend; the card stays cream in both themes, like the
+  route maps) — route in Fraunces, OUT/BACK rows, price stub with perforation,
+  FLIGHTS.EVANBURKEEN.COM in the footer. Actions: copy image, copy text (a
+  clean plaintext version with the booking deep link), save, and the native
+  share sheet where the browser supports files. Clipboard failures fall back
+  to saving with an honest toast.
+
 **July 25, 2026 (streaming, unshelved)**
 - Replies now stream (Evan's green light + spec): the recommendation types out
   letter by letter with an adaptive cadence that speeds up with backlog (the
