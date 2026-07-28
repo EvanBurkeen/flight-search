@@ -155,7 +155,7 @@
     .compact-badges .badge { font-size: 0.58rem; padding: 0.08rem 0.35rem; }
     .compact-warn { font-size: 0.64rem; color: var(--warn); }
     .compact-book {
-      font-size: 0.64rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase;
+      font-size: 0.76rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
       color: var(--accent-dark); text-decoration: none; margin-top: auto;
     }
     .compact-book:hover { text-decoration: underline; }
@@ -431,9 +431,9 @@
     /* share: quiet links on cards; an overlay with the rendered boarding pass */
     .share-quiet {
       background: none; border: none; cursor: pointer;
-      font-size: 0.7rem; font-weight: 600; letter-spacing: 0.14em;
-      text-transform: uppercase; color: var(--brass);
-      padding: 0.48rem 0.4rem; margin-left: 0.55rem;
+      font-size: 0.6rem; font-weight: 600; letter-spacing: 0.12em;
+      text-transform: uppercase; color: var(--brass); opacity: 0.85;
+      padding: 0.48rem 0.4rem; margin-left: 0.6rem;
     }
     .share-quiet:hover { text-decoration: underline; }
     .share-overlay {
@@ -1842,7 +1842,9 @@
             tag,
             date: this.formatDate((a.departure || '').slice(0, 10)),
             times: this.formatTime(a.departure) + ' ' + a.from + '  →  ' + this.formatTime(b.arrival) + ' ' + b.to + this.arrivalDay(f),
-            meta: f.airline + ' · ' + codes + (legs.length > 2 ? ' +' : '') + ' · ' + this.stopsText(f.stops) + this.viaShort(f),
+            meta: f.airline + ' · ' + codes + (legs.length > 2 ? ' +' : '')
+              + (f.duration ? ' · ' + this.formatDuration(f.duration) : '')
+              + ' · ' + this.stopsText(f.stops) + this.viaShort(f),
           };
         },
 
@@ -1870,7 +1872,7 @@
           if (this.share.imgUrl) { URL.revokeObjectURL(this.share.imgUrl); this.share.imgUrl = null; }
         },
         _shareText(t) {
-          const lines = ["Let's book this flight", t.route + ' · ' + t.kind];
+          const lines = [t.route + ' · ' + t.kind];
           for (const s of t.segs) {
             lines.push((t.segs.length > 1 ? s.tag + ': ' : '') + s.date + ' · '
               + s.times.replace(/\s+/g, ' ') + ' · ' + s.meta);
@@ -1916,16 +1918,16 @@
         },
 
         _drawTripCard(t) {
-          const S = 2, W = 1040, H = 196 + t.segs.length * 78 + 54;
+          const S = 2, W = 1040, H = 148 + t.segs.length * 64 + 44;
           const c = document.createElement('canvas');
           c.width = W * S; c.height = H * S;
           const x = c.getContext('2d');
           x.scale(S, S);
           const ls = v => { try { x.letterSpacing = v; } catch (e) {} };
           x.fillStyle = '#f7eed2'; x.fillRect(0, 0, W, H);          // paper
-          const P = 18, R = 14, stubX = W - 290;
+          const P = 16, R = 14, stubX = W - 280;
           x.save();                                                  // panel
-          x.shadowColor = 'rgba(90,70,40,0.28)'; x.shadowBlur = 20; x.shadowOffsetY = 5;
+          x.shadowColor = 'rgba(90,70,40,0.28)'; x.shadowBlur = 18; x.shadowOffsetY = 5;
           x.fillStyle = '#fffdf4';
           this._rr(x, P, P, W - P * 2, H - P * 2, R); x.fill();
           x.restore();
@@ -1933,7 +1935,7 @@
           this._rr(x, P, P, W - P * 2, H - P * 2, R); x.stroke();
           x.setLineDash([4, 6]);                                     // perforation
           x.strokeStyle = 'rgba(28,26,21,0.3)';
-          x.beginPath(); x.moveTo(stubX, P + 14); x.lineTo(stubX, H - P - 14); x.stroke();
+          x.beginPath(); x.moveTo(stubX, P + 12); x.lineTo(stubX, H - P - 12); x.stroke();
           x.setLineDash([]);
           for (const ny of [P, H - P]) {                             // notches
             x.fillStyle = '#f7eed2';
@@ -1941,37 +1943,75 @@
             x.strokeStyle = 'rgba(28,26,21,0.18)';
             x.beginPath(); x.arc(stubX, ny, 9, 0, 7); x.stroke();
           }
-          const L = P + 28, mainW = stubX - L - 24;
-          ls('3px');
-          x.fillStyle = '#8a6d2f'; x.font = '600 13px Inter';
-          x.fillText("LET'S BOOK THIS FLIGHT", L, P + 42);
+          const L = P + 26, mainW = stubX - L - 22;
+          ls('3px');                                                 // header: trip type
+          x.fillStyle = '#8a6d2f'; x.font = '600 12px Inter';
+          x.fillText(t.kind.toUpperCase(), L, P + 34);
           ls('0px');
-          x.fillStyle = '#1c1a15'; x.font = '600 44px Fraunces, Georgia, serif';
-          x.fillText(this._fit(x, t.route, mainW), L, P + 94);
-          x.fillStyle = 'rgba(28,26,21,0.6)'; x.font = '500 15px Inter';
-          x.fillText(t.kind, L, P + 120);
-          let y = P + 162;
+          x.fillStyle = '#1c1a15'; x.font = '600 40px Fraunces, Georgia, serif';
+          const routeTxt = this._fit(x, t.route, mainW - 150);
+          x.fillText(routeTxt, L, P + 78);
+          const rw = x.measureText(routeTxt).width;                  // dotted flight arc
+          if (L + mainW - (L + rw + 26) > 70) this._arc(x, L + rw + 26, L + mainW, P + 64);
+          let y = P + 116;
           for (const s of t.segs) {
             ls('2px');
-            x.fillStyle = '#0f4c5c'; x.font = '700 12px Inter';
+            x.fillStyle = '#0f4c5c'; x.font = '700 11px Inter';
             x.fillText(s.tag.toUpperCase(), L, y);
             ls('0px');
-            x.fillStyle = '#1c1a15'; x.font = '600 21px Inter';
-            x.fillText(this._fit(x, s.date + ' · ' + s.times, mainW), L, y + 27);
-            x.fillStyle = 'rgba(28,26,21,0.58)'; x.font = '400 15px Inter';
-            x.fillText(this._fit(x, s.meta, mainW), L, y + 50);
-            y += 78;
+            x.fillStyle = '#1c1a15'; x.font = '600 19px Inter';
+            x.fillText(this._fit(x, s.date + ' · ' + s.times, mainW), L, y + 23);
+            x.fillStyle = 'rgba(28,26,21,0.58)'; x.font = '400 13.5px Inter';
+            x.fillText(this._fit(x, s.meta, mainW), L, y + 42);
+            y += 64;
           }
           ls('2px');
-          x.fillStyle = '#8a6d2f'; x.font = '600 11px Inter';
-          x.fillText('FLIGHTS.EVANBURKEEN.COM', L, H - P - 18);
+          x.fillStyle = '#8a6d2f'; x.font = '600 10.5px Inter';
+          x.fillText('FLIGHTS.EVANBURKEEN.COM', L, H - P - 15);
           ls('0px');
-          const px = stubX + 26;                                     // stub
-          x.fillStyle = '#8a3416'; x.font = '600 40px Fraunces, Georgia, serif';
-          x.fillText(this._fit(x, t.price, W - px - P - 14), px, P + 94);
-          x.fillStyle = 'rgba(28,26,21,0.6)'; x.font = '500 13px Inter';
-          this._wrap(x, t.priceNote, px, P + 118, W - px - P - 14, 18);
+          const px = stubX + 24, sw = W - px - P - 12;               // stub
+          ls('2px');
+          x.fillStyle = 'rgba(28,26,21,0.55)'; x.font = '600 11px Inter';
+          const d0 = (t.segs[0].date || '').replace(/^\w+, /, '');
+          const d1 = (t.segs[t.segs.length - 1].date || '').replace(/^\w+, /, '');
+          x.fillText((t.segs.length > 1 && d1 !== d0 ? d0 + ' – ' + d1 : d0).toUpperCase(), px, P + 34);
+          ls('0px');
+          x.fillStyle = '#8a3416'; x.font = '600 38px Fraunces, Georgia, serif';
+          x.fillText(this._fit(x, t.price, sw), px, P + 76);
+          x.fillStyle = 'rgba(28,26,21,0.6)'; x.font = '500 12.5px Inter';
+          this._wrap(x, t.priceNote, px, P + 98, sw, 16);
+          this._barcode(x, px, H - P - 46, sw - 10, 30, t.route + t.price);
           return c;
+        },
+        _arc(x, x0, x1, base) {
+          // dotted great-circle motif: endpoint dots, a plane at the apex
+          const mid = (x0 + x1) / 2, lift = 18;
+          x.save();
+          x.strokeStyle = 'rgba(138,109,47,0.55)'; x.lineWidth = 1.4;
+          x.setLineDash([1, 5]);
+          x.beginPath();
+          x.moveTo(x0, base);
+          x.quadraticCurveTo(mid, base - lift * 2, x1, base);
+          x.stroke();
+          x.setLineDash([]);
+          x.fillStyle = '#8a6d2f';
+          for (const dx of [x0, x1]) { x.beginPath(); x.arc(dx, base, 3, 0, 7); x.fill(); }
+          x.font = '13px Inter';
+          x.fillText('✈', mid - 7, base - lift - 2);
+          x.restore();
+        },
+        _barcode(x, a, b, w, h, seed) {
+          // deterministic from the trip, so the same flight shares the same code
+          let n = 0;
+          for (let i = 0; i < seed.length; i++) n = (n * 31 + seed.charCodeAt(i)) >>> 0;
+          x.fillStyle = 'rgba(28,26,21,0.72)';
+          let cx = a;
+          while (cx < a + w - 2) {
+            n = (n * 1103515245 + 12345) >>> 0;
+            const bw = 1 + (n % 3), gap = 1.5 + ((n >> 4) % 3);
+            x.fillRect(cx, b, bw, h);
+            cx += bw + gap;
+          }
         },
         _rr(x, a, b, w, h, r) {
           x.beginPath();

@@ -301,6 +301,15 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
 
 ## Changelog
 
+**July 27, 2026 (share card v2, Evan's notes)**
+- Book now outweighs Share everywhere (compact Book links bumped, Share
+  shrunk and muted); the pass dropped the "let's book this flight" header
+  for a plain trip-type line (and the copied text starts with the route, so
+  the sender writes their own pitch); the card is ~30% shorter with the
+  whitespace put to work: a dotted flight-arc motif beside the route,
+  per-segment durations, the date range in the stub, and a deterministic
+  barcode drawn from route+price.
+
 **July 26, 2026 (send this flight)**
 - Every Book action now has a quiet Share beside it (cards, board pairing bar,
   multi-city): it renders a boarding-pass PNG on a canvas with the page's own
