@@ -28,6 +28,14 @@ way". Do not rediscover what is already written there.
    latency.
 6. **Add a check to `scripts/check.py` whenever you fix a real bug.** That is how
    this suite grew, and it is the only thing that makes a fix permanent.
+7. **A Changelog line is not a README update.** When your change alters anything
+   the README *describes* — endpoints, budgets, timeouts, model routing, the
+   feature list, invariants — update that SECTION in the same commit. The
+   "README drift" checks in `scripts/check.py` block the push when the doc's
+   numbers, endpoints, or model names disagree with the code; when you change
+   such a constant, extend those checks to pin the new fact. Prose-only
+   sections (features, lessons) are on you: reconcile them before ending a
+   session that shipped user-visible changes.
 
 ## Ground rules for the product
 

@@ -333,6 +333,40 @@ check("a knowledge question is NOT treated as a route search",
       not app.looks_like_plain_search("what is the baggage allowance on Delta domestic?"))
 
 # --------------------------------------------------------------------------
+section("README drift  — the doc must match the code it describes")
+# --------------------------------------------------------------------------
+# The pre-push hook forces a README edit per code push, but a Changelog line
+# satisfies it while the DESCRIPTIVE sections rot — the July 28 audit found
+# stale timeouts, a 'parked' streaming note, and a missing feature. These
+# checks pin the doc's verifiable facts to the code's constants: change a
+# constant and the push blocks until the matching section is updated too.
+import re as _re
+
+_readme = open(os.path.join(ROOT, "README.md")).read()
+_src = open(os.path.join(ROOT, "api", "index.py")).read()
+_fe = open(os.path.join(ROOT, "public", "index.html")).read()
+
+_m = _re.search(r'TURN_BUDGET_S"\) or (\d+)', _src)
+check("README states the code's turn budget",
+      bool(_m) and f"{_m.group(1)}s" in _readme,
+      f"code default {_m.group(1) if _m else '?'}s — update 'How a turn works', "
+      "Operations, and trade-offs if this changed")
+_t = _re.search(r"_local\.fli_timeout = (\d+)\.0 if i == 0 else (\d+)\.0", _src)
+check("README states the adaptive request timeouts",
+      bool(_t) and f"{_t.group(1)}s" in _readme and f"{_t.group(2)}s" in _readme,
+      "update the run_search description and Operations")
+for _ep in ("/api/returns", "/api/search/stream"):
+    check(f"README documents {_ep}", _ep in _src and _ep in _readme)
+check("README and code agree on the Haiku first-call router",
+      ("claude-haiku-4-5" in _src) == ("claude-haiku-4-5" in _readme))
+_n = _re.search(r"run_search\(searcher, filters, sort, top_n=(\d+)\)", _src)
+check("README's round-trip group count matches top_n",
+      bool(_n) and f"~{_n.group(1)} round-trip OUTBOUND groups" in _readme,
+      f"code expands top_n={_n.group(1) if _n else '?'}")
+check("README documents streaming as live iff the frontend consumes it",
+      ("streamTurn" in _fe) == ("Streaming is LIVE" in _readme))
+
+# --------------------------------------------------------------------------
 section("Process guards")
 # --------------------------------------------------------------------------
 hooks = os.popen(f"git -C {ROOT} config --get core.hooksPath").read().strip()

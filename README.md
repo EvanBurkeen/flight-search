@@ -328,6 +328,13 @@ same SSE events as the real loop, so streaming is fully exercisable locally.
 
 ## Changelog
 
+**July 28, 2026 (README drift checks)**
+- The doc now defends itself: check.py gains a "README drift" section that
+  blocks any push where the README's turn budget, adaptive timeouts,
+  endpoints, Haiku router, round-trip group count, or streaming status
+  disagree with the code. CLAUDE.md rule 7: a Changelog line is not a README
+  update — the describing SECTION changes in the same commit.
+
 **July 28, 2026 (README audit)**
 - Doc-only refresh after the week's shipping: streaming is the primary
   transport in the Stack table (was still "parked"), adaptive 12s/28s
