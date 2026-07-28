@@ -238,6 +238,27 @@
     .show-all:hover { border-color: var(--accent); }
     .assumptions { font-size: 0.72rem; opacity: 0.60; margin-top: 0.35rem; }
 
+    /* where this fare sits among nearby dates: a quiet line, never a badge —
+       it is a comparison across dates, not a verdict on the route */
+    .price-ctx {
+      display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap;
+      font-size: 0.74rem; margin: 0 0 0.55rem 0; padding: 0.4rem 0.6rem;
+      border-left: 2px solid var(--line-strong); background: rgba(0, 0, 0, 0.02);
+      border-radius: 0 4px 4px 0;
+    }
+    .price-ctx .pc-tier {
+      font-weight: 600; letter-spacing: 0.02em; color: var(--accent-dark); flex: none;
+    }
+    .price-ctx .pc-tier.pc-low { color: var(--green); }
+    .price-ctx .pc-tier.pc-high { color: var(--accent-dark); }
+    .price-ctx .pc-note { opacity: 0.55; font-size: 0.68rem; }
+    /* --green and --accent-dark are ground colours in dark mode, not text
+       colours: read as text on the espresso ground they all but vanish */
+    html.dark .price-ctx { background: rgba(255, 255, 255, 0.04); }
+    html.dark .price-ctx .pc-tier { color: var(--brass); }
+    html.dark .price-ctx .pc-tier.pc-low { color: var(--good); }
+    html.dark .price-ctx .pc-tier.pc-high { color: var(--warn); }
+
     .flight-list { display: flex; flex-direction: column; gap: 0.6rem; }
 
     .flight-card {
@@ -708,6 +729,12 @@
                     <button :class="sectionView(sec) === 'detailed' ? 'active' : ''" @click="sec._view = 'detailed'">Detail</button>
                     <button :class="sectionView(sec) === 'compact' ? 'active' : ''" @click="sec._view = 'compact'">Compact</button>
                   </div>
+                </div>
+
+                <div class="price-ctx" x-show="sec.price_context">
+                  <span class="pc-tier" :class="pcTier(sec)" x-text="pcHeadline(sec)"></span>
+                  <span x-text="pcDetail(sec)"></span>
+                  <span class="pc-note" x-text="pcNote(sec)"></span>
                 </div>
 
                 <div class="filter-bar" x-show="sec._expanded && sec.type !== 'dates'">
@@ -1263,6 +1290,10 @@
         isLoading: false,
         hasSearched: false,
         history: [],
+        // history carries the prose; the ledger carries the RESULTS those
+        // words describe, so a follow-up about a card already on screen is
+        // answered from the record instead of a fresh search
+        ledgers: [],
         sectionSeq: 0,
         ladderOpen: false,
         viewMode: localStorage.getItem('flightViewMode') || 'detailed',
@@ -1501,6 +1532,40 @@
             : 'Round-trip totals for ' + n + '-night trips. Tap a date to see the flights.';
         },
 
+        // ---- price context: where this fare sits among NEARBY DATES. Not
+        // price history, and the wording never implies otherwise. ----
+        pcTier(sec) {
+          const p = (sec.price_context || {}).percentile;
+          if (p === undefined || p === null) return '';
+          return p <= 40 ? 'pc-low' : p >= 60 ? 'pc-high' : '';
+        },
+
+        pcHeadline(sec) {
+          const p = sec.price_context; if (!p) return '';
+          // name the date: the value ranking leads with the best trip, so the
+          // top card is often not the fare being characterized here
+          const on = p.searched_date ? ' on ' + this.formatDate(p.searched_date) : '';
+          return 'Lowest fare' + on + ', ' + this.formatPrice(p.quoted, 'USD')
+            + ', is ' + p.verdict + '.';
+        },
+
+        pcDetail(sec) {
+          const p = sec.price_context; if (!p) return '';
+          const c = p.cheapest_nearby;
+          if (!c) return '';
+          if (Math.round(c.price) >= Math.round(p.quoted)) {
+            return 'No nearby date prices lower.';
+          }
+          return 'Cheapest nearby is ' + this.formatDate(c.date) + ' at '
+            + this.formatPrice(c.price, 'USD') + '.';
+        },
+
+        pcNote(sec) {
+          const p = sec.price_context; if (!p) return '';
+          return '(' + p.dates_priced + ' nearby dates priced, '
+            + (p.basis || '') + '; not price history)';
+        },
+
         calPrice(d) {
           if (d.price >= 10000) return '$' + Math.round(d.price / 1000) + 'k';
           return this.formatPrice(d.price, d.currency);
@@ -1657,7 +1722,7 @@
           const res = await fetch('/api/search', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ query: q, history: this.history.slice(0, -1) }),
+            body: JSON.stringify({ query: q, history: this.history.slice(0, -1), ledgers: this.ledgers }),
             signal: this.controller.signal,
           });
           const data = await res.json();
@@ -1666,6 +1731,7 @@
 
           this.history.push({ role: 'assistant', content: data.message });
           this.history = this.history.slice(-12);
+          this.rememberLedger(data.ledger);
 
           (data.sections || []).forEach(sec => { sec._anchor = 'sec-' + (++this.sectionSeq); });
           this.messages.push({
@@ -1688,7 +1754,7 @@
           const res = await fetch('/api/search/stream', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ query: q, history: this.history.slice(0, -1) }),
+            body: JSON.stringify({ query: q, history: this.history.slice(0, -1), ledgers: this.ledgers }),
             signal: this.controller.signal,
           });
           if (!res.ok || !res.body || !(res.headers.get('content-type') || '').includes('text/event-stream')) {
@@ -1789,8 +1855,17 @@
           this._finalized = true;
           this.history.push({ role: 'assistant', content: d.message || '' });
           this.history = this.history.slice(-12);
+          this.rememberLedger(d.ledger);
           this.maybeNudge();
           release();
+        },
+
+        // the compact record of what this turn put on screen; the next turn
+        // sends it back so a follow-up about these exact cards costs no search
+        rememberLedger(led) {
+          if (!led || !(led.entries || []).length) return;
+          this.ledgers.push(led);
+          this.ledgers = this.ledgers.slice(-2);
         },
 
         dropStreamingMsg() {
@@ -2080,12 +2155,21 @@
           const esc = (t || '').replace(/\n*SUGGESTIONS:[\s\S]*$/, '')
             .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
           // the model sometimes hard-wraps mid-sentence; join single newlines
-          // into flowing text but keep paragraph breaks and list lines
+          // into flowing text but keep paragraph breaks and list lines.
+          // The join has to CONSUME the whitespace on BOTH sides of the
+          // break, not swap the newline for a space: a wrap landing before
+          // a comma rendered as "on Nov 28 , with morning departures", and
+          // one landing after a trailing space gave "rises to  $374".
           const PARA = '\u0001', LIST = '\u0002';
           const flowed = esc
             .replace(/\n{2,}/g, PARA)
             .replace(/\n(?=\s*(?:[-*\u2022]|\d+[.)])\s)/g, LIST)
-            .replace(/\n/g, ' ')
+            .replace(/[ \t]*\n[ \t]*/g, ' ')
+            .replace(/[ \t]{2,}/g, ' ')
+            .replace(/ +([,.;:!?%)\]])/g, '$1')
+            .replace(/([($\[]) +/g, '$1')
+            .replace(/ +([\u0001\u0002])/g, '$1')
+            .replace(/(\u0001) +/g, '$1')
             .replace(/\u0001/g, '\n\n')
             .replace(/\u0002/g, '\n');
           return flowed.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');

@@ -333,6 +333,188 @@ check("a knowledge question is NOT treated as a route search",
       not app.looks_like_plain_search("what is the baggage allowance on Delta domestic?"))
 
 # --------------------------------------------------------------------------
+section("Cross-turn results ledger  — Changelog: 'the results stay on screen'")
+# --------------------------------------------------------------------------
+# History was prose only, so every card we shipped vanished at the end of the
+# turn: a follow-up ("the second one") left Claude choosing between paying for
+# the same search twice and reconstructing fares from its own sentences. The
+# ledger is the record of what is still on screen — and it is a record of what
+# was SHIPPED, never of what exists, which is what these checks pin down.
+_ship = [
+    {"airline": "JetBlue", "price": 239.0, "duration": 185, "stops": 0, "warnings": [],
+     "legs": [{"from": "FLL", "to": "EWR", "departure": "2026-11-28T07:30:00",
+               "arrival": "2026-11-28T10:35:00", "airline_code": "B6", "flight_number": "1802"}]},
+    {"airline": "Delta", "price": 268.0, "duration": 420, "stops": 1, "warnings": [],
+     "legs": [{"from": "FLL", "to": "ATL", "departure": "2026-11-28T06:00:00",
+               "arrival": "2026-11-28T07:50:00", "airline_code": "DL", "flight_number": "1215"},
+              {"from": "ATL", "to": "EWR", "departure": "2026-11-28T09:10:00",
+               "arrival": "2026-11-28T11:30:00", "airline_code": "DL", "flight_number": "988"}]},
+]
+_entry = app.ledger_entry(
+    {"origins": ["FLL"], "destinations": ["EWR"], "departure_date": "2026-11-28",
+     "summary": "FLL to EWR one way"},
+    {"type": "flights", "message": "m", "results": _ship})
+check("a shipped option is remembered with its fare and flight number",
+      _entry["options"][0]["price"] == 239.0
+      and "B61802" in _entry["options"][0]["flights"],
+      str(_entry["options"][0].get("flights")))
+check("options keep the numbering the user saw ('the second one' resolves)",
+      [o["n"] for o in _entry["options"]] == [1, 2])
+check("an empty search leaves NO record (nothing on screen, nothing to quote)",
+      app.ledger_entry({"origins": ["FLL"]}, {"type": "flights", "results": []}) is None)
+# specs routinely carry a return_date even one-way (the stub and the models
+# both set one); recording it filed a one-way search as a round trip
+check("a one-way search is never recorded with a return date",
+      "return" not in app.ledger_entry(
+          {"origins": ["FLL"], "destinations": ["EWR"], "trip_type": "one_way",
+           "departure_date": "2026-11-28", "return_date": "2026-12-02"},
+          {"type": "flights", "results": _ship}))
+
+# the July 25 lesson, one turn later: a round trip's priced sample is not its
+# option space, so the count of unpriced outbounds has to survive into the
+# next turn or the model re-learns "no nonstops exist" from the ledger
+_rt_entry = app.ledger_entry(
+    {"origins": ["JFK"], "destinations": ["LHR"], "trip_type": "round_trip"},
+    {"type": "itineraries", "message": "m",
+     "results": [{"total_price": 609, "outbound": {"airline": "FI", "legs": [], "stops": 1},
+                  "return": {"airline": "FI", "legs": [], "stops": 1}, "return_options": [1, 2]}],
+     "more_outbounds": [{"stops": 0, "from_total": 745.0}, {"stops": 1, "from_total": 700.0}]})
+check("the ledger carries the unpriced outbounds, not just the priced sample",
+      _rt_entry["unpriced_outbounds"]["nonstops"] == 1
+      and _rt_entry["unpriced_outbounds"]["cheapest_from"] == 700.0)
+
+_ctx = app.ledger_context([{"entries": [_entry]}])
+check("the carried block forbids inventing anything it does not contain",
+      "never infer" in _ctx and "fresh search" in _ctx)
+check("...and states the fares are quotes from an earlier search, not live",
+      "not a live fare" in _ctx)
+check("no ledger, no block (a first turn is unchanged)",
+      app.ledger_context([]) is None and app.ledger_context(None) is None)
+# a client controls this payload; it must not be able to grow the prompt at will
+_huge = {"entries": [dict(_entry, options=_entry["options"] * 400) for _ in range(6)]}
+check("a client-supplied ledger is capped, not trusted",
+      len(app.ledger_context([_huge, _huge])) < app.LEDGER_MAX_CHARS + 2000,
+      f"{len(app.ledger_context([_huge, _huge]))} chars")
+
+# --------------------------------------------------------------------------
+section("Price context  — Changelog: 'is this a good fare'")
+# --------------------------------------------------------------------------
+# Ranking says which of these; it never said whether today is a good day to
+# buy. The baseline answers that from the SearchDates grid — and because it is
+# a window comparison, every check here is about not over-claiming.
+_win = app.price_ctx_window("2026-11-28")
+check("the baseline window never prices dates in the past",
+      _win[0] >= (datetime.now().date()).isoformat(), f"window from {_win[0]}")
+_grid = [{"date": f"2026-11-{d:02d}", "return_date": None, "price": p}
+         for d, p in zip(range(10, 30), [420, 410, 395, 380, 221, 300, 310, 330, 340, 350,
+                                          360, 370, 375, 385, 390, 400, 405, 415, 425, 430])]
+_cheap = app.price_verdict(239, _grid, ("2026-11-10", "2026-11-29"), None)
+_dear = app.price_verdict(428, _grid, ("2026-11-10", "2026-11-29"), None)
+check("a fare below almost every nearby date reads as cheap",
+      "cheapest" in _cheap["verdict"], _cheap["verdict"])
+check("a fare above almost every nearby date reads as dear",
+      "priciest" in _dear["verdict"], _dear["verdict"])
+check("the cheaper alternative is named with its real saving",
+      _cheap["cheapest_nearby"]["date"] == "2026-11-14"
+      and _cheap["cheapest_nearby"]["price"] == 221)
+# "prices are low right now" is a claim about history. We have dates, not
+# history, and the model must never be handed wording that blurs the two.
+check("the note forbids reading the window as price history",
+      "NOT price history" in _cheap["note"] and "never predict" in _cheap["note"])
+check("too thin a sample yields no verdict at all",
+      app.price_verdict(239, _grid[:4], ("2026-11-10", "2026-11-13"), None) is None)
+check("no fare on screen, no verdict", app.price_verdict(None, _grid, _win, None) is None)
+
+# the fare it characterizes must be one the user can actually see
+check("the anchor is the cheapest fare the search shipped",
+      app.payload_anchor_price({"type": "flights", "results": _ship}) == 239.0)
+check("...and for round trips, from-priced outbounds count too",
+      app.payload_anchor_price({
+          "type": "itineraries", "results": [{"total_price": 900}],
+          "more_outbounds": [{"from_total": 745.0}]}) == 745.0)
+
+# an optional nicety must never cost the user their search
+import concurrent.futures as _cf
+
+_never = _cf.Future()
+_pay = {"type": "flights", "results": _ship}
+_t0 = time.monotonic()
+app.attach_price_context(_pay, {"window": _win, "nights": None, "grid": None, "future": _never},
+                         time.monotonic() - 1)
+check("a late baseline is dropped, never waited on",
+      "price_context" not in _pay and time.monotonic() - _t0 < 0.5,
+      f"{time.monotonic() - _t0:.2f}s")
+app.attach_price_context(_pay, None, time.monotonic() + 1)
+check("no baseline handle is a no-op, not an error", "price_context" not in _pay)
+# extra load during a refusal wave is what turns a session flag into an IP burn
+app._breaker["open_until"] = time.monotonic() + 5
+_blocked = app.start_price_context({"departure_date": "2026-11-28", "origins": ["FLL"]}, [], [])
+app._breaker["open_until"] = 0.0
+check("the baseline stands down while the circuit breaker is open", _blocked is None)
+check("multi-city and flexible searches ask for no baseline",
+      app.start_price_context({"trip_type": "multi_city", "departure_date": "2026-11-28"}, [], []) is None
+      and app.start_price_context({"flexible_dates": {"from_date": "x"}, "departure_date": "2026-11-28"}, [], []) is None)
+
+# --------------------------------------------------------------------------
+section("Reply rendering  — Changelog: 'the spacing the join left behind'")
+# --------------------------------------------------------------------------
+# The renderer joins the model's soft wraps into flowing text. Swapping each
+# newline for a space left the whitespace on either side in place, so a wrap
+# before a comma shipped as "on Nov 28 , with morning departures" and one
+# after a trailing space as "rises to  $374" (Evan's report, July 28).
+import re as _re
+
+_fe_src = open(os.path.join(ROOT, "public", "index.html")).read()
+
+
+def render_text(sample: str) -> str:
+    """Run the SHIPPED renderText chain over `sample`.
+
+    The steps are lifted out of index.html rather than copied here, so this
+    tests the real regexes. JS and Python agree on every construct the chain
+    uses (classes, quantifiers, lookahead, \\uXXXX escapes); anything more
+    exotic fails the parse loudly instead of silently testing a stale copy.
+    """
+    body = _re.search(r"renderText\(t\) \{(.*?)\n\s*\},", _fe_src, _re.S)
+    if not body:
+        raise AssertionError("renderText not found in public/index.html")
+    steps = _re.findall(
+        r"\.replace\(/(.+?)/([gimsu]*)\s*,\s*('(?:[^'\\]|\\.)*'|PARA|LIST)\)", body.group(1))
+    if len(steps) < 5:
+        raise AssertionError(f"only parsed {len(steps)} replace() steps; keep the chain plain")
+    out = sample
+    for pattern, flags, rep in steps:
+        if rep == "PARA":
+            rep = ""
+        elif rep == "LIST":
+            rep = ""
+        else:
+            rep = (rep[1:-1].replace("\\n", "\n").replace("\\t", "\t")
+                   .replace("\\'", "'").replace("\\\\", "\\"))
+        rep = _re.sub(r"\$(\d)", r"\\\1", rep)
+        out = _re.sub(pattern, rep, out, count=0 if "g" in flags else 1)
+    return out
+
+
+# exactly the shape Evan reported, as the model hard-wrapped it
+_wrapped = ("Newark is the value play. \nJetBlue has a nonstop FLL to EWR for $239 on Nov 28\n"
+            ", with morning, midday, and evening departures all at that price. The same flight "
+            "rises to \n$374 on Nov 29\n, so the 28th is meaningfully cheaper.")
+_rendered = render_text(_wrapped)
+check("a wrap before a comma leaves no space before it",
+      " ," not in _rendered and " ." not in _rendered, _rendered[:90])
+check("a wrap after a trailing space leaves no double space",
+      "  " not in _rendered, repr(_rendered[_rendered.find("rises"):][:24]))
+check("the sentence still reads as one flowing line",
+      "value play. JetBlue" in _rendered and "on Nov 28, with" in _rendered)
+check("paragraph breaks survive the join",
+      render_text("First para.\n\nSecond para.").count("\n\n") == 1)
+check("list lines survive the join",
+      render_text("Options:\n- one\n- two").count("\n") == 2,
+      repr(render_text("Options:\n- one\n- two")))
+check("bold still renders", "<strong>$239</strong>" in render_text("it is **$239** today"))
+
+# --------------------------------------------------------------------------
 section("README drift  — the doc must match the code it describes")
 # --------------------------------------------------------------------------
 # The pre-push hook forces a README edit per code push, but a Changelog line
@@ -365,6 +547,16 @@ check("README's round-trip group count matches top_n",
       f"code expands top_n={_n.group(1) if _n else '?'}")
 check("README documents streaming as live iff the frontend consumes it",
       ("streamTurn" in _fe) == ("Streaming is LIVE" in _readme))
+check("README documents the cross-turn ledger iff the code carries one",
+      ("ledger_context(" in _src) == ("results ledger" in _readme.lower()))
+check("...and the frontend actually echoes it back",
+      ("ledger_context(" in _src) == ("rememberLedger" in _fe))
+check("README documents the price baseline iff the code computes one",
+      ("price_verdict(" in _src) == ("price context" in _readme.lower()))
+_w = _re.search(r"PRICE_CTX_SPREAD_D = (\d+)", _src)
+check("README states the baseline's window width",
+      bool(_w) and f"{_w.group(1)} days either side" in _readme,
+      f"code spreads {_w.group(1) if _w else '?'} days")
 
 # --------------------------------------------------------------------------
 section("Process guards")

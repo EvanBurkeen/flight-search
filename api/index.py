@@ -10,7 +10,7 @@ _PROCESS_START = time.monotonic()
 _process_served = 0  # 0 while this process has not yet answered a request
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from functools import lru_cache
 from urllib.parse import quote
 
@@ -524,6 +524,7 @@ How to handle requests:
 - "arrive by / be there by X" is an ARRIVAL constraint (arrival_time), never a departure cap.
 - When the user cares about the arrival DAY ("land on Friday"), set arrival_date and pick departure_date by timezone logic. Rules of thumb, not laws: typical daytime trans-Pacific Asia -> US routings land the same local day, but late-evening departures and long westbound routings (via the Middle East or Europe) land the NEXT day; US -> Asia/Europe overnights land the next day. When candidate routings vary widely, run two searches (departing the arrival day AND the day before, both with the same arrival_date) so no valid routing is missed. When they change or relax the arrival day, immediately re-search with the new dates — do not re-serve the old results or just offer to search.
 - "via / through <hub>" questions: search with via_airports. That filter checks every itinerary Google returns; the plain result list you see is only a top-6 sample, so NEVER assert that a routing, hub, or airline "doesn't exist" from the plain list — and never say you "confirmed" or "checked directly" unless a via_airports search actually ran this conversation. If you haven't checked, say so and offer to.
+- Follow-ups: the cards from earlier turns are STILL on the user's screen. When a turn opens with a bracketed [Results already on this user's screen] block, that block is the record of what they are looking at, numbered as shown. Answer "which was the second one", "how long is that layover", or "book the JetBlue" straight from it rather than searching again. Search afresh the moment the question changes what the record was built from (route, dates, cabin, filters) or needs something it does not contain, and never fill a gap in it by inference. If the conversation has moved on, note that those fares are from the earlier search.
 - Comparisons: run one search per option (at most 4 per turn). A self-arranged overnight stopover = one search per leg with the correct date on each. Give each search a summary naming the option ("Option A: Thursday nonstop").
 - Empty first results on busy routes are usually transient: retry the SAME search once before broadening. Once a search succeeds, stop; don't also run overlapping broader variants of a question that's already answered. (Empty searches are hidden from the user's page, so never reference "the empty section above.")
 - Multi-city trips (A -> B, B -> C, C -> A, or open-jaw): use trip_type multi_city with multi_city_segments — Google prices the whole trip together, often cheaper than separate one-ways. But NEVER promise "one ticket", through-checked bags, or missed-connection protection unless every leg is on the same carrier or alliance: mixed-carrier combinations (a result's warning will say so) are often issued as separate tickets even though they are priced together. Quote combined prices as "from $X" since the final price varies by seller. Use separate one-way searches when the user wants to compare against self-booking each leg.
@@ -534,6 +535,7 @@ Answering:
 - Voice: you are a seasoned travel concierge. Courteous, composed, precise, warm but never gushing. Write in full sentences, the way a fine hotel's head concierge would speak. NEVER use em dashes or en dashes anywhere in your replies; use commas, periods, or a colon instead.
 - The user sees result cards for every search you run, so don't recite every flight. Lead with your recommendation and the key numbers (totals for multi-leg plans, including a note that hotels/ground costs aren't included), then the trade-offs that matter.
 - Results arrive ranked by value, not by fare: the fare plus what its duration and stops actually cost the traveler. Recommend the best-value option rather than reflexively the cheapest, and when the cheapest fare is not your pick, price the difference in plain terms ("$25 more saves you eight hours and a connection"). Flying is tiring; a long layover to save a few dollars is rarely the favour it looks like. If they ask for the cheapest, give them the cheapest without argument.
+- When a result carries price_context, you know where its cheapest fare sits among NEARBY DATES, and one clause of that belongs in the recommendation ("$239 is among the cheapest dates in this window, and the 14th is only $18 less"). It compares dates, not history: never call a fare good "for this route" in general, never call it a deal in the abstract, and never predict which way prices will move. With no price_context, say nothing at all about whether the fare is good.
 - Mention real caveats from the data: nothing arrives before X, prices are one-way vs round-trip totals, self-transfer risks, tight or overnight layovers.
 - If a search fails or is rate-limited, say so plainly and suggest trying again in a moment.
 - Keep responses short and conversational — a few sentences, not a report.
@@ -541,6 +543,13 @@ Answering:
 - End EVERY final reply with exactly one line in this form (it becomes tappable buttons and is stripped from your prose, so don't also ask the same things in the text):
 SUGGESTIONS: ["first likely follow-up", "second", "third"]
 2-4 items, each under 9 words, phrased as the user would type them ("check Saturday instead", "only nonstops", "what about Newark?"). Predict the most likely next asks given the results: nearby dates, price/speed trade-offs, filters, alternate airports, booking the pick."""
+
+
+def _with_price_ctx(data: dict, payload: dict) -> dict:
+    ctx = payload.get("price_context")
+    if ctx:
+        data["price_context"] = ctx
+    return data
 
 
 def compact_for_model(payload: dict) -> str:
@@ -567,7 +576,8 @@ def compact_for_model(payload: dict) -> str:
             }
             for it in (payload.get("results") or [])[:5]
         ]
-        return json.dumps({"kind": "multi_city", "note": payload.get("message"), "options": rows})
+        return json.dumps(_with_price_ctx(
+            {"kind": "multi_city", "note": payload.get("message"), "options": rows}, payload))
     if kind == "itineraries":
         rows = [
             {
@@ -589,7 +599,7 @@ def compact_for_model(payload: dict) -> str:
                 "cheapest_from": min(m["from_total"] for m in more),
                 "note": "Listed to the user with from-prices; returns not priced this turn.",
             }
-        return json.dumps(data)
+        return json.dumps(_with_price_ctx(data, payload))
     results = payload.get("results") or []
     rows = [_leg_summary(f) for f in results[:6]]
     out = {"kind": "flights", "note": payload.get("message"), "options": rows}
@@ -603,7 +613,7 @@ def compact_for_model(payload: dict) -> str:
             "never claim a hub/airline/routing is unavailable unless a via_airports-filtered "
             "search says so."
         )
-    return json.dumps(out)
+    return json.dumps(_with_price_ctx(out, payload))
 
 
 def _leg_summary(f: dict) -> dict:
@@ -620,6 +630,185 @@ def _leg_summary(f: dict) -> dict:
         "via": [lo["airport"] for lo in (f.get("layovers") or [])],
         "warnings": f.get("warnings") or [],
     }
+
+
+# --------------------------------------------------------------------------
+# What the user is still looking at
+#
+# History was prose only: the frontend replays the reply text, so every
+# structured result we shipped vanished at the end of the turn. A follow-up
+# ("the second one", "the 6:35 JetBlue", "book that") then left Claude two
+# bad options — re-run a search it already paid for, or reconstruct fares
+# from its own sentences, which is exactly the fabrication this project
+# guards against everywhere else. The ledger is the middle path: a compact,
+# NUMBERED record of the cards still on screen, carried into the next turn.
+#
+# It is deliberately a record of what was SHIPPED, not of what exists: the
+# prompt rule that travels with it forbids inferring anything the ledger does
+# not literally contain, so a follow-up outside its four corners still costs
+# a real search.
+# --------------------------------------------------------------------------
+LEDGER_ENTRIES = 3        # searches remembered per turn
+LEDGER_OPTIONS = 6        # options remembered per search (what the model saw)
+LEDGER_TURNS = 2          # turns of history the client echoes back
+LEDGER_MAX_CHARS = 12000  # hard cap on client-supplied ledger text
+
+
+def _ledger_flight(f: dict, n: int | None = None) -> dict:
+    legs = f.get("legs") or []
+    out = {
+        "n": n,
+        "airline": f.get("airline"),
+        "price": f.get("total_price") if f.get("total_price") is not None else f.get("price"),
+        "route": f"{legs[0]['from']}-{legs[-1]['to']}" if legs else None,
+        "depart": legs[0].get("departure") if legs else None,
+        "arrive": legs[-1].get("arrival") if legs else None,
+        "stops": f.get("stops"),
+        "duration_min": f.get("duration"),
+        # flight numbers make "book the B6 1802" answerable without a search
+        "flights": [f"{l.get('airline_code') or ''}{l.get('flight_number') or ''}".strip()
+                    for l in legs] or None,
+        "warnings": f.get("warnings") or None,
+    }
+    return {k: v for k, v in out.items() if v is not None}
+
+
+def ledger_entry(spec: dict, payload: dict) -> dict | None:
+    """One search, as the user still sees it on screen."""
+    kind = payload.get("type")
+    entry: dict = {
+        "search": spec.get("summary") or None,
+        "route": f"{'/'.join(spec.get('origins') or [])} to {'/'.join(spec.get('destinations') or [])}",
+        "depart": spec.get("departure_date"),
+        # a one-way spec often still carries a return_date (the models and the
+        # stub both set one); recording it would file a one-way search in the
+        # ledger as a round trip
+        "return": spec.get("return_date") if spec.get("trip_type") == "round_trip" else None,
+        "cabin": spec.get("cabin"),
+    }
+    entry = {k: v for k, v in entry.items() if v}
+
+    if kind == "dates":
+        dates = payload.get("dates") or []
+        if not dates:
+            return None
+        entry["kind"] = "date_prices"
+        entry["cheapest_dates"] = sorted(dates, key=lambda d: d["price"])[:LEDGER_OPTIONS]
+        return entry
+    if kind == "multicity":
+        rows = payload.get("results") or []
+        if not rows:
+            return None
+        entry["kind"] = "multi_city"
+        entry["options"] = [
+            {"n": i + 1, "total_price": it.get("total_price"),
+             "price_basis": it.get("price_basis"),
+             "legs": [_ledger_flight(p) for p in it.get("parts") or []]}
+            for i, it in enumerate(rows[:LEDGER_OPTIONS])
+        ]
+        return entry
+    if kind == "itineraries":
+        rows = payload.get("results") or []
+        more = payload.get("more_outbounds") or []
+        if not rows and not more:
+            return None
+        entry["kind"] = "round_trips"
+        entry["options"] = [
+            {"n": i + 1, "total_price": it.get("total_price"),
+             "outbound": _ledger_flight(it.get("outbound") or {}),
+             "return": _ledger_flight(it.get("return") or {}),
+             "return_choices": len(it.get("return_options") or [])}
+            for i, it in enumerate(rows[:LEDGER_OPTIONS])
+        ]
+        if more:
+            # the same trap compact_for_model closes: without this, a later
+            # turn reads the priced sample as the whole option space
+            entry["unpriced_outbounds"] = {
+                "count": len(more),
+                "nonstops": sum(1 for m in more if (m.get("stops") or 0) == 0),
+                "cheapest_from": min(m["from_total"] for m in more if m.get("from_total")),
+                "note": "Still on screen, from-priced only; returns price on tap.",
+            }
+        return entry
+
+    rows = payload.get("results") or []
+    if not rows:
+        return None
+    entry["kind"] = "flights"
+    entry["options"] = [_ledger_flight(f, i + 1) for i, f in enumerate(rows[:LEDGER_OPTIONS])]
+    if len(rows) > LEDGER_OPTIONS:
+        entry["not_listed"] = (f"{len(rows) - LEDGER_OPTIONS} further options are on the "
+                               "user's screen but not recorded here; re-search to describe them.")
+    return entry
+
+
+def _turn_ledger(entries: list) -> dict | None:
+    """What this turn leaves on screen, for the client to echo back next turn."""
+    return {"entries": entries[-LEDGER_ENTRIES:]} if entries else None
+
+
+_LEDGER_FIELDS = ("search", "route", "depart", "return", "cabin", "kind",
+                  "options", "cheapest_dates", "unpriced_outbounds", "not_listed")
+
+
+def _sanitize_entry(entry) -> dict | None:
+    """Reshape one client-supplied entry to the size and shape we emit.
+
+    The client is the user's own browser, so this is not a trust boundary
+    (they can type anything into the query anyway) — it is a SIZE boundary.
+    Without it a single entry carrying thousands of options walks straight
+    into the prompt, and the trim below can only drop whole entries.
+    """
+    if not isinstance(entry, dict):
+        return None
+    out: dict = {}
+    for k in _LEDGER_FIELDS:
+        v = entry.get(k)
+        if v is None:
+            continue
+        if isinstance(v, list):
+            v = v[:LEDGER_OPTIONS]
+        elif isinstance(v, str):
+            v = v[:300]
+        out[k] = v
+    return out or None
+
+
+def ledger_context(ledgers: list | None) -> str | None:
+    """The bracketed block that carries earlier results into this turn."""
+    if not ledgers:
+        return None
+    entries: list = []
+    for led in list(ledgers)[-LEDGER_TURNS:]:
+        if isinstance(led, dict):
+            entries.extend(led.get("entries") or [])
+        elif isinstance(led, list):
+            entries.extend(led)
+    entries = [e for e in (_sanitize_entry(e) for e in entries) if e][-(LEDGER_ENTRIES * LEDGER_TURNS):]
+    if not entries:
+        return None
+    body = json.dumps({"searches": entries}, default=str)
+    while len(body) > LEDGER_MAX_CHARS:
+        if len(entries) > 1:
+            entries = entries[1:]  # oldest goes first
+        elif any(entries[0].get(k) for k in ("options", "cheapest_dates")):
+            for k in ("options", "cheapest_dates"):  # then thin the survivor
+                if entries[0].get(k):
+                    entries[0][k] = entries[0][k][:max(1, len(entries[0][k]) // 2)]
+        else:
+            return None  # nothing left worth carrying
+        body = json.dumps({"searches": entries}, default=str)
+    return (
+        "[Results already on this user's screen from earlier in this conversation, "
+        "numbered as they were shown. Quote these fares, times, and flight numbers "
+        "directly when they refer back to one (\"the second one\", \"the 6:35 JetBlue\", "
+        "\"book that\") instead of running the search again. You have NOT seen anything "
+        "absent from this record: never infer a price, a schedule, a seat, or "
+        "availability from it, and run a fresh search whenever the question changes the "
+        "route, dates, cabin, or filters. Each price is as of the search that produced "
+        "it, so treat it as a quote from earlier in the conversation, not a live fare.]\n"
+        + body
+    )
 
 
 def split_suggestions(text: str) -> tuple[str, list[str]]:
@@ -656,7 +845,8 @@ def looks_like_plain_search(query: str) -> bool:
     return bool(_ROUTE_HINT.search(q))
 
 
-def run_assistant(query: str, history: list | None, emit=None) -> dict:
+def run_assistant(query: str, history: list | None, emit=None,
+                  ledgers: list | None = None) -> dict:
     """Run the agent loop. `emit(event, data)` receives progress as it happens:
 
       sections     a results batch is ready (cards can render immediately —
@@ -673,9 +863,15 @@ def run_assistant(query: str, history: list | None, emit=None) -> dict:
         for m in (history or [])[-12:]
         if m.get("role") in ("user", "assistant") and m.get("content")
     ]
-    messages.append({"role": "user", "content": query})
+    # the cards from earlier turns are still on the user's screen, so they are
+    # context, not history to be re-derived; the block is bracketed the same
+    # way as the wrap-up status note so it reads as an annotation, not a request
+    ledger_note = ledger_context(ledgers)
+    messages.append({"role": "user",
+                     "content": f"{ledger_note}\n\n{query}" if ledger_note else query})
 
     sections: list[dict] = []
+    ledger_entries: list[dict] = []  # what this turn puts on screen, for the next one
     search_log: list[str] = []  # per-search outcome lines; feeds the wrap-up call
     searches_used = 0
     web_tool = {"type": "web_search_20260209", "name": "web_search", "max_uses": 3}
@@ -782,7 +978,8 @@ def run_assistant(query: str, history: list | None, emit=None) -> dict:
             text = "\n".join(b.text for b in response.content if b.type == "text").strip()
             text, suggestions = split_suggestions(text)
             return {"message": text or "…", "sections": sections,
-                    "suggestions": suggestions, "timings": timings}
+                    "suggestions": suggestions, "timings": timings,
+                    "ledger": _turn_ledger(ledger_entries)}
         rounds += 1
 
         messages.append({"role": "assistant", "content": response.content})
@@ -826,6 +1023,9 @@ def run_assistant(query: str, history: list | None, emit=None) -> dict:
             try:
                 payload = futures[tu.id].result(timeout=max(1.0, batch_deadline - time.monotonic()))
                 sections.append(payload)
+                entry = ledger_entry(tu.input or {}, payload)
+                if entry:
+                    ledger_entries.append(entry)
                 n = len(payload.get("results") or payload.get("dates") or [])
                 search_log.append(f"'{label}': completed, {n} options on screen"
                                   if n else f"'{label}': came back EMPTY (transient hiccup or no service)")
@@ -909,7 +1109,8 @@ def run_assistant(query: str, history: list | None, emit=None) -> dict:
             text, suggestions = split_suggestions(text)
             if text:
                 return {"message": text, "sections": sections,
-                        "suggestions": suggestions or ["keep digging"], "timings": timings}
+                        "suggestions": suggestions or ["keep digging"], "timings": timings,
+                        "ledger": _turn_ledger(ledger_entries)}
         except Exception:
             pass  # canned fallback below; never lose the data over prose
         return {
@@ -917,6 +1118,7 @@ def run_assistant(query: str, history: list | None, emit=None) -> dict:
             "sections": sections,
             "suggestions": ["keep digging"],
             "timings": timings,
+            "ledger": _turn_ledger(ledger_entries),
         }
     return {
         "message": "Google Flights is responding slowly at the moment and that search ran past my patience. Give it a minute and try again; your question was perfectly fine.",
@@ -2167,6 +2369,229 @@ def search_flexible_dates(spec: dict, origins: list, destinations: list, currenc
     return payload
 
 
+# --------------------------------------------------------------------------
+# Is this a good fare?
+#
+# Value ranking answers "which of these", never "is this a good day to buy",
+# which is the other half of why people open Google Flights (it says so
+# outright: "prices are currently low"). The machinery was already here: the
+# SearchDates grid behind flexible dates prices every nearby date, and where
+# the quoted fare sits in that spread is an honest, checkable answer.
+#
+# Constraints this obeys, because it is an optional nicety riding on a search
+# that is not:
+#   - it NEVER delays the cards. The grid is fetched alongside the search and
+#     the payload ships without it when it is late (PRICE_CTX_WAIT_S).
+#   - it never retries, and stands down entirely while the breaker is open.
+#     An extra request during a refusal wave is precisely the sustained volume
+#     that escalates a session flag into an IP burn.
+#   - it is cached for HOURS, not the search cache's minutes: a distribution
+#     ages far more slowly than a live fare, and one grid per route-window is
+#     the whole point at ~100-300KB of proxy bandwidth each.
+#   - it compares DATES IN A WINDOW, never price history, and the note it
+#     hands the model says so. "Cheaper than usual" would be a claim about
+#     data we do not have, which is the failure mode this project keeps
+#     paying for.
+# --------------------------------------------------------------------------
+PRICE_CTX_SPREAD_D = 21      # days either side of the requested departure
+PRICE_CTX_TTL = 6 * 3600.0   # a fare distribution ages in hours, not minutes
+PRICE_CTX_WAIT_S = 3.0       # the most we hold cards back waiting for it
+PRICE_CTX_MAX_INFLIGHT = 2   # extra load on Google, deliberately bounded
+PRICE_CTX_MIN_SAMPLE = 8     # fewer dates than this cannot characterize a spread
+
+_price_ctx_cache: dict = {}
+_price_ctx_lock = threading.Lock()
+_price_ctx_state = {"inflight": 0}
+_price_ctx_pool = ThreadPoolExecutor(max_workers=PRICE_CTX_MAX_INFLIGHT)
+
+
+def price_ctx_window(dep: str, spread: int = PRICE_CTX_SPREAD_D) -> tuple[str, str] | None:
+    """The date window we price around a departure, never reaching the past."""
+    try:
+        d = datetime.strptime(dep, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+    start = max(d - timedelta(days=spread), date.today() + timedelta(days=1))
+    end = d + timedelta(days=spread)
+    if start > d or end < d:
+        return None
+    return start.isoformat(), end.isoformat()
+
+
+def _trip_nights(spec: dict) -> int | None:
+    if spec.get("trip_type") != "round_trip":
+        return None
+    try:
+        out = datetime.strptime(spec["departure_date"], "%Y-%m-%d").date()
+        back = datetime.strptime(spec["return_date"], "%Y-%m-%d").date()
+    except (KeyError, TypeError, ValueError):
+        return None
+    nights = (back - out).days
+    return nights if 1 <= nights <= 60 else None
+
+
+def _price_ctx_key(spec: dict, origins: list, destinations: list,
+                   nights: int | None, window: tuple) -> str:
+    return json.dumps({
+        "o": sorted(a.name for a in origins), "d": sorted(a.name for a in destinations),
+        "cabin": spec.get("cabin") or "economy", "nights": nights, "window": window,
+        # a capped or filtered search prices a different question entirely
+        "stops": spec.get("max_stops"), "airlines": spec.get("airlines_include"),
+        "alliances": spec.get("alliances"), "adults": spec.get("adults") or 1,
+    }, sort_keys=True, default=str)
+
+
+def _fetch_price_grid(spec: dict, origins: list, destinations: list,
+                      nights: int | None, window: tuple) -> list:
+    """One date grid, one attempt. Returns [] on anything unexpected."""
+    grid_spec = {**spec, "departure_date": window[0], "return_date": window[0]}
+    extra: dict = {"from_date": window[0], "to_date": window[1]}
+    if nights:
+        extra["duration"] = nights
+    try:
+        filters = build_filters(grid_spec, origins, destinations,
+                                filters_cls=DateSearchFilters, **extra)
+        checkout_identity()
+        _local.fli_timeout = 12.0
+        rows = SearchDates().search(filters, currency="USD") or []
+    except Exception:
+        # NOT retired: this thread may share an identity with the live search
+        # it is annotating, and closing that handle mid-request would break a
+        # real answer to improve an optional one. The outcome is still noted,
+        # so a genuine wave still trips the breaker.
+        note_search_outcome(False)
+        return []
+    note_search_outcome(bool(rows))
+    out = []
+    for dp in rows:
+        if not dp.price or not dp.date:
+            continue
+        out.append({"date": dp.date[0].strftime("%Y-%m-%d"),
+                    "return_date": dp.date[1].strftime("%Y-%m-%d") if len(dp.date) > 1 else None,
+                    "price": dp.price})
+    return out
+
+
+def start_price_context(spec: dict, origins: list, destinations: list):
+    """Begin the baseline fetch alongside the search it will annotate."""
+    if spec.get("flexible_dates") or spec.get("multi_city_segments"):
+        return None  # a flexible search already shows the whole distribution
+    if spec.get("trip_type") == "multi_city" or not spec.get("departure_date"):
+        return None
+    with _breaker_lock:
+        if _breaker["open_until"] > time.monotonic():
+            return None  # mid-wave: do not add optional load
+    window = price_ctx_window(spec["departure_date"])
+    if not window:
+        return None
+    nights = _trip_nights(spec)
+    key = _price_ctx_key(spec, origins, destinations, nights, window)
+
+    with _price_ctx_lock:
+        hit = _price_ctx_cache.get(key)
+        if hit and hit[0] > time.monotonic():
+            grid = hit[1]
+            fut: object = None
+        elif _price_ctx_state["inflight"] >= PRICE_CTX_MAX_INFLIGHT:
+            return None
+        else:
+            grid, fut = None, True
+            _price_ctx_state["inflight"] += 1
+    if fut is None:
+        return {"window": window, "nights": nights, "grid": grid, "future": None,
+                "dep": spec["departure_date"]}
+
+    def work():
+        try:
+            grid_ = _fetch_price_grid(spec, origins, destinations, nights, window)
+            if grid_:
+                with _price_ctx_lock:
+                    _price_ctx_cache[key] = (time.monotonic() + PRICE_CTX_TTL, grid_)
+                    if len(_price_ctx_cache) > 32:
+                        for k in sorted(_price_ctx_cache, key=lambda k: _price_ctx_cache[k][0])[:8]:
+                            _price_ctx_cache.pop(k, None)
+            return grid_
+        finally:
+            with _price_ctx_lock:
+                _price_ctx_state["inflight"] -= 1
+
+    return {"window": window, "nights": nights, "grid": None,
+            "dep": spec["departure_date"], "future": _price_ctx_pool.submit(work)}
+
+
+def payload_anchor_price(payload: dict):
+    """The cheapest fare this search actually put on screen."""
+    prices: list = []
+    if payload.get("type") == "itineraries":
+        prices += [it.get("total_price") for it in payload.get("results") or []]
+        prices += [m.get("from_total") for m in payload.get("more_outbounds") or []]
+    else:
+        prices += [f.get("price") for f in payload.get("results") or []]
+    prices = [p for p in prices if isinstance(p, (int, float)) and p > 0]
+    return min(prices) if prices else None
+
+
+def price_verdict(anchor, grid: list, window: tuple, nights: int | None,
+                  dep: str | None = None) -> dict | None:
+    """Where `anchor` sits among the cheapest fares for nearby dates."""
+    prices = sorted(g["price"] for g in grid if g.get("price"))
+    if not anchor or len(prices) < PRICE_CTX_MIN_SAMPLE:
+        return None
+    below = sum(1 for p in prices if p < anchor)
+    pct = below / len(prices)
+    band = ("among the cheapest dates in this window" if pct <= 0.15 else
+            "below the going rate for nearby dates" if pct <= 0.40 else
+            "about the going rate for nearby dates" if pct <= 0.60 else
+            "above the going rate for nearby dates" if pct <= 0.85 else
+            "among the priciest dates in this window")
+    mid = prices[len(prices) // 2]
+    cheapest = min(grid, key=lambda g: g["price"])
+    cheaper = sorted((g for g in grid if g["price"] <= anchor * 0.92),
+                     key=lambda g: g["price"])[:3]
+    return {
+        # the fare being characterized is the CHEAPEST one on screen for the
+        # searched date, which is not the same as the top card's price (value
+        # ranking leads with the best trip, not the lowest number)
+        "quoted": round(anchor),
+        "quoted_is": "cheapest fare this search found" + (f" for {dep}" if dep else ""),
+        "searched_date": dep,
+        "verdict": band,
+        "percentile": round(pct * 100),
+        "median_nearby": round(mid),
+        "cheapest_nearby": {"date": cheapest["date"], "price": round(cheapest["price"]),
+                            **({"return_date": cheapest["return_date"]} if cheapest.get("return_date") else {})},
+        "cheaper_dates": [{"date": g["date"], "price": round(g["price"]),
+                           "saves": round(anchor - g["price"])} for g in cheaper],
+        "window": {"from": window[0], "to": window[1]},
+        "dates_priced": len(prices),
+        "basis": (f"round-trip totals for {nights}-night trips" if nights
+                  else "one-way fares"),
+        "note": ("Compares the cheapest fare this search found against the cheapest fare "
+                 "Google lists for every other date in the window. This is NOT price "
+                 "history: say where the fare sits among these DATES, never that it is "
+                 "cheap or dear 'for this route' in general, and never predict which way "
+                 "prices will move."),
+    }
+
+
+def attach_price_context(payload: dict, handle, deadline: float) -> None:
+    """Annotate the payload if the baseline landed in time. Never raises."""
+    if not handle or not isinstance(payload, dict):
+        return
+    try:
+        grid = handle.get("grid")
+        if grid is None and handle.get("future") is not None:
+            grid = handle["future"].result(timeout=max(0.0, deadline - time.monotonic()))
+        if not grid:
+            return
+        ctx = price_verdict(payload_anchor_price(payload), grid,
+                            handle["window"], handle.get("nights"), handle.get("dep"))
+        if ctx:
+            payload["price_context"] = ctx
+    except Exception:
+        return  # a baseline is a bonus; it can never cost the user their search
+
+
 def roll_past_dates(spec: dict) -> tuple[dict, list[str]]:
     """A month/day that already passed this year means next year — fix it and say so."""
     today = datetime.now().strftime("%Y-%m-%d")
@@ -2295,7 +2720,12 @@ def execute_spec(spec: dict) -> dict:
     if spec.get("flexible_dates"):
         payload = search_flexible_dates(spec, origins, destinations, currency)
     elif spec.get("departure_date"):
+        # the baseline runs BESIDE the search, never in front of it: whatever
+        # has landed by the time the cards are ready gets attached, and the
+        # rest is dropped rather than waited on
+        ctx = start_price_context(spec, origins, destinations)
         payload = search_fixed_dates(spec, origins, destinations, currency)
+        attach_price_context(payload, ctx, time.monotonic() + PRICE_CTX_WAIT_S)
     else:
         return {
             "type": "clarify",
@@ -2325,16 +2755,19 @@ async def search_stream(request: Request):
     if not query:
         return JSONResponse({"error": "Query is required"}, status_code=400)
     history = body.get("history")
+    ledgers = body.get("ledgers")
 
     events: "_queue.Queue" = _queue.Queue()
 
     def worker():
         try:
-            result = run_assistant(query, history, emit=lambda ev, data: events.put((ev, data)))
+            result = run_assistant(query, history, emit=lambda ev, data: events.put((ev, data)),
+                                   ledgers=ledgers)
             events.put(("done", {
                 "message": result["message"],
                 "sections": result["sections"],
                 "suggestions": result.get("suggestions") or [],
+                "ledger": result.get("ledger"),
             }))
         except anthropic.APIStatusError as e:
             overloaded = e.status_code in (429, 529) or getattr(e, "type", "") == "overloaded_error"
@@ -2499,12 +2932,13 @@ async def search(request: Request):
         cold = _process_served == 0
         _process_served += 1
         t0 = time.monotonic()
-        result = run_assistant(query, body.get("history"))
+        result = run_assistant(query, body.get("history"), ledgers=body.get("ledgers"))
         payload = {
             "type": "assistant",
             "message": result["message"],
             "sections": result["sections"],
             "suggestions": result.get("suggestions") or [],
+            "ledger": result.get("ledger"),
         }
         if body.get("debug_timings"):
             payload["timings"] = {

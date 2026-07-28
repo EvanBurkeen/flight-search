@@ -68,8 +68,12 @@ if not os.environ.get("ANTHROPIC_API_KEY"):
             ]
         return [spec]
 
-    def stub_run_assistant(query: str, history=None, emit=None):
+    def stub_run_assistant(query: str, history=None, emit=None, ledgers=None):
         emit = emit or (lambda *_: None)
+        # the ledger the browser echoed back: real Claude reads this as context,
+        # the stub just counts it so the round trip is verifiable locally
+        carried = sum(len(e.get("options") or e.get("cheapest_dates") or [])
+                      for led in (ledgers or []) for e in (led.get("entries") or []))
         specs = stub_parse(query)
         if not specs:
             return {"message": "STUB: give me two airport codes, e.g. 'JFK to ORD'.", "sections": []}
@@ -78,15 +82,19 @@ if not os.environ.get("ANTHROPIC_API_KEY"):
         # emit() is a no-op on the non-streaming path; the events are still
         # produced so /api/search/stream (see the streaming-experiment branch)
         # stays exercisable locally
-        stub_text = (f"STUB ASSISTANT (no API key): ran {len(specs)} search(es). "
+        stub_text = (f"STUB ASSISTANT (no API key): ran {len(specs)} search(es), "
+                     f"carrying {carried} remembered option(s) from earlier turns. "
                      "With a real key, Claude summarizes these conversationally.")
         for word in stub_text.split(" "):
             emit("text_delta", word + " ")
             time.sleep(0.05)
+        entries = [e for e in (app_mod.ledger_entry(s, sec)
+                               for s, sec in zip(specs, sections)) if e]
         return {
             "message": stub_text,
             "sections": sections,
             "suggestions": ["check Saturday instead", "only nonstops", "make it round trip"],
+            "ledger": {"entries": entries} if entries else None,
         }
 
     app_mod.run_assistant = stub_run_assistant

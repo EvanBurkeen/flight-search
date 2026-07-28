@@ -60,8 +60,10 @@ this file, then **"Lessons the hard way"** below before debugging anything.
   tabs — a reply would never finish typing or finalize; the watchdog timer in
   `startTyping` is load-bearing).
 - **Roadmap shelf (discussed, not built):** price watches (cron + email),
-  trip memory + login, real booking via Duffel. (Search-result caching shipped
-  July 24; the calendar heatmap and streaming replies shipped July 25.)
+  login + saved trips, real booking via Duffel. (Search-result caching shipped
+  July 24; the calendar heatmap and streaming replies shipped July 25; the
+  cross-turn results ledger — the useful slice of "trip memory" without login
+  — and price context shipped July 28.)
 - **Known trade-offs accepted by Evan:** timeline layover dots use naive local
   times (schematic, not exact); Claude sees only top-6 summaries per search
   (with truncation warning baked in); the value-ranking weights
@@ -157,6 +159,14 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
 - A round-trip search that got the outbound list but no pairings ships every
   outbound from-priced with `spec_echo` (tap-to-price), never "No flights
   found" — and the model is told not to claim unavailability.
+- The cross-turn ledger records what was SHIPPED, never what exists: an empty
+  search leaves no record, a round trip carries its unpriced-outbound counts
+  forward, and the carried block forbids inferring anything absent from it.
+- Price context characterizes a fare that is actually on screen (the cheapest
+  one shipped), never claims to be price history, refuses to speak from a
+  sample under 8 dates, and is dropped rather than waited on.
+- Joining the model's soft wraps never leaves a space before punctuation or a
+  double space (the July 28 "on Nov 28 , with" report).
 
 ## Stack
 
@@ -176,7 +186,17 @@ Google traffic through a proxy (see Operations).
 
 ## How a turn works
 
-1. Frontend POSTs `{query, history}` (history = last 12 user/assistant text turns).
+1. Frontend POSTs `{query, history, ledgers}` (history = last 12 user/assistant
+   text turns; `ledgers` = the **results ledger** from the last 2 turns that
+   shipped cards, echoed straight back). History is prose only, so without the
+   ledger every structured result vanished at the end of a turn and a follow-up
+   ("the second one", "book the JetBlue") forced a re-search or an invented
+   fare. `ledger_entry` records what was SHIPPED (numbered as the user saw it:
+   fare, route, times, stops, flight numbers, plus the unpriced-outbound counts
+   for round trips) and `ledger_context` carries it into the next turn as a
+   bracketed block whose rule is that anything absent from the record has not
+   been seen and must be searched for. Capped at 3 searches x 6 options x 2
+   turns, and re-clamped server-side.
 2. `run_assistant` runs an agent loop (≤3 search rounds, ≤8 API calls, **58s
    budget for NEW search rounds** — when the budget dies with data on screen,
    a guaranteed tool-less wrap-up call still writes a real reply from a
@@ -220,7 +240,13 @@ Google traffic through a proxy (see Operations).
      change, mixed-carrier separate-ticket risk), CO2 delta, and
      `route_points` (with per-stop `layover_min`) for the map.
 4. Claude sees a **compact top-6 summary per search** (with route endpoints and an
-   explicit truncation warning); the browser gets everything.
+   explicit truncation warning); the browser gets everything. Fixed-date searches
+   also carry **price context**: a `SearchDates` grid over 21 days either side of
+   the departure, fetched BESIDE the search (never in front of it, 3s wait cap,
+   dropped if late), cached 6 hours, giving the shipped fare's place among nearby
+   dates plus the cheapest nearby date. It is a comparison across DATES, not
+   price history, and both the model's note and the on-card line say so.
+   It stands down entirely while the circuit breaker is open.
 5. Reply text ends with a `SUGGESTIONS: [...]` line → stripped and rendered as
    tappable follow-up chips.
 6. Trip types: one-way, round-trip (choose an outbound, then a return, with the
@@ -248,7 +274,10 @@ Chat with stop/supersede (send during a search cancels and re-asks) · Detailed/
 views (global toggle + per-section override) · top-picks preview with "Show all N"
 and instant client-side filters (sort, departure window, duration, airline, alliance,
 stops — options derived from the data; they filter only what the server
-shipped, which is why the cut keeps nonstops/cheapest/fastest) · round-trip
+shipped, which is why the cut keeps nonstops/cheapest/fastest) · **price
+context line** above a fixed-date section (where its cheapest fare sits among
+nearby dates, the cheapest nearby date, and an explicit "not price history"
+footnote) · round-trip
 **mix & match board** (expanded view: every outbound on the left — tapping a
 from-priced row prices its returns IN PLACE via `/api/returns`, ~1-4s, no
 model turn, with an ask-the-concierge fallback — the selected outbound's
@@ -327,6 +356,30 @@ same SSE events as the real loop, so streaming is fully exercisable locally.
   lakes; run it, then bump the `?v=N` cache-buster on the script tag in index.html).
 
 ## Changelog
+
+**July 28, 2026 (memory of the screen, a baseline, and the spacing)**
+- **The results stay on screen, so now they stay in context.** History was
+  prose only: every card we shipped vanished at the end of the turn, so "the
+  second one" or "book the JetBlue" left Claude re-running a search it had
+  already paid for, or worse, reconstructing fares from its own sentences.
+  Each turn now returns a compact numbered ledger of what it put on screen
+  (fare, route, times, stops, flight numbers, and the unpriced-outbound counts
+  a round trip must not forget); the browser echoes the last 2 turns back and
+  the loop injects them as a bracketed block whose rule is that anything not
+  in the record has not been seen and still costs a search.
+- **"Is this a good fare?"** Ranking always answered "which of these" and never
+  "is today a good day to buy", which is half of why anyone opens Google
+  Flights. Fixed-date searches now carry a `SearchDates` baseline over 21 days
+  either side, fetched alongside the search and dropped if it is late (3s cap),
+  cached 6 hours, standing down while the breaker is open. It says where the
+  shipped fare sits among nearby DATES and names the cheapest one. It is not
+  price history and never implies it is, in the model's note or on the card.
+- **Reply spacing (Evan's report).** The renderer joined the model's soft wraps
+  by swapping each newline for a space, leaving the whitespace on either side:
+  "for $239 on Nov 28 , with morning departures" and "rises to  $374". The join
+  now consumes the whitespace on both sides and drops a space left before
+  punctuation. check.py runs the shipped chain, lifted out of index.html, over
+  the exact reported sentence.
 
 **July 28, 2026 (README drift checks)**
 - The doc now defends itself: check.py gains a "README drift" section that
