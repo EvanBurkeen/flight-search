@@ -246,7 +246,13 @@ Google traffic through a proxy (see Operations).
    dropped if late), cached 6 hours, giving the shipped fare's place among nearby
    dates plus the cheapest nearby date. It is a comparison across DATES, not
    price history, and both the model's note and the on-card line say so.
-   It stands down entirely while the circuit breaker is open.
+   It stands down entirely while the circuit breaker is open. It is started and
+   attached in `cached_execute_spec`, deliberately OUTSIDE the payload cache: a
+   grid that misses its window keeps running, warms its own cache, and annotates
+   the next serve, where attaching inside `execute_spec` froze "no context" into
+   the cached payload for its whole TTL (see Changelog July 28). Every payload
+   carries a one-word `price_context_status` (`landed`/`cached`/`late`/`thin`/
+   `empty`/`off`) so the next diagnosis costs no probe cycle.
 5. Reply text ends with a `SUGGESTIONS: [...]` line → stripped and rendered as
    tappable follow-up chips.
 6. Trip types: one-way, round-trip (choose an outbound, then a return, with the
@@ -356,6 +362,25 @@ same SSE events as the real loop, so streaming is fully exercisable locally.
   lakes; run it, then bump the `?v=N` cache-buster on the script tag in index.html).
 
 ## Changelog
+
+**July 28, 2026 (price context never appeared in prod: the cache froze it out)**
+Post-push verification did its job. The baseline worked on every local probe
+and was absent from all three production probes.
+- **Cause 1 (the real one):** it was attached inside `execute_spec`, i.e.
+  INSIDE the payload cache. The first search dropped a grid still in flight
+  (a residential-proxy handshake costs seconds a direct local fetch does not),
+  that context-less payload was cached, and every repeat for the next 4
+  minutes served it back. The feature could not converge; local, with no
+  proxy, always won the race and so never showed the bug.
+- **Cause 2:** on a cache hit `execute_spec` never runs at all, so no grid was
+  even attempted on a repeat.
+- **Fix:** the baseline is started and attached in `cached_execute_spec`,
+  outside the payload cache, on every return path (hit, single-flight waiter,
+  and miss). A late grid keeps running, warms its 6-hour cache, and annotates
+  the next serve. Verified: first call `landed`, repeat `cached`.
+- Every payload now carries `price_context_status`, because "it just isn't
+  there" cost a probe cycle to unpick. Checks pin both the status and the
+  ordering that keeps the start ahead of the cache lookup.
 
 **July 28, 2026 (memory of the screen, a baseline, and the spacing)**
 - **The results stay on screen, so now they stay in context.** History was

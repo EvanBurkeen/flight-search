@@ -2576,19 +2576,32 @@ def price_verdict(anchor, grid: list, window: tuple, nights: int | None,
 
 def attach_price_context(payload: dict, handle, deadline: float) -> None:
     """Annotate the payload if the baseline landed in time. Never raises."""
-    if not handle or not isinstance(payload, dict):
+    if not isinstance(payload, dict):
         return
+    if not handle:
+        payload["price_context_status"] = "off"
+        return
+    # one word of why, on every payload: production disagreed with local on
+    # this feature and "it just isn't there" cost a probe cycle to unpick
     try:
-        grid = handle.get("grid")
+        grid, status = handle.get("grid"), "cached"
         if grid is None and handle.get("future") is not None:
             grid = handle["future"].result(timeout=max(0.0, deadline - time.monotonic()))
+            status = "landed"
         if not grid:
+            payload["price_context_status"] = "empty"
             return
         ctx = price_verdict(payload_anchor_price(payload), grid,
                             handle["window"], handle.get("nights"), handle.get("dep"))
+        payload["price_context_status"] = status if ctx else "thin"
         if ctx:
             payload["price_context"] = ctx
+    except FuturesTimeout:
+        # still in flight: it keeps running, warms the 6h cache, and the next
+        # serve of this route-window gets annotated instead
+        payload["price_context_status"] = "late"
     except Exception:
+        payload["price_context_status"] = "error"
         return  # a baseline is a bonus; it can never cost the user their search
 
 
@@ -2654,14 +2667,40 @@ def _spec_key(spec: dict) -> str:
     )
 
 
+def _start_ctx_for(spec: dict):
+    """Kick off the price baseline for a spec, on the dates we will search."""
+    rolled, _ = roll_past_dates(spec)
+    if not rolled.get("departure_date") or rolled.get("flexible_dates"):
+        return None
+    origins, _bad = resolve_airports(rolled.get("origins"))
+    destinations, _bad2 = resolve_airports(rolled.get("destinations"))
+    if not origins or not destinations:
+        return None
+    return start_price_context(rolled, origins, destinations)
+
+
 def cached_execute_spec(spec: dict) -> dict:
     import copy
+
+    # The baseline rides OUTSIDE the payload cache, deliberately. Attaching it
+    # inside execute_spec froze the answer into the cached payload: production
+    # showed the first search dropping a grid that was still in flight (a
+    # residential-proxy handshake costs seconds that a direct local fetch does
+    # not) and every repeat inside the 4-minute TTL then serving that same
+    # context-less payload, so the feature could never appear at all. Started
+    # here, a grid that lands late still warms its 6-hour cache and annotates
+    # the NEXT serve, cache hit or not.
+    ctx = _start_ctx_for(spec)
+
+    def annotate(payload: dict) -> dict:
+        attach_price_context(payload, ctx, time.monotonic() + PRICE_CTX_WAIT_S)
+        return payload
 
     key = _spec_key(spec)
     with _cache_lock:
         hit = _search_cache.get(key)
         if hit and hit[0] > time.monotonic():
-            return copy.deepcopy(hit[1])
+            return annotate(copy.deepcopy(hit[1]))
         waiter = _inflight.get(key)
         if waiter is None:
             waiter = threading.Event()
@@ -2676,7 +2715,7 @@ def cached_execute_spec(spec: dict) -> dict:
         with _cache_lock:
             hit = _search_cache.get(key)
         if hit:
-            return copy.deepcopy(hit[1])
+            return annotate(copy.deepcopy(hit[1]))
         # the owner failed; fall through and try it ourselves
 
     try:
@@ -2687,7 +2726,7 @@ def cached_execute_spec(spec: dict) -> dict:
                 if len(_search_cache) > 64:  # bound memory in a long-lived process
                     for k in sorted(_search_cache, key=lambda k: _search_cache[k][0])[:16]:
                         _search_cache.pop(k, None)
-        return copy.deepcopy(payload)
+        return annotate(copy.deepcopy(payload))
     finally:
         with _cache_lock:
             _inflight.pop(key, None)
@@ -2720,12 +2759,7 @@ def execute_spec(spec: dict) -> dict:
     if spec.get("flexible_dates"):
         payload = search_flexible_dates(spec, origins, destinations, currency)
     elif spec.get("departure_date"):
-        # the baseline runs BESIDE the search, never in front of it: whatever
-        # has landed by the time the cards are ready gets attached, and the
-        # rest is dropped rather than waited on
-        ctx = start_price_context(spec, origins, destinations)
         payload = search_fixed_dates(spec, origins, destinations, currency)
-        attach_price_context(payload, ctx, time.monotonic() + PRICE_CTX_WAIT_S)
     else:
         return {
             "type": "clarify",

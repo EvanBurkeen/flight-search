@@ -444,6 +444,15 @@ app.attach_price_context(_pay, {"window": _win, "nights": None, "grid": None, "f
 check("a late baseline is dropped, never waited on",
       "price_context" not in _pay and time.monotonic() - _t0 < 0.5,
       f"{time.monotonic() - _t0:.2f}s")
+check("...and says WHY it is missing (prod disagreed with local once)",
+      _pay.get("price_context_status") == "late", str(_pay.get("price_context_status")))
+# attaching inside the payload cache froze "no context" into a 4-minute-old
+# payload, so a route could never gain a baseline once it had missed one
+_src_cached = open(os.path.join(ROOT, "api", "index.py")).read()
+check("the baseline is attached OUTSIDE the payload cache",
+      "def cached_execute_spec" in _src_cached
+      and _src_cached.index("_start_ctx_for(spec)") < _src_cached.index("hit = _search_cache.get(key)"),
+      "start it before the cache lookup and annotate every return path")
 app.attach_price_context(_pay, None, time.monotonic() + 1)
 check("no baseline handle is a no-op, not an error", "price_context" not in _pay)
 # extra load during a refusal wave is what turns a session flag into an IP burn
