@@ -67,8 +67,8 @@ this file, then **"Lessons the hard way"** below before debugging anything.
   (with truncation warning baked in); the value-ranking weights
   (`HOUR_VALUE` etc. at the top of `api/index.py`) are a product judgement, not
   a tuned model — change them there; multi-city is the slow path (leg-2 fan-out
-  is 4–6 candidates), so it is the trip type most likely to hit the 65s turn
-  budget and return partial results.
+  is 4–6 candidates), so it is the trip type most likely to exhaust the 58s
+  search budget; the guaranteed wrap-up call still narrates whatever landed.
 
 ## Lessons the hard way
 
@@ -96,6 +96,12 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
   its own booking page sells when the carriers do not interline.
 - `SortBy.BEST` intermittently returns None (ladder falls back to CHEAPEST), and
   transient tiny-error bodies arrive in bursts (~5-10%).
+- **Request timeouts are TOTAL time, not idle time**, and heavy queries STREAM
+  their chunks slowly — a tight timeout kills a nearly-complete download and
+  the retry re-pays the whole cost. Fail fast once (new identity), then be
+  patient. Also: fli's client wraps every POST in tenacity retries ON THE SAME
+  SESSION; the app bypasses them (`__wrapped__`) because the identity-rotating
+  ladder is the correct retry layer.
 
 **Booking deep links (`tfs`)**
 - The `tfs` param is base64url protobuf naming the exact itinerary. **`f19` is the
@@ -126,6 +132,10 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
 - **An occluded preview pane reports `viewportH: 0`**, returns junk from
   `getComputedStyle`, throttles `setTimeout` to ~1/s and pauses smooth scrolling.
   Several "bugs" were only that. Cross-check with a screenshot or `curl`.
+- **Browsers starve `requestAnimationFrame` in hidden/occluded tabs.** Any
+  animation loop that gates COMPLETION (the streaming typewriter) needs a
+  timer watchdog or it never finishes for a user who switched tabs. The
+  watchdog in `startTyping` is load-bearing.
 
 ## Invariants (`scripts/check.py` enforces these)
 
@@ -144,13 +154,16 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
   cheapest anchors, departure spread), and the model is told about outbounds
   whose returns were not priced — it must never infer "no nonstops" from the
   expansion sample.
+- A round-trip search that got the outbound list but no pairings ships every
+  outbound from-priced with `spec_echo` (tap-to-price), never "No flights
+  found" — and the model is told not to claim unavailability.
 
 ## Stack
 
 | Layer | What |
 |---|---|
 | Hosting | Vercel serverless (Python), auto-deploys on push to `main` (`EvanBurkeen/flight-search`) |
-| Backend | [api/index.py](api/index.py) — FastAPI. `/api/search` (JSON) is what the frontend uses; `/api/returns` prices every return Google pairs with ONE outbound (no model in the loop — the board's tap-to-price, ~1-4s); `/api/search/stream` (SSE) still works and is exercised by the parked `streaming-experiment` branch |
+| Backend | [api/index.py](api/index.py) — FastAPI. `/api/search/stream` (SSE) is what the frontend uses (prose types first, cards land on `done`), with `/api/search` (JSON) as its automatic fallback and the prod-verification probe; `/api/returns` prices every return Google pairs with ONE outbound (no model in the loop — the board's tap-to-price, ~1-4s) |
 | LLM | `claude-opus-4-8` agent loop, `max_retries=4`, effort `medium`, prompt-cached system+tools; plainly-route-shaped queries emit their first tool call via `claude-haiku-4-5` (no `output_config` — Haiku rejects effort), with an automatic Opus redo if Haiku answers in prose instead of calling the tool |
 | Flight data | [`fli`](https://github.com/punitarani/fli) (PyPI `flights`) — reverse-engineered Google Flights |
 | Web context | Anthropic server-side `web_search` tool (max 3/turn) for event dates, venues, etc. |
@@ -173,8 +186,10 @@ Google traffic through a proxy (see Operations).
 3. `execute_spec` per search: roll past dates forward (with a visible note) →
    resolve airports (multi-airport cities supported) → build fli filters
    (cabin, stops, airlines, alliances, price cap, times, currency pinned USD) →
-   `run_search` (4-attempt ladder: sort, sort, CHEAPEST, CHEAPEST; 15s fli
-   timeout; **whole ladder bounded by `budget_s`**, 35s default / 45s
+   `run_search` (4-attempt ladder: sort, sort, CHEAPEST, CHEAPEST; adaptive
+   per-attempt timeouts — 12s fail-fast first, 28s on retries so Google's
+   slow progressive streams can finish, 12s/22s for expansions;
+   **whole ladder bounded by `budget_s`**, 35s default / 45s
    multi-city, because a retry re-runs the entire search including any
    fan-out; each failed attempt RETIRES the identity — cookies + exit IP +
    fingerprint — because refusals are session-sticky; a process-wide circuit
@@ -248,8 +263,17 @@ pairings in tooltips) · per-flight atlas maps (land+lakes, graticule,
 sequential longitude unwrapping so every leg takes the short way; outbound solid,
 return dashed; layover dots with durations) · timeline layover rings · suggestion
 chips · search ladder (jump-to index of every results section: fixed rail on
-wide screens, floating 'Searches' button + overlay elsewhere) · concierge
-styling (Fraunces serif, brass fittings, boarding-pass dividers, greeting).
+wide screens, floating 'Searches' button + overlay elsewhere) · **streaming
+replies** (the recommendation types letter by letter at an adaptive cadence
+that can never lag the network, then the cards rise in, then the chips;
+automatic fallback to the JSON turn on any transport problem) · **"Send this
+flight"** (a quiet Share beside every Book renders a boarding-pass PNG on
+canvas — trip type, route with flight-arc motif, segment rows with durations,
+date-range + price + barcode stub, flights.evanburkeen.com footer — with copy
+image / copy text incl. booking link / save / native share) · degraded round
+trips render a notice + tap-to-price board instead of a blank section ·
+concierge styling (Fraunces serif, brass fittings, boarding-pass dividers,
+greeting).
 
 ## Local development
 
@@ -261,13 +285,16 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt uvicorn
 
 No `ANTHROPIC_API_KEY` locally → the Claude loop is stubbed by a pattern parser
 (`scripts/dev_server.py`); searches still hit live Google. Stub grammar: airport
-codes, "round", "flex/weekend", "compare", "multi A B C".
+codes, "round", "flex/weekend", "compare", "multi A B C" (common English words
+that are also IATA codes — THE, FOR, AND — are ignored). The stub emits the
+same SSE events as the real loop, so streaming is fully exercisable locally.
 
 ## Operations
 
 - **Google throttles datacenter IPs in waves.** Symptom: empty results/429s in prod
   while the identical search works from a residential IP (diagnose exactly that way).
-  Mitigations built in: retry ladders, 15s fli timeout, 65s turn budget, honest
+  Mitigations built in: retry ladders, adaptive 12s/28s request timeouts, 58s
+  search budget with a guaranteed wrap-up reply, honest
   "Google is slow" messaging. Stopgap: rotate `regions` in [vercel.json](vercel.json)
   — but pools burn in ~1–3 days of active use (July 2026 burn order:
   iad1 → sfo1 → cle1 → pdx1 → fra1). **Durable fix (ACTIVE since July 15, 2026):** `FLI_PROXY` in
@@ -300,6 +327,15 @@ codes, "round", "flex/weekend", "compare", "multi A B C".
   lakes; run it, then bump the `?v=N` cache-buster on the script tag in index.html).
 
 ## Changelog
+
+**July 28, 2026 (README audit)**
+- Doc-only refresh after the week's shipping: streaming is the primary
+  transport in the Stack table (was still "parked"), adaptive 12s/28s
+  timeouts and the 58s budget replace the stale 15s/65s references, the
+  frontend-features list gains streaming/share-cards/degraded-mode (a July 26
+  patch had silently missed), the degraded-mode invariant is listed, and the
+  week's durable traps joined "Lessons the hard way" (rAF starvation in
+  hidden tabs; total-time timeouts vs slow streams; tenacity bypass).
 
 **July 27, 2026 (share card v2, Evan's notes)**
 - Book now outweighs Share everywhere (compact Book links bumped, Share
