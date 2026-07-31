@@ -114,6 +114,16 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
   city entity; we always emit airports. The `tfu` token is session-scoped and
   **not required**.
 
+**Model behavior**
+- **Never make the model do calendar math.** Asked for "the latest departure
+  landing Jan 3 morning", it named a flight whose arrival timestamp plainly
+  read Jan 4 — it inferred "next day" from the departure instead of reading
+  the date. Every flight summary the model sees (live and ledger) now states
+  `lands_plus_days`, mirroring the +N badge on the card, and the prompt says
+  to read arrival dates, not derive them. The same principle produced the
+  timezone rules in the arrival-day guidance: state facts the model would
+  otherwise have to compute.
+
 **Ranking and truthfulness**
 - **Rank BEFORE truncating.** Google returns results cheapest-first, so cutting
   first silently discards options that were never scored (12 nonstops existed; 11
@@ -351,7 +361,15 @@ same SSE events as the real loop, so streaming is fully exercisable locally.
   session-sticky (a flagged session failed 64/64 while fresh ones passed 20/32
   in the same window — see Changelog July 24).
 - Currency is pinned to USD in every search, so non-US regions are safe.
-- Anthropic 429/529 overloads surface as a polite try-again message.
+- **Anthropic API errors say what they are** (`assistant_error_reply`):
+  429/529 keep the polite congestion copy; a credit-exhaustion 400 is named
+  outright (only Evan can fix it — top up in the Anthropic console); other
+  4xx admit that retrying won't help and show the HTTP code; 5xx stay
+  try-again with the code visible. Full detail (status, error type,
+  `request-id` for Anthropic support) is printed to the Vercel function log,
+  and the JSON reply carries `error_detail`. Born July 30: an outage was
+  answered with "temporary ... try once more" four retries in a row, and the
+  diagnosis cost a probe cycle because the status was visible nowhere.
 - **Google backend transience:** ~5-10% of search POSTs return HTTP 200 with a
   tiny `travel.frontend.flights.ErrorResponse` body (parses to empty), in
   bursts. Handled by the 4-attempt jittered ladder in `run_search` — do not
@@ -362,6 +380,29 @@ same SSE events as the real loop, so streaming is fully exercisable locally.
   lakes; run it, then bump the `?v=N` cache-buster on the script tag in index.html).
 
 ## Changelog
+
+**July 30, 2026 (the +2 the model read as +1, and the outage the reply called temporary)**
+Two of Evan's catches from one session:
+- **Arrival-day arithmetic.** Asked for "the latest departure that still
+  lands Jan 3 morning in Beijing", the assistant named KE36 off the ledger —
+  whose arrival timestamp read 2027-01-04T09:45. It inferred "next day" from
+  the departure instead of reading the date. Every flight summary the model
+  sees (live results and the cross-turn ledger, where this misread actually
+  happened) now carries `lands_plus_days` matching the +N badge on the card,
+  and the prompt instructs: read the arrival date, never derive it, name the
+  date outright when it differs from departure, and refuse a near miss
+  rather than bend it. Pre-push review caught that the +N badge itself was
+  missing from the default round-trip cards, both return pickers, and
+  multi-city legs (exactly the cards where +1/+2 is routine) and that a
+  dateline -1 never rendered; all now show it, so the card and the model
+  agree everywhere.
+- **"Temporary service error", four retries in a row.** Every Claude call was
+  failing deterministically and the reply hid the status, so the user retried
+  at a wall and diagnosis needed a probe cycle. `assistant_error_reply` now
+  puts the HTTP code in the reply, the full autopsy (status, type,
+  request-id) in the Vercel function log, names credit exhaustion outright,
+  and stops asking for retries that cannot work (4xx). The root cause of the
+  outage itself: see the next entry once confirmed in prod logs.
 
 **July 28, 2026 (price context never appeared in prod: the cache froze it out)**
 Post-push verification did its job. The baseline worked on every local probe

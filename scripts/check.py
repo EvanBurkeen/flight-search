@@ -465,6 +465,93 @@ check("multi-city and flexible searches ask for no baseline",
       and app.start_price_context({"flexible_dates": {"from_date": "x"}, "departure_date": "2026-11-28"}, [], []) is None)
 
 # --------------------------------------------------------------------------
+section("Arrival-day arithmetic  — Changelog: 'the +2 the model read as +1'")
+# --------------------------------------------------------------------------
+# Asked for "the latest departure that still lands Jan 3 morning", the model
+# picked a flight whose arrival timestamp read 2027-01-04T09:45 and called it
+# Jan 3 — it inferred "next day" from the departure instead of reading the
+# date (Evan's catch, July 30). The day offset is now STATED on every summary
+# the model sees, in both the live results and the cross-turn ledger, because
+# the misread happened one turn after the search, off the ledger.
+_ke36 = {
+    "airline": "Korean Air", "price": 873.0, "duration": 1945, "stops": 1, "warnings": [],
+    "legs": [{"from": "ATL", "to": "ICN", "departure": "2027-01-02T12:20:00",
+              "arrival": "2027-01-03T17:30:00", "airline_code": "KE", "flight_number": "36"},
+             {"from": "ICN", "to": "PEK", "departure": "2027-01-04T07:40:00",
+              "arrival": "2027-01-04T09:45:00", "airline_code": "OZ", "flight_number": "331"}],
+}
+check("a +2 arrival is stated as lands_plus_days on the model's summary",
+      app._leg_summary(_ke36).get("lands_plus_days") == 2,
+      str(app._leg_summary(_ke36).get("lands_plus_days")))
+check("...and survives into the cross-turn ledger, where the misread happened",
+      app._ledger_flight(_ke36).get("lands_plus_days") == 2)
+check("a same-day flight carries no offset at all",
+      "lands_plus_days" not in app._leg_summary(_ship[0]))
+check("a dateline crossing that lands the day BEFORE is stated too",
+      app._plus_days("2027-01-02T14:00:00", "2027-01-01T09:00:00") == -1)
+check("unparseable timestamps degrade to no offset, never a crash",
+      app._plus_days(None, "2027-01-04T09:45:00") == 0 and app._plus_days("x", "y") == 0)
+_prompt = app.assistant_system_prompt()
+check("the prompt tells the model to read arrival dates, not compute them",
+      "lands_plus_days" in _prompt and "arrival timestamp" in _prompt)
+check("...and to refuse a near miss rather than bend it",
+      "near miss" in _prompt)
+
+# the prompt tells the model the offset "matches the +N badge on the user's
+# card" — so it must actually be on EVERY card type, and +1/+2 arrivals are
+# routine precisely on the round-trip and multi-city cards that lacked it
+_fe_badges = open(os.path.join(ROOT, "public", "index.html")).read()
+check("round-trip cards show the day offset on both directions",
+      "arrivalDay(it.outbound)" in _fe_badges and "arrivalDay(it.return)" in _fe_badges)
+check("multi-city legs show the day offset", "arrivalDay(p)" in _fe_badges)
+check("return pickers show the day offset on each option", "arrivalDay(r)" in _fe_badges)
+check("a negative (dateline) offset renders too, keeping card parity honest",
+      "days < 0" in _fe_badges)
+
+# --------------------------------------------------------------------------
+section("API error surfacing  — Changelog: 'the outage the reply called temporary'")
+# --------------------------------------------------------------------------
+# Four consecutive retries against a deterministic failure, each answered
+# with "temporary ... try once more", and the actual status visible nowhere.
+# The reply now carries the code, the log carries the autopsy, and errors a
+# retry cannot fix stop asking for one.
+def _fake_err(status, etype="invalid_request_error", message="bad request"):
+    return types.SimpleNamespace(
+        status_code=status,
+        body={"error": {"type": etype, "message": message}},
+        response=types.SimpleNamespace(headers={"request-id": "req_test123"}),
+    )
+
+_credit = app.assistant_error_reply(_fake_err(400, message="Your credit balance is too low"))
+check("a credit-exhaustion 400 is named, not called temporary",
+      "credit" in _credit["message"] and "temporary" not in _credit["message"].lower())
+check("...and does not ask the user to retry at a wall",
+      "Retrying won't help" in _credit["message"])
+_bad = app.assistant_error_reply(_fake_err(400))
+check("a plain 4xx admits retrying is unlikely to help and shows the code",
+      "HTTP 400" in _bad["message"] and "unlikely" in _bad["message"])
+_srv = app.assistant_error_reply(_fake_err(500, etype="api_error"))
+check("a 5xx stays a polite try-again, now with the code visible",
+      "HTTP 500" in _srv["message"] and "once more" in _srv["message"])
+_over = app.assistant_error_reply(_fake_err(429, etype="rate_limit_error"))
+check("429/529 keep the congestion copy", "congested" in _over["message"])
+check("every error reply carries a machine-readable detail with the request id",
+      "req_test123" in _bad["error_detail"] and "HTTP 400" in _bad["error_detail"])
+
+# a proxy fronting an outage returns {"error": "a string"} shapes — the SDK
+# itself double-guards this exact access, and a helper that crashes during an
+# anomalous outage is a diagnostic that dies precisely when it is needed
+for _body in ({"error": "upstream timeout"}, {"error": None}, None, "plain text",
+              {"error": {"message": {"weird": 1}, "type": None}}):
+    try:
+        _r = app.assistant_error_reply(types.SimpleNamespace(
+            status_code=502, body=_body, response=types.SimpleNamespace(headers={})))
+        ok = bool(_r.get("message"))
+    except Exception as ex:
+        ok = False
+    check(f"a malformed error body never crashes the reporter ({str(_body)[:28]!r})", ok)
+
+# --------------------------------------------------------------------------
 section("Reply rendering  — Changelog: 'the spacing the join left behind'")
 # --------------------------------------------------------------------------
 # The renderer joins the model's soft wraps into flowing text. Swapping each

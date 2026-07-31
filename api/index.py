@@ -536,6 +536,7 @@ Answering:
 - The user sees result cards for every search you run, so don't recite every flight. Lead with your recommendation and the key numbers (totals for multi-leg plans, including a note that hotels/ground costs aren't included), then the trade-offs that matter.
 - Results arrive ranked by value, not by fare: the fare plus what its duration and stops actually cost the traveler. Recommend the best-value option rather than reflexively the cheapest, and when the cheapest fare is not your pick, price the difference in plain terms ("$25 more saves you eight hours and a connection"). Flying is tiring; a long layover to save a few dollars is rarely the favour it looks like. If they ask for the cheapest, give them the cheapest without argument.
 - When a result carries price_context, you know where its cheapest fare sits among NEARBY DATES, and one clause of that belongs in the recommendation ("$239 is among the cheapest dates in this window, and the 14th is only $18 less"). It compares dates, not history: never call a fare good "for this route" in general, never call it a deal in the abstract, and never predict which way prices will move. With no price_context, say nothing at all about whether the fare is good.
+- Timestamps carry their own dates: read a flight's arrival DAY from the arrival timestamp itself, never by adding "a day or so" to the departure. lands_plus_days states how many calendar days after departure a flight lands (+1, +2; a dateline crossing can be -1) and matches the +N badge on the user's card. For any "arrive by / land on <day>" question, check each candidate's arrival timestamp against the target day before naming it, and when the arrival date differs from departure, say it outright ("lands the morning of Jan 4, two days after the Jan 2 departure"). If no on-screen option satisfies the day, say so and search rather than bending a near miss.
 - Mention real caveats from the data: nothing arrives before X, prices are one-way vs round-trip totals, self-transfer risks, tight or overnight layovers.
 - If a search fails or is rate-limited, say so plainly and suggest trying again in a moment.
 - Keep responses short and conversational — a few sentences, not a report.
@@ -616,9 +617,25 @@ def compact_for_model(payload: dict) -> str:
     return json.dumps(_with_price_ctx(out, payload))
 
 
+def _plus_days(dep: str | None, arr: str | None) -> int:
+    """Calendar days between departure and arrival, each in its own local time.
+
+    The model was asked "latest departure that still lands Jan 3 morning" and
+    answered with a flight whose arrival timestamp read 2027-01-04T09:45 —
+    it inferred "next day" from the departure instead of reading the date
+    (Evan's catch, July 30). Long-haul east-bound routinely lands +2; a
+    dateline crossing can land -1. State the offset; never make the model
+    do the calendar math.
+    """
+    try:
+        return (datetime.fromisoformat(arr).date() - datetime.fromisoformat(dep).date()).days
+    except (TypeError, ValueError):
+        return 0
+
+
 def _leg_summary(f: dict) -> dict:
     legs = f.get("legs") or []
-    return {
+    out = {
         "airline": f.get("airline"),
         "price": f.get("price"),
         "currency": f.get("currency"),
@@ -630,6 +647,11 @@ def _leg_summary(f: dict) -> dict:
         "via": [lo["airport"] for lo in (f.get("layovers") or [])],
         "warnings": f.get("warnings") or [],
     }
+    plus = _plus_days(out["depart"], out["arrive"])
+    if plus:
+        # the "+2" the user sees on the card, stated rather than implied
+        out["lands_plus_days"] = plus
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -670,6 +692,12 @@ def _ledger_flight(f: dict, n: int | None = None) -> dict:
                     for l in legs] or None,
         "warnings": f.get("warnings") or None,
     }
+    # arrive-by follow-ups are answered from THIS record, so the day offset
+    # must survive into it — the July 30 misread happened one turn after the
+    # search, off the ledger, not off the live results
+    plus = _plus_days(out["depart"], out["arrive"])
+    if plus:
+        out["lands_plus_days"] = plus
     return {k: v for k, v in out.items() if v is not None}
 
 
@@ -2774,6 +2802,57 @@ def execute_spec(spec: dict) -> dict:
     return payload
 
 
+def assistant_error_reply(e: "anthropic.APIStatusError") -> dict:
+    """An API failure the user can actually act on, and one we can diagnose.
+
+    The July 30 outage taught the shape of the old message the hard way: every
+    Claude call was failing, the reply said "temporary ... try that once more",
+    Evan retried four times against a deterministic error, and diagnosis cost
+    a probe cycle because nothing anywhere said WHICH error. Now the status
+    code rides in the reply, the full detail goes to the function log (with
+    request id, for Anthropic support), and a 4xx — which retrying cannot fix
+    — stops claiming to be temporary.
+    """
+    body = getattr(e, "body", None)
+    err = (body or {}).get("error", {}) if isinstance(body, dict) else {}
+    if not isinstance(err, dict):
+        err = {}  # proxies fronting an outage return {"error": "a string"} shapes
+    etype = str(err.get("type") or getattr(e, "type", "") or "")
+    detail = str(err.get("message") or e)[:300]
+    req_id = ""
+    try:
+        req_id = e.response.headers.get("request-id") or ""
+    except Exception:
+        pass
+    # Vercel keeps function logs; this line is the autopsy the reply can't hold
+    print(f"[assistant] APIStatusError {e.status_code} {etype} req={req_id}: {detail}")
+
+    low = detail.lower()
+    if e.status_code in (429, 529) or etype == "overloaded_error":
+        msg = ("My reasoning service is momentarily congested. Give it a few seconds "
+               "and send that again; nothing was lost.")
+    elif "credit" in low or "billing" in low:
+        # the one failure only the owner can fix; name it so nobody retries at it
+        msg = ("The Anthropic API account this site runs on is out of credit, so I "
+               "can't think about flights until Evan tops it up in the Anthropic "
+               "console. Retrying won't help until then; sorry for the wall.")
+    elif e.status_code == 401:
+        msg = ("My reasoning service is rejecting this site's API key (HTTP 401). "
+               "That needs Evan to fix the key in the deployment settings; "
+               "retrying won't change it.")
+    elif 400 <= e.status_code < 500:
+        msg = (f"My reasoning service rejected that request (HTTP {e.status_code}"
+               + (f", {etype}" if etype else "")
+               + "). That's a configuration problem on my side rather than traffic, "
+                 "so retrying is unlikely to help; it has been logged for a fix.")
+    else:
+        msg = (f"My reasoning service returned an error (HTTP {e.status_code}). "
+               "Please try that once more; if it keeps happening the fault is on "
+               "my side, not with your question.")
+    return {"message": msg, "sections": [], "suggestions": ["try again"],
+            "error_detail": f"HTTP {e.status_code} {etype}".strip() + (f" req={req_id}" if req_id else "")}
+
+
 @app.post("/api/search/stream")
 async def search_stream(request: Request):
     """Same turn, delivered as it happens.
@@ -2804,12 +2883,7 @@ async def search_stream(request: Request):
                 "ledger": result.get("ledger"),
             }))
         except anthropic.APIStatusError as e:
-            overloaded = e.status_code in (429, 529) or getattr(e, "type", "") == "overloaded_error"
-            events.put(("done", {
-                "message": "My reasoning service is momentarily congested. Give it a few seconds and send that again; nothing was lost."
-                if overloaded else "I hit a temporary service error on my side. Please try that once more.",
-                "sections": [], "suggestions": ["try again"],
-            }))
+            events.put(("done", assistant_error_reply(e)))
         except anthropic.APIConnectionError:
             events.put(("done", {
                 "message": "I couldn't reach my reasoning service just now. One more try should do it.",
@@ -2986,11 +3060,7 @@ async def search(request: Request):
         return JSONResponse(payload)
 
     except anthropic.APIStatusError as e:
-        if e.status_code in (429, 529) or getattr(e, "type", "") == "overloaded_error":
-            msg = "My reasoning service is momentarily congested. Give it a few seconds and send that again; nothing was lost."
-        else:
-            msg = "I hit a temporary service error on my side. Please try that once more."
-        return JSONResponse({"type": "assistant", "message": msg, "sections": [], "suggestions": ["try again"]})
+        return JSONResponse({"type": "assistant", **assistant_error_reply(e)})
     except anthropic.APIConnectionError:
         return JSONResponse({
             "type": "assistant",

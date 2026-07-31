@@ -865,14 +865,14 @@
                           <div class="compact-airline" x-text="it.outbound.airline + (it.return.airline !== it.outbound.airline ? ' + ' + it.return.airline : '')"></div>
                           <div class="compact-price" x-text="formatPrice(it.total_price, it.currency)"></div>
                         </div>
-                        <div class="compact-leg"><span class="lbl">Out</span><span x-text="formatTime(it.outbound.legs[0].departure) + ' → ' + formatTime(it.outbound.legs[it.outbound.legs.length-1].arrival) + ' · ' + stopsText(it.outbound.stops)"></span></div>
-                        <div class="compact-leg"><span class="lbl">Ret</span><span x-text="formatTime(it.return.legs[0].departure) + ' → ' + formatTime(it.return.legs[it.return.legs.length-1].arrival) + ' · ' + stopsText(it.return.stops)"></span></div>
+                        <div class="compact-leg"><span class="lbl">Out</span><span x-text="formatTime(it.outbound.legs[0].departure) + ' → ' + formatTime(it.outbound.legs[it.outbound.legs.length-1].arrival) + arrivalDay(it.outbound) + ' · ' + stopsText(it.outbound.stops)"></span></div>
+                        <div class="compact-leg"><span class="lbl">Ret</span><span x-text="formatTime(it.return.legs[0].departure) + ' → ' + formatTime(it.return.legs[it.return.legs.length-1].arrival) + arrivalDay(it.return) + ' · ' + stopsText(it.return.stops)"></span></div>
                         <div class="compact-sub" x-text="'round trip total' + (((it.outbound.warnings || []).length + (it.return.warnings || []).length) ? ' · ⚠ see Detailed' : '')"></div>
                         <div class="compact-ret" x-show="(it.return_options || []).length > 1">
                           <select class="fselect" @change="pickReturn(it, +$event.target.value)">
                             <template x-for="(r, ri) in (it.return_options || [])" :key="ri">
                               <option :value="ri" :selected="isPickedReturn(it, ri)"
-                                      x-text="formatTime(r.legs[0].departure) + '→' + formatTime(r.legs[r.legs.length-1].arrival) + ' · ' + stopsText(r.stops) + (r.extra_over_best ? ' +' + formatPrice(r.extra_over_best, r.currency) : '')"></option>
+                                      x-text="formatTime(r.legs[0].departure) + '→' + formatTime(r.legs[r.legs.length-1].arrival) + arrivalDay(r) + ' · ' + stopsText(r.stops) + (r.extra_over_best ? ' +' + formatPrice(r.extra_over_best, r.currency) : '')"></option>
                             </template>
                           </select>
                         </div>
@@ -919,7 +919,7 @@
                             </div>
                             <div class="route-end">
                               <div class="route-time" x-text="formatTime(it.outbound.legs[it.outbound.legs.length-1].arrival)"></div>
-                              <div class="route-port" x-text="it.outbound.legs[it.outbound.legs.length-1].to"></div>
+                              <div class="route-port" x-text="it.outbound.legs[it.outbound.legs.length-1].to + arrivalDay(it.outbound)"></div>
                             </div>
                           </div>
                           <template x-for="(lo, k) in (it.outbound.layovers || [])" :key="'o'+k">
@@ -944,7 +944,7 @@
                             </div>
                             <div class="route-end">
                               <div class="route-time" x-text="formatTime(it.return.legs[it.return.legs.length-1].arrival)"></div>
-                              <div class="route-port" x-text="it.return.legs[it.return.legs.length-1].to"></div>
+                              <div class="route-port" x-text="it.return.legs[it.return.legs.length-1].to + arrivalDay(it.return)"></div>
                             </div>
                           </div>
                           <template x-for="(lo, k) in (it.return.layovers || [])" :key="'r'+k">
@@ -960,7 +960,7 @@
                           <div class="ret-options">
                             <template x-for="(r, ri) in (it.return_options || [])" :key="ri">
                               <button class="ret-opt" :class="isPickedReturn(it, ri) ? 'picked' : ''" @click="pickReturn(it, ri)">
-                                <span class="t" x-text="formatTime(r.legs[0].departure) + ' → ' + formatTime(r.legs[r.legs.length-1].arrival)"></span>
+                                <span class="t" x-text="formatTime(r.legs[0].departure) + ' → ' + formatTime(r.legs[r.legs.length-1].arrival) + arrivalDay(r)"></span>
                                 <span class="s" x-text="stopsText(r.stops) + ' · ' + formatDuration(r.duration)"></span>
                                 <span class="p" x-text="r.extra_over_best ? '+' + formatPrice(r.extra_over_best, r.currency) : 'cheapest'"></span>
                               </button>
@@ -1080,7 +1080,7 @@
                           <div class="compact-price" x-text="formatPrice(it.total_price, it.currency)"></div>
                         </div>
                         <template x-for="(p, k) in it.parts" :key="k">
-                          <div class="compact-leg"><span class="lbl" x-text="'Leg ' + (k+1)"></span><span x-text="p.legs[0].from + '→' + p.legs[p.legs.length-1].to + ' · ' + formatTime(p.legs[0].departure) + '–' + formatTime(p.legs[p.legs.length-1].arrival) + ' · ' + stopsText(p.stops)"></span></div>
+                          <div class="compact-leg"><span class="lbl" x-text="'Leg ' + (k+1)"></span><span x-text="p.legs[0].from + '→' + p.legs[p.legs.length-1].to + ' · ' + formatTime(p.legs[0].departure) + '–' + formatTime(p.legs[p.legs.length-1].arrival) + arrivalDay(p) + ' · ' + stopsText(p.stops)"></span></div>
                         </template>
                         <div class="compact-sub" x-text="(it.price_basis === 'separate tickets' ? 'as 2 separate tickets' : 'one combined ticket') + ((it.warnings || []).length ? ' · ⚠' : '')"></div>
                         <a :href="it.booking_url" target="_blank" rel="noopener noreferrer" class="compact-book">Book →</a><button class="share-quiet" @click="shareMulti(it)">Share</button>
@@ -1124,7 +1124,7 @@
                               </div>
                               <div class="route-end">
                                 <div class="route-time" x-text="formatTime(p.legs[p.legs.length-1].arrival)"></div>
-                                <div class="route-port" x-text="p.legs[p.legs.length-1].to"></div>
+                                <div class="route-port" x-text="p.legs[p.legs.length-1].to + arrivalDay(p)"></div>
                               </div>
                             </div>
                             <template x-for="(lo, m) in (p.layovers || [])" :key="m">
@@ -2561,7 +2561,9 @@
           const arr = (legs[legs.length - 1].arrival || '').slice(0, 10);
           if (!dep || !arr || dep === arr) return '';
           const days = Math.round((new Date(arr + 'T12:00:00') - new Date(dep + 'T12:00:00')) / 86400000);
-          return days > 0 ? ` +${days}` : '';
+          // negative is real too (dateline crossings land the day before);
+          // the model is told this marker matches the card, so it must
+          return days > 0 ? ` +${days}` : days < 0 ? ` ${days}` : '';
         },
 
         layoverText(lo) {
