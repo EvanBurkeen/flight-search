@@ -340,8 +340,9 @@ date-range + price + barcode stub, flights.evanburkeen.com footer — with copy
 image / copy text incl. booking link / save / native share) · degraded round
 trips render a notice + tap-to-price board instead of a blank section ·
 concierge styling (Fraunces serif, brass fittings, boarding-pass dividers,
-greeting; August 2 broadsheet pass: heavy masthead rule, per-section
-hairlines, tabular numerals on all figures, crisper shadows).
+greeting; August 2 broadsheet + professional passes: heavy masthead rule,
+per-section hairlines, tabular numerals on all figures, crisper shadows,
+serif reply voice, monochrome airline marks, squared control language).
 
 ## Local development
 
@@ -403,6 +404,27 @@ same SSE events as the real loop, so streaming is fully exercisable locally.
   lakes; run it, then bump the `?v=N` cache-buster on the script tag in index.html).
 
 ## Changelog
+
+**August 2, 2026 (the professional pass: one system, not vibes)**
+Second, deeper aesthetic round on Evan's note that it should read
+professionally designed rather than vibe coded. What separates the two is
+consistency of system, so this pass removes every competing dialect:
+- **The concierge speaks in serif.** Replies are set in Fraunces text cut
+  (400, optical sizing) like a paper's own columns, key figures bold in the
+  accent; the terracotta border-left crutch is gone. Fraunces now loads
+  400/600 upright+italic with opsz.
+- **Monochrome airline marks**: hash-colored circles became engraved
+  ink-bordered squares (`airlineColor` returns transparent; identity comes
+  from type, not paint chips).
+- **No clip-art**: the route line's ✈ emoji became a drawn arrowhead.
+- **One control language**: every 999px pill squared to 2-4px (toggles,
+  chips, selects, stop/fab/nudge, compose input and send); active toggles
+  are ink-on-paper instead of green fills (green now belongs to data and
+  the user's own voice only); "Show all" traded its dashed border for
+  small caps on a hairline.
+- **Hierarchy**: section titles up to 1.3rem; price-context is a pure
+  typographic line, box removed.
+Verified in both themes locally against a live search.
 
 **August 2, 2026 (editorial polish: the broadsheet pass)**
 Evan asked for an aesthetic once-over in the direction of the world's best

@@ -6,7 +6,7 @@
   <title>Flight Assistant — Evan Burkeen</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fraunces:ital,wght@0,600;1,600&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;1,9..144,400;1,9..144,600&display=swap" rel="stylesheet" />
   <script>
     // theme runs before first paint to avoid a flash of the wrong theme;
     // light is the default — dark only when explicitly chosen
@@ -138,7 +138,7 @@
     }
     .theme-btn:hover { border-color: var(--brass); }
     .view-toggle {
-      display: inline-flex; border: 1px solid var(--line); border-radius: 999px;
+      display: inline-flex; border: 1px solid var(--line); border-radius: 3px;
       overflow: hidden; background: var(--panel); flex: none;
     }
     .view-toggle button {
@@ -146,7 +146,7 @@
       padding: 0.4rem 0.9rem; border: none; background: transparent; color: var(--ink);
       cursor: pointer; transition: all 0.15s; opacity: 0.65;
     }
-    .view-toggle button.active { background: var(--green); color: #f3ecd6; opacity: 1; }
+    .view-toggle button.active { background: var(--ink); color: var(--bg); opacity: 1; }
 
     .compact-grid {
       display: grid; grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr));
@@ -190,7 +190,7 @@
 
     .chips { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 2rem; }
     .chip {
-      font-size: 0.75rem; padding: 0.45rem 0.8rem; border-radius: 999px;
+      font-size: 0.75rem; padding: 0.45rem 0.8rem; border-radius: 3px;
       border: 1px solid var(--line); background: var(--panel);
       cursor: pointer; transition: all 0.15s; color: var(--ink);
     }
@@ -214,10 +214,14 @@
     }
 
     .msg-assistant { display: flex; flex-direction: column; gap: 1rem; }
+    /* the concierge's voice is set in the house serif, like a paper's own
+       columns; UI chrome stays sans. No border crutch: the type carries it. */
     .msg-text {
-      font-size: 0.9rem; line-height: 1.65; white-space: pre-wrap; max-width: 46rem;
-      border-left: 2px solid var(--accent); padding-left: 1rem;
+      font-family: var(--serif); font-optical-sizing: auto; font-weight: 400;
+      font-size: 1rem; line-height: 1.72; white-space: pre-wrap; max-width: 44rem;
     }
+    .msg-text strong { font-weight: 600; color: var(--accent-dark); }
+    html.dark .msg-text strong { color: #e08a5a; }
 
     /* sections open on a rule, the way a broadsheet turns to a new story */
     .section-head {
@@ -227,43 +231,42 @@
     }
     .section-label {
       font-family: var(--serif);
-      font-size: 1.05rem; letter-spacing: 0;
+      font-size: 1.3rem; letter-spacing: -0.01em;
       color: var(--accent-dark); font-weight: 600;
       white-space: pre-line; display: flex; align-items: center; gap: 0.6rem;
     }
     .section-label::before {
       content: ""; width: 1.6rem; border-top: 1px solid rgba(177, 71, 31, 0.4); flex: none;
     }
-    .mini-toggle { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; background: var(--panel); flex: none; }
+    .mini-toggle { display: inline-flex; border: 1px solid var(--line); border-radius: 3px; overflow: hidden; background: var(--panel); flex: none; }
     .mini-toggle button {
       font-size: 0.6rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
       padding: 0.2rem 0.55rem; border: none; background: transparent; color: var(--ink);
       cursor: pointer; opacity: 0.6;
     }
-    .mini-toggle button.active { background: var(--green); color: #f3ecd6; opacity: 1; }
+    .mini-toggle button.active { background: var(--ink); color: var(--bg); opacity: 1; }
 
     .filter-bar { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; margin-bottom: 0.5rem; }
     .fselect {
       font-size: 0.68rem; padding: 0.26rem 0.5rem; border: 1px solid var(--line);
-      border-radius: 6px; background: var(--panel); color: var(--ink);
+      border-radius: 3px; background: var(--panel); color: var(--ink);
     }
     .fcount { font-size: 0.66rem; opacity: 0.60; margin-left: auto; }
     .show-all {
-      width: 100%; margin-top: 0.5rem; font-size: 0.78rem; font-weight: 500;
-      letter-spacing: 0.02em; padding: 0.5rem;
-      border: 1px dashed var(--line-strong); border-radius: 6px;
-      background: transparent; color: var(--brass); cursor: pointer; transition: border-color 0.15s;
+      width: 100%; margin-top: 0.5rem; font-size: 0.68rem; font-weight: 600;
+      letter-spacing: 0.1em; text-transform: uppercase; padding: 0.55rem;
+      border: 1px solid var(--line); border-radius: 3px;
+      background: transparent; color: var(--brass); cursor: pointer;
+      transition: border-color 0.15s, color 0.15s;
     }
-    .show-all:hover { border-color: var(--accent); }
+    .show-all:hover { border-color: var(--brass); color: var(--accent-dark); }
     .assumptions { font-size: 0.72rem; opacity: 0.60; margin-top: 0.35rem; }
 
     /* where this fare sits among nearby dates: a quiet line, never a badge —
        it is a comparison across dates, not a verdict on the route */
     .price-ctx {
       display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap;
-      font-size: 0.74rem; margin: 0 0 0.55rem 0; padding: 0.4rem 0.6rem;
-      border-left: 2px solid var(--line-strong); background: rgba(0, 0, 0, 0.02);
-      border-radius: 0 4px 4px 0;
+      font-size: 0.74rem; margin: 0.1rem 0 0.6rem 0;
     }
     .price-ctx .pc-tier {
       font-weight: 600; letter-spacing: 0.02em; color: var(--accent-dark); flex: none;
@@ -273,7 +276,6 @@
     .price-ctx .pc-note { opacity: 0.55; font-size: 0.68rem; }
     /* --green and --accent-dark are ground colours in dark mode, not text
        colours: read as text on the espresso ground they all but vanish */
-    html.dark .price-ctx { background: rgba(255, 255, 255, 0.04); }
     html.dark .price-ctx .pc-tier { color: var(--brass); }
     html.dark .price-ctx .pc-tier.pc-low { color: var(--good); }
     html.dark .price-ctx .pc-tier.pc-high { color: var(--warn); }
@@ -295,9 +297,11 @@
     .card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 0.65rem; gap: 0.75rem; }
     .airline-id { display: flex; align-items: center; gap: 0.6rem; min-width: 0; }
     .airline-avatar {
-      width: 2rem; height: 2rem; border-radius: 50%; flex: none;
+      width: 2rem; height: 2rem; border-radius: 4px; flex: none;
       display: flex; align-items: center; justify-content: center;
-      color: #fff; font-size: 0.7rem; font-weight: 700; letter-spacing: 0.02em;
+      border: 1px solid var(--line-strong); background: transparent;
+      color: var(--ink); font-size: 0.7rem; font-weight: 700; letter-spacing: 0.02em;
+      font-variant-numeric: tabular-nums;
     }
     .card-airline { font-size: 0.875rem; font-weight: 600; }
     .card-code { font-size: 0.72rem; opacity: 0.60; }
@@ -311,9 +315,10 @@
     .route-mid { flex: 1; text-align: center; position: relative; }
     .route-line { border-top: 1.5px solid var(--line-strong); position: relative; top: 0.05rem; }
     .route-line::after {
-      content: "✈"; position: absolute; right: -2px; top: 0;
-      transform: translateY(-50%); line-height: 1; display: block;
-      font-size: 0.8rem; color: var(--accent);
+      content: ""; position: absolute; right: 0; top: 0;
+      width: 0.4rem; height: 0.4rem;
+      border-top: 1.5px solid var(--line-strong); border-right: 1.5px solid var(--line-strong);
+      transform: translateY(-58%) rotate(45deg); transform-origin: center;
     }
     .route-meta { font-size: 0.68rem; opacity: 0.70; margin-top: 0.3rem; }
     .route-stop {
@@ -465,7 +470,7 @@
     .rt-row.sel .rt-price, .rt-row.sel .rt-price b { color: var(--good); }
     .rt-row-sub { font-size: 0.7rem; opacity: 0.72; margin-top: 0.15rem; }
     .rt-row-tags { display: flex; gap: 0.3rem; margin-top: 0.25rem; align-items: center; flex-wrap: wrap; }
-    .rt-tag { font-size: 0.6rem; padding: 0.1rem 0.45rem; border-radius: 999px; background: var(--info-bg); color: var(--info); font-weight: 600; }
+    .rt-tag { font-size: 0.6rem; padding: 0.1rem 0.45rem; border-radius: 2px; background: var(--info-bg); color: var(--info); font-weight: 600; }
     .rt-tag.warn { background: var(--warn-bg); color: var(--warn); }
     .rt-empty { font-size: 0.78rem; opacity: 0.6; padding: 0.6rem 0.2rem; }
     /* share: quiet links on cards; an overlay with the rendered boarding pass */
@@ -558,7 +563,7 @@
       position: fixed; left: 50%; transform: translateX(-50%);
       bottom: calc(5.9rem + env(safe-area-inset-bottom)); z-index: 8;
       font-size: 0.72rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
-      padding: 0.5rem 1rem; border: none; border-radius: 999px;
+      padding: 0.5rem 1rem; border: none; border-radius: 4px;
       background: var(--green); color: #f3ecd6; cursor: pointer;
       box-shadow: 0 4px 14px rgba(28, 26, 21, 0.25);
       animation: rise 0.25s ease both;
@@ -566,7 +571,7 @@
     .input-row { display: flex; gap: 0.75rem; align-items: flex-end; }
     .text-input {
       flex: 1; font-size: 0.9rem; line-height: 1.5;
-      border: 1px solid var(--line); border-radius: 8px;
+      border: 1px solid var(--line); border-radius: 4px;
       outline: none; padding: 0.65rem 0.9rem;
       background: var(--panel); color: var(--ink);
       resize: none; overflow-y: auto; max-height: 10rem; min-height: 2.9rem;
@@ -576,7 +581,7 @@
     .text-input::placeholder { color: rgba(28,26,21,0.40); }
     .submit-btn {
       font-size: 0.75rem; font-weight: 600; padding: 0.8rem 1.5rem;
-      border: none; border-radius: 8px;
+      border: none; border-radius: 4px;
       background: var(--accent); color: #fff;
       cursor: pointer; letter-spacing: 0.08em; text-transform: uppercase;
       transition: background 0.15s;
@@ -588,7 +593,7 @@
     .stop-btn {
       font-size: 0.68rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
       padding: 0.3rem 0.7rem; margin-left: 0.35rem;
-      border: 1px solid var(--line); border-radius: 999px;
+      border: 1px solid var(--line); border-radius: 3px;
       background: transparent; color: var(--ink); cursor: pointer;
       transition: all 0.15s;
     }
@@ -621,7 +626,7 @@
     .ladder-fab {
       position: fixed; right: 1rem; bottom: calc(5.9rem + env(safe-area-inset-bottom)); z-index: 6; display: none;
       font-size: 0.62rem; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase;
-      padding: 0.55rem 0.9rem; border-radius: 999px; border: 1px solid var(--brass);
+      padding: 0.55rem 0.9rem; border-radius: 3px; border: 1px solid var(--brass);
       background: var(--bg); color: var(--brass); cursor: pointer;
       box-shadow: 0 2px 10px rgba(28,26,21,0.18);
     }
@@ -2326,10 +2331,8 @@
         },
 
         airlineColor(code) {
-          const palette = ['#0f4c5c', '#a3492a', '#5c4a72', '#2c5e3f', '#8a6d2f', '#33547a', '#8c3a52', '#55524a'];
-          let h = 0;
-          for (const ch of (code || '??')) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
-          return palette[h % palette.length];
+          // monochrome marks: colored chips read app-y; ink reads engraved
+          return 'transparent';
         },
 
         // Round trips are chosen the way Google does it: the card is an
