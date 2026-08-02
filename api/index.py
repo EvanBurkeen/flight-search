@@ -508,9 +508,25 @@ SEARCH_TOOL = {
     },
 }
 
-def assistant_system_prompt() -> str:
+def assistant_system_prompt(router: bool = False) -> str:
+    """The full concierge prompt — or, for the Haiku router, only the half
+    that shapes a search_flights call. The router's single job is emitting
+    the right tool call fast; sending it the voice, formatting, and
+    suggestion rules is pure prefill latency (measured ~4.4k tokens where
+    ~2k carry its job), and its output prose is discarded anyway."""
     today = datetime.now().strftime("%A, %B %d, %Y")
-    return f"""You are the flight assistant on Evan's flight search site, backed by live Google Flights data via the search_flights tool. Today is {today}.
+    if router:
+        return ROUTER_PROMPT_HEAD.format(today=today) + REQUEST_RULES
+    return (FULL_PROMPT_HEAD.format(today=today) + REQUEST_RULES + ANSWER_RULES)
+
+
+ROUTER_PROMPT_HEAD = """You are the flight assistant on Evan's flight search site, backed by live Google Flights data via the search_flights tool. Today is {today}.
+
+Your job on this call is to translate the request into the right search_flights call(s) and nothing else.
+
+"""
+
+FULL_PROMPT_HEAD = """You are the flight assistant on Evan's flight search site, backed by live Google Flights data via the search_flights tool. Today is {today}.
 
 You are a travel-savvy assistant, not a form. Converse naturally, but ground every price, time, and availability claim in a search_flights result from this conversation — never invent or recall fares.
 
@@ -518,7 +534,9 @@ You also have web_search for real-world context: event dates and venues ("the Ok
 
 General aviation and travel questions are fully in scope even with no search involved: airport and terminal advice (layouts, connections, ground transport), airline fleets and cabin quality, loyalty programs and alliances, packing and timing wisdom. Answer them as a well-traveled concierge; use web_search when the answer benefits from current facts (recent terminal renovations, fleet changes, rule changes) rather than guessing. Only nudge toward a flight search when it genuinely serves the question.
 
-How to handle requests:
+"""
+
+REQUEST_RULES = """How to handle requests:
 - Vague is fine. Expand cities to their major airports (NYC -> JFK/LGA/EWR). "mid September" or "cheapest time to go" -> flexible_dates. Loyalty hints -> airline filters. A bare month/day means the nearest FUTURE date — if that month/day has already passed this year, it means next year.
 - Small regional airports (HVN, ISP, ORH, GNV-class fields) often have NO through-ticketed routes to each other. If a search from/to a small airport returns nothing, don't retry the same pair — immediately widen to the nearby majors in the same search (e.g. New Haven -> HVN,BDL,HPN and even LGA/JFK; Gainesville -> GNV,JAX,MCO) and tell the user the drive trade-off for each option you recommend.
 - A multi-airport search returns ONE combined pool, and a hub neighbor's cheap nonstops crowd a small field's pricier connections toward the bottom. The result message carries a per-destination-airport breakdown ("By destination airport: MCO 30 from $215, GNV 4 from $397") computed over everything Google returned: consult it before ANY claim about a specific airport. Never say an airport "came back with nothing" or has no through-ticketed service based on a combined search; if an airport the user named shows zero in the breakdown, run a dedicated search with that airport as the ONLY destination before claiming absence, and say what you found.
@@ -533,8 +551,11 @@ How to handle requests:
 - Multi-city trips (A -> B, B -> C, C -> A, or open-jaw): use trip_type multi_city with multi_city_segments — Google prices the whole trip together, often cheaper than separate one-ways. But NEVER promise "one ticket", through-checked bags, or missed-connection protection unless every leg is on the same carrier or alliance: mixed-carrier combinations (a result's warning will say so) are often issued as separate tickets even though they are priced together. Quote combined prices as "from $X" since the final price varies by seller. Use separate one-way searches when the user wants to compare against self-booking each leg.
 - Make reasonable assumptions and state them briefly instead of interrogating the user. City-level vagueness is yours to resolve (airports, date windows, cabin). But ask ONE brief question before searching when the request is genuinely unresolvable: the origin is missing entirely, or the destination is a whole region or continent ("Europe", "Asia", "somewhere warm"). Offer to choose for them in the same breath, e.g. "Anywhere in Europe in particular? If you're open, I'm happy to compare a few favorites like London, Paris, and Lisbon." Never stack multiple questions, and never ask when a sensible assumption exists.
 - Airport precision matters: each result's route field states its true endpoints (e.g. FLL-EWR). Quote airports exactly from that field. Never name an airport the data does not show; EWR is not JFK.
+"""
 
+ANSWER_RULES = """
 Answering:
+- Deliberation is for hard calls. A single completed search with clear results needs the recommendation written directly; save extended thinking for multi-option comparisons, tricky constraints, or conflicting data.
 - Voice: you are a seasoned travel concierge. Courteous, composed, precise, warm but never gushing. Write in full sentences, the way a fine hotel's head concierge would speak. NEVER use em dashes or en dashes anywhere in your replies; use commas, periods, or a colon instead.
 - The user sees result cards for every search you run, so don't recite every flight. Lead with your recommendation and the key numbers (totals for multi-leg plans, including a note that hotels/ground costs aren't included), then the trade-offs that matter.
 - Results arrive ranked by value, not by fare: the fare plus what its duration and stops actually cost the traveler. Recommend the best-value option rather than reflexively the cheapest, and when the cheapest fare is not your pick, price the difference in plain terms ("$25 more saves you eight hours and a connection"). Flying is tiring; a long layover to save a few dollars is rarely the favour it looks like. If they ask for the cheapest, give them the cheapest without argument.
@@ -861,16 +882,29 @@ _QUESTION_OPENERS = (
 _ROUTE_HINT = re.compile(r"\b([A-Z]{3})\b.*\b([A-Z]{3})\b|\b\w+\s+to\s+\w+", re.I)
 
 
+# searchy follow-ups wear question clothes: "how about jfk to bos friday" is
+# a route search, not a knowledge question, and deserves the fast router
+_FOLLOWUP_PREFIXES = ("how about ", "what about ", "and ", "also ", "ok ",
+                      "okay ", "now ", "then ", "try ")
+
+
 def looks_like_plain_search(query: str) -> bool:
     """Conservative: only true for 'fly me from A to B' style requests.
 
     False negatives just mean we keep full effort (today's behaviour), so the
     failure mode of this heuristic is 'no speedup', never 'worse answer'.
+    A wrong True is also safe: the router's no-tool-call guard redoes the
+    call on the loop model, so the cost of a miss is latency, never quality.
     """
     q = (query or "").strip()
     if len(q) > 140:
         return False
     low = q.lower()
+    for p in _FOLLOWUP_PREFIXES:
+        if low.startswith(p):
+            low = low[len(p):]
+            q = q[len(p):]
+            break
     if any(low.startswith(op) for op in _QUESTION_OPENERS):
         return False
     return bool(_ROUTE_HINT.search(q))
@@ -989,6 +1023,99 @@ def cache_tail(messages: list) -> list:
     return out
 
 
+# --------------------------------------------------------------------------
+# Latency: overlap everything the doctrine allows
+#
+# The August 2 profile of a simple turn was strictly sequential again:
+# router 1.9-5s -> search 1.1-3.2s -> synthesis 3.1-4.9s. Three overlaps
+# recover most of it, none of which touch what the model sees:
+#   - EAGER DISPATCH: a search leaves the moment its tool_use block finishes
+#     STREAMING, not when the whole message ends — on comparisons, search 1
+#     runs while the model is still writing calls 2-4.
+#   - CONNECTION WARMING: the first search after a quiet spell pays a cold
+#     TLS handshake through the residential proxy (seconds). At turn start we
+#     open Google connections on the exact threads that will carry the real
+#     POSTs (fli's persistent executor + this round's pool) with a ~1KB
+#     generate_204 — NOT the deleted 1.8MB page-load warmup, which was about
+#     cookies and showed no benefit; this is only the TCP/TLS tunnel.
+#   - SPECULATION: an unmistakable "JFK to ORD sept 18" query starts its
+#     search before the router even runs; the single-flight cache collapses
+#     the router's identical spec onto the in-flight request. A mismatched
+#     guess is a wasted ~100-300KB cache entry and nothing else — the
+#     model's spec always wins. SPECULATE=0 kills it.
+# --------------------------------------------------------------------------
+def _warm_one() -> None:
+    """Open the TLS tunnel to Google on THIS thread's identity handle."""
+    try:
+        ident = checkout_identity()
+        _identity_session(ident).get("https://www.google.com/generate_204", timeout=6)
+    except Exception:
+        pass  # warming is a bonus; never let it matter
+
+
+def warm_google_connections(pool=None, n: int = 2) -> None:
+    if os.environ.get("WARM_CONNECTIONS") == "0":
+        return
+    try:
+        ex = _get_executor()  # fli's persistent threads carry the expansions
+        for _ in range(n):
+            ex.submit(_warm_one)
+    except Exception:
+        pass
+    if pool is not None:  # and this pool's threads carry the main POSTs
+        try:
+            for _ in range(n):
+                pool.submit(_warm_one)
+        except Exception:
+            pass
+
+
+_MONTHS = {m: i + 1 for i, m in enumerate(
+    ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"))}
+_SPECULATE_RE = re.compile(r"^\s*([A-Za-z]{3})\s+to\s+([A-Za-z]{3})\b(.*)$")
+_DATE_WORD_RE = re.compile(r"\b([a-z]{3,9})\.?\s+(\d{1,2})\b|\b(\d{1,2})\s*/\s*(\d{1,2})\b")
+
+
+def speculative_spec(query: str) -> dict | None:
+    """The spec the router is about to emit, when the query is unmistakable.
+
+    Deliberately narrow: two literal IATA codes, ' to ' between them, one
+    parseable date, no round-trip/flex words. Anything less certain returns
+    None — a speculation that guessed WRONG would only waste a cache entry,
+    but a narrow trigger keeps the proxy bandwidth honest.
+    """
+    m = _SPECULATE_RE.match((query or "").strip())
+    if not m:
+        return None
+    a, b, rest = m.group(1).upper(), m.group(2).upper(), m.group(3).lower()
+    if not hasattr(Airport, a) or not hasattr(Airport, b):
+        return None
+    if any(w in rest for w in ("round", "return", "back", "flex", "week", "month", "multi")):
+        return None
+    d = _DATE_WORD_RE.search(rest)
+    if not d:
+        return None
+    try:
+        if d.group(1) is not None:
+            mo = _MONTHS.get(d.group(1)[:3])
+            day = int(d.group(2))
+        else:
+            mo, day = int(d.group(3)), int(d.group(4))
+        if not mo or not 1 <= day <= 31:
+            return None
+        date_ = f"{datetime.now().year}-{mo:02d}-{day:02d}"
+        datetime.strptime(date_, "%Y-%m-%d")  # reject 2/30-style nonsense
+    except (TypeError, ValueError):
+        return None
+    spec = {"origins": [a], "destinations": [b], "trip_type": "one_way",
+            "departure_date": date_}
+    if "cheapest" in rest:
+        spec["sort"] = "cheapest"
+    elif "fastest" in rest:
+        spec["sort"] = "fastest"
+    return spec
+
+
 def run_assistant(query: str, history: list | None, emit=None,
                   ledgers: list | None = None) -> dict:
     """Run the agent loop. `emit(event, data)` receives progress as it happens:
@@ -1036,6 +1163,14 @@ def run_assistant(query: str, history: list | None, emit=None,
     first_effort = "low" if plain_search else "medium"
     haiku_router = plain_search  # flips off after one failed Haiku attempt
 
+    # unmistakable queries start their search before the router even runs;
+    # the single-flight cache collapses the router's identical spec onto it
+    if os.environ.get("SPECULATE") != "0":
+        _spec_guess = speculative_spec(query)
+        if _spec_guess:
+            threading.Thread(target=cached_execute_spec, args=(_spec_guess,),
+                             daemon=True).start()
+
     started = time.monotonic()
     timings: list = []   # [(phase, seconds, detail)] — surfaced for profiling
     cost_usd = 0.0       # estimated API spend this turn, from real usage blocks
@@ -1075,17 +1210,64 @@ def run_assistant(query: str, history: list | None, emit=None,
             # per plain search that nothing could ever read.
             "messages": messages if use_haiku else cache_tail(messages),
         }
-        if not use_haiku:
+        if use_haiku:
+            # the router only routes: it gets the request-handling half of the
+            # prompt (roughly half the tokens, none of the voice rules it will
+            # never use), and no cache marker — its prefix sits under Haiku's
+            # 4096-token cache minimum anyway
+            call_kwargs["system"] = [{"type": "text", "text": assistant_system_prompt(router=True)}]
+        else:
             # synthesis (any call after results are in) always runs at full
             # effort: that is where the recommendation is actually written.
             # (Haiku 4.5 rejects output_config.effort — loop model only.)
             call_kwargs["output_config"] = {"effort": first_effort if iterations == 1 else "medium"}
+
+        # the pool exists BEFORE the model call so that (a) its threads can
+        # pre-open TLS to Google while the model writes, and (b) each search
+        # can leave the moment its tool_use block finishes streaming
+        pool = ThreadPoolExecutor(max_workers=4)
+        if iterations == 1:
+            warm_google_connections(pool)
+        fired: dict = {}  # tool_use_id -> Future, dispatched mid-stream
+
+        def _staggered(spec, delay):
+            # five simultaneous requests from one address is the least human
+            # thing we do; a short ramp keeps the burst off Google's radar
+            # while still overlapping the slow part of each search
+            if delay:
+                time.sleep(delay)
+            return cached_execute_spec(spec)
+
+        def _fire(block) -> None:
+            nonlocal searches_used
+            if block.id in fired or searches_used >= 5:
+                return
+            searches_used += 1
+            fired[block.id] = pool.submit(_staggered, dict(block.input or {}), len(fired) * 0.4)
+
         try:
             # no live token emission: whether this text is the answer or a
-            # doomed preamble is only knowable once the call resolves
+            # doomed preamble is only knowable once the call resolves. The
+            # events are still read one by one so every completed
+            # search_flights block dispatches IMMEDIATELY — on a comparison,
+            # search 1 runs while the model is still writing calls 2-4.
             with client.messages.stream(**call_kwargs) as stream:
+                for event in stream:
+                    if getattr(event, "type", "") != "content_block_stop":
+                        continue
+                    snap = getattr(stream, "current_message_snapshot", None)
+                    blocks = getattr(snap, "content", None) or []
+                    idx = getattr(event, "index", None)
+                    if idx is None or idx >= len(blocks):
+                        continue
+                    b = blocks[idx]
+                    if getattr(b, "type", "") == "tool_use" and getattr(b, "name", "") == "search_flights":
+                        _fire(b)
                 response = stream.get_final_message()
         except anthropic.APIStatusError:
+            # never cancel fired work: it lands in the search cache and the
+            # redo (or the user's retry) collapses onto it
+            pool.shutdown(wait=False)
             if not use_haiku:
                 raise
             # the router is an optimization, never a failure mode: any API
@@ -1108,6 +1290,7 @@ def run_assistant(query: str, history: list | None, emit=None,
 
         # server-side web search can pause mid-loop; re-send to let it resume
         if response.stop_reason == "pause_turn":
+            pool.shutdown(wait=False)  # anything fired keeps warming the cache
             messages.append({"role": "assistant", "content": response.content})
             continue
 
@@ -1117,11 +1300,13 @@ def run_assistant(query: str, history: list | None, emit=None,
         # to answer instead, discard that answer and redo the call on the loop
         # model so reply quality is exactly what it would have been without it
         if use_haiku and not tool_uses:
+            pool.shutdown(wait=False)
             haiku_router = False
             iterations -= 1
             timings.append(("haiku_fallback", 0.0, "no tool call; redoing on the loop model"))
             continue
         if response.stop_reason != "tool_use" or not tool_uses:
+            pool.shutdown(wait=False)
             text = "\n".join(b.text for b in response.content if b.type == "text").strip()
             text, suggestions = split_suggestions(text)
             if response.stop_reason == "max_tokens" and not text:
@@ -1139,38 +1324,23 @@ def run_assistant(query: str, history: list | None, emit=None,
 
         messages.append({"role": "assistant", "content": response.content})
 
-        # run this round's searches CONCURRENTLY — a 3-option comparison takes
-        # as long as its slowest search instead of the sum of all three
-        budgeted = []
+        # most searches are already in flight (dispatched as their blocks
+        # finished streaming); this pass fires any the event loop missed and
+        # writes the budget refusals for the rest
         tool_results_by_id: dict = {}
         for tu in tool_uses:
-            if searches_used >= 5:
+            if tu.id not in fired:
+                _fire(tu)
+            if tu.id not in fired:
                 tool_results_by_id[tu.id] = {
                     "type": "tool_result", "tool_use_id": tu.id,
                     "content": "Search budget for this turn exhausted; answer with what you have.",
                     "is_error": True,
                 }
-            else:
-                searches_used += 1
-                budgeted.append(tu)
-
-        # no context manager: its exit would JOIN hung threads and defeat the
-        # timeouts below. shutdown(wait=False) abandons stragglers instead.
-        pool = ThreadPoolExecutor(max_workers=4)
-
-        def _staggered(spec, delay):
-            # five simultaneous requests from one address is the least human
-            # thing we do; a short ramp keeps the burst off Google's radar
-            # while still overlapping the slow part of each search
-            if delay:
-                time.sleep(delay)
-            return cached_execute_spec(spec)
+        budgeted = [tu for tu in tool_uses if tu.id in fired]
+        futures = fired
 
         _tsearch = time.monotonic()
-        futures = {
-            tu.id: pool.submit(_staggered, tu.input, n * 0.4)
-            for n, tu in enumerate(budgeted)
-        }
         batch_deadline = time.monotonic() + 55
 
         for tu in budgeted:
@@ -1218,7 +1388,8 @@ def run_assistant(query: str, history: list | None, emit=None,
                 }
         pool.shutdown(wait=False, cancel_futures=True)
         timings.append((f"searches_{rounds}", round(time.monotonic() - _tsearch, 2),
-                        f"n={len(budgeted)} | " + " | ".join(search_log[-len(budgeted):])))
+                        f"n={len(budgeted)} fired mid-stream; this phase is only the wait "
+                        "AFTER the model call | " + " | ".join(search_log[-len(budgeted):])))
         # cards can render now, well before the prose that describes them
         fresh = [s for s in sections if (s.get("results") or s.get("dates"))]
         if fresh:

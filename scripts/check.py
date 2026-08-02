@@ -703,6 +703,59 @@ check("the reply sits in a panel that answers the user's bubble, in sans",
       and "font-family: var(--serif); font-optical-sizing" not in _fe_now)
 
 # --------------------------------------------------------------------------
+section("Latency overlaps  — Changelog: 'the sequential turn'")
+# --------------------------------------------------------------------------
+# The Aug 2 profile was router -> search -> synthesis, strictly sequential.
+# These pin the overlaps that fixed it — and the guardrails that keep each
+# one quality-free.
+check("speculation fires only on the unmistakable shape",
+      app.speculative_spec("jfk to ord sept 18") == {
+          "origins": ["JFK"], "destinations": ["ORD"],
+          "trip_type": "one_way", "departure_date": f"{datetime.now().year}-09-18"})
+check("...and carries an explicit cheapest/fastest ask into the spec key",
+      app.speculative_spec("jfk to ord sept 18 cheapest").get("sort") == "cheapest")
+check("no date, no speculation (a dateless spec would only cache a clarify)",
+      app.speculative_spec("jfk to ord") is None)
+check("round-trip and flexible words disarm speculation",
+      app.speculative_spec("jfk to fll round trip sept 18") is None
+      and app.speculative_spec("jfk to fll flex september") is None)
+check("unknown codes and prose never speculate",
+      app.speculative_spec("zzz to ord sept 18") is None
+      and app.speculative_spec("fly me to the moon on 9/18") is None)
+check("an impossible calendar date never speculates",
+      app.speculative_spec("jfk to ord 2/30") is None)
+
+check("searchy follow-ups reach the fast router ('how about jfk to bos fri')",
+      app.looks_like_plain_search("how about jfk to bos friday")
+      and app.looks_like_plain_search("what about fll to ewr nov 28"))
+check("knowledge questions still keep full effort",
+      not app.looks_like_plain_search("what is the baggage allowance on Delta domestic?")
+      and not app.looks_like_plain_search("how do layovers work in Doha"))
+
+_router_p = app.assistant_system_prompt(router=True)
+_full_p = app.assistant_system_prompt()
+check("the router prompt is the request-handling half, not the whole concierge",
+      len(_router_p) < 0.7 * len(_full_p)
+      and "SUGGESTIONS" not in _router_p
+      and "combined search" in _router_p,   # the Gainesville rules stay
+      f"{len(_router_p)}/{len(_full_p)} chars")
+check("the full prompt still carries every answering rule",
+      "SUGGESTIONS" in _full_p and "lands_plus_days" in _full_p
+      and "Deliberation is for hard calls" in _full_p)
+
+_src_lat = open(os.path.join(ROOT, "api", "index.py")).read()
+check("searches dispatch as their blocks finish streaming, not at message end",
+      "content_block_stop" in _src_lat and "_fire(b)" in _src_lat
+      and "futures = fired" in _src_lat)
+check("connections pre-warm on the threads that will carry the POSTs",
+      "generate_204" in _src_lat and "warm_google_connections(pool)" in _src_lat)
+check("warming never touches search outcomes or the breaker",
+      "note_search_outcome" not in _src_lat.split("def _warm_one")[1].split("def ")[0])
+check("speculation and warming both have kill switches",
+      'os.environ.get("SPECULATE")' in _src_lat
+      and 'os.environ.get("WARM_CONNECTIONS")' in _src_lat)
+
+# --------------------------------------------------------------------------
 section("Reply rendering  — Changelog: 'the spacing the join left behind'")
 # --------------------------------------------------------------------------
 # The renderer joins the model's soft wraps into flowing text. Swapping each

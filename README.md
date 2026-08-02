@@ -229,7 +229,19 @@ Google traffic through a proxy (see Operations).
    bracketed block whose rule is that anything absent from the record has not
    been seen and must be searched for. Capped at 3 searches x 6 options x 2
    turns, and re-clamped server-side.
-2. `run_assistant` runs an agent loop (≤3 search rounds, ≤8 API calls, **58s
+2. `run_assistant` runs an agent loop. Latency doctrine (Aug 2): everything
+   that can overlap, does — an unmistakable "JFK to ORD sept 18" query
+   starts its search BEFORE the router runs (speculation; the single-flight
+   cache collapses the router's identical spec onto it; `SPECULATE=0`
+   kills it), turn start opens TLS to Google with ~1KB `generate_204`
+   requests on the exact threads that will carry the real POSTs
+   (`WARM_CONNECTIONS=0` kills it; this is NOT the deleted 1.8MB page-load
+   warmup — that was about cookies, this is only the tunnel), each search
+   dispatches the moment its tool_use block finishes STREAMING rather than
+   at message end (on comparisons, search 1 runs while calls 2-4 are still
+   being written), the Haiku router reads a request-rules-only prompt
+   (~58% of the full one), and searchy follow-ups ("how about jfk to bos
+   friday") reach the fast router instead of full effort (≤3 search rounds, ≤8 API calls, **58s
    budget for NEW search rounds** — when the budget dies with data on screen,
    a guaranteed tool-less wrap-up call still writes a real reply from a
    per-search status log, stating exactly what is or is not missing):
@@ -405,6 +417,29 @@ same SSE events as the real loop, so streaming is fully exercisable locally.
   lakes; run it, then bump the `?v=N` cache-buster on the script tag in index.html).
 
 ## Changelog
+
+**August 2, 2026 (the sequential turn, overlapped)**
+Evan: cut search time as much as possible with zero quality cost. The
+profile showed router (1.9-5s) -> search (1.1-3.2s) -> synthesis (3.1-4.9s),
+strictly sequential. Five overlaps, none of which change what the model
+sees or says:
+- **Eager dispatch**: each search_flights call fires the moment its block
+  finishes streaming; the message's remaining blocks (and on comparisons,
+  the other 3 calls) generate while Google works.
+- **Connection warming**: turn start opens the TLS tunnel to Google
+  (~1KB generate_204) on fli's persistent executor AND the round's own
+  pool threads — the exact handles the real POSTs use moments later. The
+  first search after a quiet spell stops paying a multi-second handshake.
+- **Speculation**: "CODE to CODE + date" queries start their search before
+  the router runs; the router's identical spec collapses onto it via the
+  single-flight cache. A wrong guess wastes ~100-300KB of proxy bandwidth
+  and nothing else. Strictly gated (checks pin the negatives).
+- **Router diet**: Haiku reads the request-handling half of the prompt
+  (6.1k of 10.6k chars) — it emits a tool call; the voice rules were pure
+  prefill. Searchy follow-ups ("how about X to Y") now reach it too.
+- **A deliberation nudge** in the answering rules: direct prose for a
+  single clear search, thinking reserved for comparisons and conflicts.
+Kill switches: SPECULATE=0, WARM_CONNECTIONS=0.
 
 **August 2, 2026 (assumptions line removed from cards)**
 - The small "· Assumed..." justification line under result sections is gone
