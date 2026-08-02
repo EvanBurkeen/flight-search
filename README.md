@@ -47,8 +47,14 @@ this file, then **"Lessons the hard way"** below before debugging anything.
   data gap (small airports, or genuinely no service).
 - **Env (Vercel only, never in git):** `ANTHROPIC_API_KEY`, `FLI_PROXY`
   (IPRoyal rotating US-residential proxy; the fix for Google throttling).
-- **Costs Evan cares about:** Anthropic per-turn (~cents), IPRoyal bandwidth
-  (~$6/GB, ~2GB purchased July 2026, months of runway at current usage).
+- **Costs Evan cares about:** Anthropic per-turn (~1-2 cents on Sonnet 5;
+  `debug_timings` reports the real figure per turn as `est_cost_usd`, computed
+  from each call's usage block at list prices — Sonnet's intro pricing
+  through Aug 31, 2026 bills ~1/3 lower). The July 30 outage was this
+  account running out of credit mid-conversation: top up at
+  console.anthropic.com, and consider auto-reload with a monthly cap so it
+  degrades predictably. IPRoyal bandwidth (~$6/GB, ~2GB purchased July 2026,
+  months of runway at current usage).
 - **Streaming is LIVE on main since July 25, 2026** (Evan's spec: the
   recommendation types out first, THEN the cards land). The frontend consumes
   `/api/search/stream` with a hard auto-fallback to `/api/search` on any
@@ -184,7 +190,7 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
 |---|---|
 | Hosting | Vercel serverless (Python), auto-deploys on push to `main` (`EvanBurkeen/flight-search`) |
 | Backend | [api/index.py](api/index.py) — FastAPI. `/api/search/stream` (SSE) is what the frontend uses (prose types first, cards land on `done`), with `/api/search` (JSON) as its automatic fallback and the prod-verification probe; `/api/returns` prices every return Google pairs with ONE outbound (no model in the loop — the board's tap-to-price, ~1-4s) |
-| LLM | `claude-opus-4-8` agent loop, `max_retries=4`, effort `medium`, prompt-cached system+tools; plainly-route-shaped queries emit their first tool call via `claude-haiku-4-5` (no `output_config` — Haiku rejects effort), with an automatic Opus redo if Haiku answers in prose instead of calling the tool |
+| LLM | `claude-sonnet-5` agent loop (near-Opus on tool-driven work, 40% less per token; `ASSISTANT_MODEL` env var overrides it — set `claude-opus-4-8` in Vercel for an A/B, no code push), `max_retries=4`, effort `medium`, adaptive thinking on by default (hence `max_tokens` 8000: it caps thinking + text together); prompt caching: system+tools at 1h TTL (the only prefix that survives across turns), plus a 5m breakpoint on the conversation tail so a turn's later calls read its earlier messages at 0.1x — WITHIN-turn only, since the client replays history as bare prose and the wrap-up's `tool_choice: none` invalidates the messages tier (so that call sends no tail marker); plainly-route-shaped queries emit their first tool call via `claude-haiku-4-5` (no `output_config` — Haiku rejects effort), with an automatic loop-model redo if Haiku answers in prose instead of calling the tool |
 | Flight data | [`fli`](https://github.com/punitarani/fli) (PyPI `flights`) — reverse-engineered Google Flights |
 | Web context | Anthropic server-side `web_search` tool (max 3/turn) for event dates, venues, etc. |
 | Coordinates | `airportsdata` (IATA → lat/lon) for route maps |
@@ -380,6 +386,38 @@ same SSE events as the real loop, so streaming is fully exercisable locally.
   lakes; run it, then bump the `?v=N` cache-buster on the script tag in index.html).
 
 ## Changelog
+
+**July 30, 2026 (API spend: Sonnet 5, deeper caching, and a cost line)**
+The outage's post-mortem question was "where does the money go" — answered by
+measurement (~4.2k-token fixed prefix, 2-3 calls per turn, the conversation
+re-billed at full price on every call), then three levers in one push:
+- **`claude-sonnet-5` runs the loop** (was `claude-opus-4-8`): near-Opus on
+  tool-driven work at $3/$15 vs $5/$25 per MTok, intro $2/$10 through
+  Aug 31, 2026. `ASSISTANT_MODEL` in Vercel env flips it back for an A/B
+  with no code push. Two Sonnet-specific adjustments: adaptive thinking is
+  ON when the `thinking` param is omitted (Opus 4.8 was off), and
+  `max_tokens` caps thinking + text together, so it rose 4000 -> 8000
+  (costs nothing unless generated). Deliberately NOT set: `thinking:
+  disabled` — Sonnet 5 with thinking off is measurably less willing to call
+  tools, and this loop is nothing but tool calls.
+- **Caching, both halves:** the system+tools breakpoint moved to the 1h TTL
+  (2x write, 0.1x reads all session — the 5-minute default re-paid the
+  prefix on every think-gap), and the loop's calls put a 5m breakpoint on
+  the conversation tail, so call 2 of a turn reads call 1's messages from
+  cache instead of re-billing them. Pre-push review corrected two of my
+  claims here: cross-turn message reads can never match (the client replays
+  bare prose history while the turn's cached bytes embedded the ledger
+  block), so the tail is 5m/1.25x rather than a pointless 1h/2x — and the
+  wrap-up call's `tool_choice: none` invalidates the messages cache tier,
+  so it sends no tail marker at all. The same review caught that adaptive
+  thinking's silent gaps could outlive the SSE stream's old 90s single
+  timeout, which would have re-run whole turns via the fallback path
+  (a double-bill); the stream now heartbeats every 15s.
+- **Cost instrumentation:** each call's usage block is priced
+  (input/cache-write 2x/cache-read 0.1x/output, per-model list prices) and
+  `debug_timings` now reports `est_cost_usd` per turn plus a per-call `~$`
+  figure in the phase log — the next spend decision gets data, the way the
+  July 24 latency work got a profile first.
 
 **July 30, 2026 (the +2 the model read as +1, and the outage the reply called temporary)**
 Two of Evan's catches from one session:

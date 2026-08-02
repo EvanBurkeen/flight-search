@@ -873,6 +873,119 @@ def looks_like_plain_search(query: str) -> bool:
     return bool(_ROUTE_HINT.search(q))
 
 
+# --------------------------------------------------------------------------
+# What a turn costs, and the knobs that control it
+#
+# The July 30 outage was an empty API balance, and the post-mortem question
+# was "where does the money go?" — answered by measurement, like the July 24
+# latency work: ~4.2k tokens of system+tools prefix on 2-3 calls per turn,
+# the conversation re-billed at full price on every call, and Opus output at
+# the top of the price sheet. Three levers shipped together (July 30):
+#
+#   - ASSISTANT_MODEL (env-overridable): the loop runs Sonnet 5 — near-Opus
+#     on tool-driven work at 40% less ($3/$15 vs $5/$25 per MTok, intro
+#     $2/$10 through Aug 31, 2026). Flip the env var back to
+#     claude-opus-4-8 in Vercel for an A/B; no code push needed. NOTE:
+#     Sonnet 5 runs ADAPTIVE THINKING by default when `thinking` is omitted
+#     (Opus 4.8 did not), and max_tokens caps thinking + text TOGETHER —
+#     hence the raised MAX_TOKENS. Do not add `thinking: disabled`: with
+#     thinking off Sonnet 5 is measurably less willing to call tools, and
+#     this loop is nothing but tool calls.
+#   - 1h cache TTL on the prefix (write 2x, read 0.1x): traffic here is a
+#     session of turns then hours of quiet; the 5-minute default re-paid the
+#     prefix write on every think-gap longer than a coffee sip. The prefix is
+#     the ONLY thing that survives across turns: the client replays history
+#     as bare prose while the server's turn embedded the ledger block and
+#     tool traffic, so the message bytes diverge and cross-turn message
+#     reads never match. Do not claim otherwise; review caught this once.
+#   - a 5-MINUTE breakpoint on the conversation tail: without it the messages
+#     section (history + ledger + tool results) re-billed at FULL price on
+#     every call of every turn — a search turn is 2-3 calls seconds apart,
+#     which is exactly what a 5m entry covers. 1h here would double the
+#     write cost to feed cross-turn reads that (see above) cannot happen.
+#
+# call_cost_usd() turns each call's usage into dollars so debug_timings
+# reports real spend per turn; decisions after this one get data, not
+# char-count estimates.
+# --------------------------------------------------------------------------
+ASSISTANT_MODEL = os.environ.get("ASSISTANT_MODEL") or "claude-sonnet-5"
+ROUTER_MODEL = "claude-haiku-4-5"
+MAX_TOKENS = 8000  # caps thinking + text together on Sonnet 5; raising costs nothing
+
+MODEL_PRICES = {  # USD per 1M tokens (input, output) — LIST prices.
+    # Sonnet 5 bills at an introductory $2/$10 through 2026-08-31, so real
+    # spend runs ~1/3 below this estimate until then; estimates never go
+    # silently stale-low after the intro lapses.
+    "claude-sonnet-5": (3.0, 15.0),
+    "claude-haiku-4-5": (1.0, 5.0),
+    "claude-opus-4-8": (5.0, 25.0),
+    "claude-opus-5": (5.0, 25.0),
+}
+CACHE_WRITE_1H = 2.0    # the system+tools prefix
+CACHE_WRITE_5M = 1.25   # the conversation tail
+CACHE_READ_MULT = 0.1
+
+_CACHE_1H = {"type": "ephemeral", "ttl": "1h"}
+_CACHE_5M = {"type": "ephemeral", "ttl": "5m"}
+
+
+def call_cost_usd(model: str, usage) -> float:
+    """Estimated cost of one API call from its usage block, in USD."""
+    prices = MODEL_PRICES.get(model)
+    if not prices or usage is None:
+        return 0.0
+    inp, out = prices
+    g = lambda o, f: (getattr(o, f, 0) or 0)
+    # mixed TTLs bill writes differently; the usage breakdown says which was
+    # which, and its absence falls back to the dearer multiplier so the
+    # estimate errs high, never silently low
+    cc = getattr(usage, "cache_creation", None)
+    if cc is not None and (getattr(cc, "ephemeral_5m_input_tokens", None) is not None
+                           or getattr(cc, "ephemeral_1h_input_tokens", None) is not None):
+        writes = (g(cc, "ephemeral_5m_input_tokens") * CACHE_WRITE_5M
+                  + g(cc, "ephemeral_1h_input_tokens") * CACHE_WRITE_1H)
+    else:
+        writes = g(usage, "cache_creation_input_tokens") * CACHE_WRITE_1H
+    return (
+        g(usage, "input_tokens") * inp
+        + writes * inp
+        + g(usage, "cache_read_input_tokens") * inp * CACHE_READ_MULT
+        + g(usage, "output_tokens") * out
+    ) / 1e6
+
+
+def cache_tail(messages: list) -> list:
+    """The same messages, with a 5m cache breakpoint on the LAST content block.
+
+    WITHIN-turn caching only: call 2 of a turn reads call 1's messages at
+    0.1x instead of re-billing them at full price, and the loop's calls are
+    seconds apart, so the 5-minute TTL covers them at the cheaper 1.25x
+    write. Across turns this entry can never be read — the client replays
+    history as bare prose while this turn's bytes embedded the ledger block
+    and tool traffic, and history[-12:] slides the front — so a dearer 1h
+    write would buy nothing. Copies, never mutates: the loop keeps appending
+    to the original list, and a breakpoint frozen into it would pin stale
+    mid-conversation markers (only 4 are allowed per request).
+    """
+    if not messages:
+        return messages
+    out = list(messages)
+    last = out[-1]
+    if not isinstance(last, dict):
+        return messages
+    content = last.get("content")
+    if isinstance(content, str) and content:
+        blocks = [{"type": "text", "text": content, "cache_control": _CACHE_5M}]
+    elif isinstance(content, list) and content and isinstance(content[-1], dict):
+        blocks = list(content)
+        blocks[-1] = {**blocks[-1], "cache_control": _CACHE_5M}
+    else:
+        # SDK block objects (a pause_turn resume) — skip rather than mutate
+        return messages
+    out[-1] = {**last, "content": blocks}
+    return out
+
+
 def run_assistant(query: str, history: list | None, emit=None,
                   ledgers: list | None = None) -> dict:
     """Run the agent loop. `emit(event, data)` receives progress as it happens:
@@ -906,11 +1019,11 @@ def run_assistant(query: str, history: list | None, emit=None,
 
     # Routing the first call: when the query is plainly "search this route",
     # that call only has to emit a tool_use, which needs no deep reasoning —
-    # Haiku emits it in a fraction of Opus's time (July 25 profile: claude_1
-    # was the single largest fixed cost of a simple turn). A guard below
-    # retries on Opus if Haiku answers in prose instead of calling the tool,
-    # so quality is never traded, only latency. Knowledge questions are
-    # ANSWERED on the first call, so they keep Opus at full effort.
+    # Haiku emits it in a fraction of the loop model's time (July 25 profile:
+    # claude_1 was the single largest fixed cost of a simple turn). A guard
+    # below retries on the loop model if Haiku answers in prose instead of
+    # calling the tool, so quality is never traded, only latency. Knowledge
+    # questions are ANSWERED on the first call, so they keep full effort.
     plain_search = looks_like_plain_search(query)
     first_effort = "low" if plain_search else "medium"
     haiku_router = plain_search  # flips off after one failed Haiku attempt
@@ -923,6 +1036,7 @@ def run_assistant(query: str, history: list | None, emit=None,
 
     started = time.monotonic()
     timings: list = []   # [(phase, seconds, detail)] — surfaced for profiling
+    cost_usd = 0.0       # estimated API spend this turn, from real usage blocks
     rounds = 0
     iterations = 0
     # turn budget bounds NEW SEARCH ROUNDS only (a Google throttle wave
@@ -937,26 +1051,29 @@ def run_assistant(query: str, history: list | None, emit=None,
         streamed_any = False
         use_haiku = haiku_router and iterations == 1
         call_kwargs: dict = {
-            "model": "claude-haiku-4-5" if use_haiku else "claude-opus-4-8",
-            "max_tokens": 4000,
+            "model": ROUTER_MODEL if use_haiku else ASSISTANT_MODEL,
+            "max_tokens": MAX_TOKENS,
             # cache breakpoint on system caches tools+system for every call in
-            # the loop and across turns (prompt renders tools -> system -> messages)
+            # the loop and across turns (prompt renders tools -> system -> messages);
+            # 1h TTL because think-gaps between turns routinely exceed the 5m default
             "system": [{
                 "type": "text",
                 "text": assistant_system_prompt(),
-                "cache_control": {"type": "ephemeral"},
+                "cache_control": _CACHE_1H,
             }],
             # Haiku 4.5 rejects web_search_20260209 (Opus/Sonnet-tier tool) —
             # the router call only exists to emit search_flights anyway; if
             # the query turns out to need web context, the no-tool-call guard
-            # below redoes it on Opus with the full toolset
+            # below redoes it on the loop model with the full toolset
             "tools": [SEARCH_TOOL] if use_haiku else [SEARCH_TOOL, web_tool],
-            "messages": messages,
+            # tail breakpoint: the conversation reads from cache on every call
+            # after the one that wrote it, instead of re-billing at full price
+            "messages": cache_tail(messages),
         }
         if not use_haiku:
             # synthesis (any call after results are in) always runs at full
             # effort: that is where the recommendation is actually written.
-            # (Haiku 4.5 rejects output_config.effort, so it is Opus-only.)
+            # (Haiku 4.5 rejects output_config.effort — loop model only.)
             call_kwargs["output_config"] = {"effort": first_effort if iterations == 1 else "medium"}
         try:
             with client.messages.stream(**call_kwargs) as stream:
@@ -970,18 +1087,21 @@ def run_assistant(query: str, history: list | None, emit=None,
             if not use_haiku:
                 raise
             # the router is an optimization, never a failure mode: any API
-            # rejection of the Haiku call redoes it on Opus
+            # rejection of the Haiku call redoes it on the loop model
             haiku_router = False
             iterations -= 1
-            timings.append(("haiku_fallback", round(time.monotonic() - _t, 2), "api error; redoing on opus"))
+            timings.append(("haiku_fallback", round(time.monotonic() - _t, 2), "api error; redoing on the loop model"))
             continue
 
         u = getattr(response, "usage", None)
+        cost_usd += call_cost_usd(call_kwargs["model"], u)
         timings.append((
             f"claude_{iterations}", round(time.monotonic() - _t, 2),
             f"in={getattr(u, 'input_tokens', '?')} "
+            f"cache_w={getattr(u, 'cache_creation_input_tokens', '?')} "
             f"cache_r={getattr(u, 'cache_read_input_tokens', '?')} "
-            f"out={getattr(u, 'output_tokens', '?')} stop={response.stop_reason}",
+            f"out={getattr(u, 'output_tokens', '?')} stop={response.stop_reason} "
+            f"~${call_cost_usd(call_kwargs['model'], u):.4f}",
         ))
 
         # server-side web search can pause mid-loop; re-send to let it resume
@@ -992,12 +1112,12 @@ def run_assistant(query: str, history: list | None, emit=None,
         tool_uses = [b for b in response.content if b.type == "tool_use"]
 
         # the Haiku router exists only to emit a search call fast; if it chose
-        # to answer instead, discard that answer and redo the call on Opus so
-        # the reply quality is exactly what it would have been without Haiku
+        # to answer instead, discard that answer and redo the call on the loop
+        # model so reply quality is exactly what it would have been without it
         if use_haiku and not tool_uses:
             haiku_router = False
             iterations -= 1
-            timings.append(("haiku_fallback", 0.0, "no tool call; redoing on opus"))
+            timings.append(("haiku_fallback", 0.0, "no tool call; redoing on the loop model"))
             continue
         if tool_uses and streamed_any:
             # whatever was streamed was a lead-in to a search, not the answer
@@ -1005,8 +1125,14 @@ def run_assistant(query: str, history: list | None, emit=None,
         if response.stop_reason != "tool_use" or not tool_uses:
             text = "\n".join(b.text for b in response.content if b.type == "text").strip()
             text, suggestions = split_suggestions(text)
+            if response.stop_reason == "max_tokens" and not text:
+                # the cap can land mid-think (thinking and text share it), and
+                # a bare ellipsis is not an answer anyone can act on
+                text = ("That one took more thinking room than I gave it. "
+                        "Ask me again, or narrow the question a little.")
             return {"message": text or "…", "sections": sections,
                     "suggestions": suggestions, "timings": timings,
+                    "cost_usd": round(cost_usd, 4),
                     "ledger": _turn_ledger(ledger_entries)}
         rounds += 1
 
@@ -1116,15 +1242,18 @@ def run_assistant(query: str, history: list | None, emit=None,
             )})
             _t = time.monotonic()
             with client.messages.stream(
-                model="claude-opus-4-8",
-                max_tokens=4000,
+                model=ASSISTANT_MODEL,
+                max_tokens=MAX_TOKENS,
                 output_config={"effort": "medium"},
                 system=[{
                     "type": "text",
                     "text": assistant_system_prompt(),
-                    "cache_control": {"type": "ephemeral"},
+                    "cache_control": _CACHE_1H,
                 }],
                 tools=[SEARCH_TOOL, web_tool],
+                # tool_choice invalidates the MESSAGES cache tier (system and
+                # tools still read), so a tail write here could never be read
+                # back: plain messages, no marker, no wasted 2x write
                 tool_choice={"type": "none"},
                 messages=messages,
             ) as stream:
@@ -1132,12 +1261,14 @@ def run_assistant(query: str, history: list | None, emit=None,
                     if chunk:
                         emit("text_delta", chunk)
                 response = stream.get_final_message()
+            cost_usd += call_cost_usd(ASSISTANT_MODEL, getattr(response, "usage", None))
             timings.append(("claude_wrapup", round(time.monotonic() - _t, 2), ""))
             text = "\n".join(b.text for b in response.content if b.type == "text").strip()
             text, suggestions = split_suggestions(text)
             if text:
                 return {"message": text, "sections": sections,
                         "suggestions": suggestions or ["keep digging"], "timings": timings,
+                        "cost_usd": round(cost_usd, 4),
                         "ledger": _turn_ledger(ledger_entries)}
         except Exception:
             pass  # canned fallback below; never lose the data over prose
@@ -1146,6 +1277,7 @@ def run_assistant(query: str, history: list | None, emit=None,
             "sections": sections,
             "suggestions": ["keep digging"],
             "timings": timings,
+            "cost_usd": round(cost_usd, 4),
             "ledger": _turn_ledger(ledger_entries),
         }
     return {
@@ -1153,6 +1285,7 @@ def run_assistant(query: str, history: list | None, emit=None,
         "sections": [],
         "suggestions": ["try again"],
         "timings": timings,
+        "cost_usd": round(cost_usd, 4),
     }
 
 
@@ -2897,11 +3030,20 @@ async def search_stream(request: Request):
     threading.Thread(target=worker, daemon=True).start()
 
     def frames():
-        while True:
+        # Adaptive thinking streams nothing while it thinks, so a quiet 90s
+        # gap is now possible mid-turn. The old single 90s get() would break
+        # the stream WITHOUT a done event; the frontend then fell back to
+        # /api/search and RE-RAN the whole turn while this worker kept
+        # billing to completion — a double-spend. Heartbeat comments (":"
+        # lines are ignored by SSE parsers) keep the stream alive; the hard
+        # deadline below is the only way out without a done event.
+        deadline = time.monotonic() + 300
+        while time.monotonic() < deadline:
             try:
-                ev, data = events.get(timeout=90)
+                ev, data = events.get(timeout=15)
             except Exception:
-                break
+                yield ": ping\n\n"
+                continue
             if ev is None:
                 break
             yield f"event: {ev}\ndata: {json.dumps(data)}\n\n"
@@ -3053,6 +3195,10 @@ async def search(request: Request):
                 "total": round(time.monotonic() - t0, 2),
                 "cold_process": cold,
                 "since_process_start": round(time.monotonic() - _PROCESS_START, 2),
+                # estimated from each call's real usage block at list prices;
+                # Sonnet 5's intro pricing (through 2026-08-31) bills lower
+                "est_cost_usd": result.get("cost_usd"),
+                "model": ASSISTANT_MODEL,
                 "phases": result.get("timings") or [],
                 "search_ok_on_attempt": _attempt_stats["ok_on_attempt"][-6:],
                 "cached_specs": len(_search_cache),

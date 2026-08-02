@@ -552,6 +552,86 @@ for _body in ({"error": "upstream timeout"}, {"error": None}, None, "plain text"
     check(f"a malformed error body never crashes the reporter ({str(_body)[:28]!r})", ok)
 
 # --------------------------------------------------------------------------
+section("API spend  — Changelog: 'the outage was an empty balance'")
+# --------------------------------------------------------------------------
+# The July 30 outage was the account running dry mid-conversation. These pin
+# the three levers that answer it: a cheaper loop model behind an env escape
+# hatch, cache breakpoints that stop re-billing what was already sent, and a
+# cost line computed from real usage so the next decision is made on data.
+check("the loop model is Sonnet 5 by default, env-overridable for an A/B",
+      app.ASSISTANT_MODEL == (os.environ.get("ASSISTANT_MODEL") or "claude-sonnet-5"))
+check("the loop model has a price entry (a swap without one silently reports $0)",
+      app.ASSISTANT_MODEL in app.MODEL_PRICES and app.ROUTER_MODEL in app.MODEL_PRICES)
+# Sonnet 5 thinks by default and max_tokens caps thinking + text TOGETHER;
+# the old 4000 cap could truncate a reply mid-sentence after a long think
+check("max_tokens leaves adaptive thinking room to finish the reply",
+      app.MAX_TOKENS >= 8000, f"MAX_TOKENS={app.MAX_TOKENS}")
+
+_usage = types.SimpleNamespace(input_tokens=1000, cache_creation_input_tokens=4000,
+                               cache_read_input_tokens=2000, output_tokens=300)
+# fallback (no TTL breakdown) bills writes at the DEARER 1h rate — errs high:
+# 1000*3 + 4000*3*2 + 2000*3*0.1 + 300*15 = 3000+24000+600+4500 = 32100 / 1e6
+check("a call's cost is computed from its real usage block (errs high without breakdown)",
+      abs(app.call_cost_usd("claude-sonnet-5", _usage) - 0.0321) < 1e-9,
+      f"${app.call_cost_usd('claude-sonnet-5', _usage):.4f}")
+_usage_bd = types.SimpleNamespace(
+    input_tokens=1000, cache_creation_input_tokens=5000,
+    cache_read_input_tokens=2000, output_tokens=300,
+    cache_creation=types.SimpleNamespace(ephemeral_5m_input_tokens=1000,
+                                         ephemeral_1h_input_tokens=4000))
+# with the breakdown, 5m writes bill 1.25x and 1h writes 2x:
+# 1000*3 + (1000*1.25 + 4000*2)*3 + 2000*3*0.1 + 300*15 = 3000+27750+600+4500 = 35850
+check("the mixed-TTL write breakdown prices 5m at 1.25x and 1h at 2x",
+      abs(app.call_cost_usd("claude-sonnet-5", _usage_bd) - 0.03585) < 1e-9,
+      f"${app.call_cost_usd('claude-sonnet-5', _usage_bd):.5f}")
+check("an unknown model or missing usage reports 0, never a crash",
+      app.call_cost_usd("claude-nonexistent", _usage) == 0.0
+      and app.call_cost_usd("claude-sonnet-5", None) == 0.0)
+check("the write multipliers match the TTLs actually used",
+      app.CACHE_WRITE_1H == 2.0 and app.CACHE_WRITE_5M == 1.25
+      and app._CACHE_1H.get("ttl") == "1h" and app._CACHE_5M.get("ttl") == "5m")
+
+_msgs = [{"role": "user", "content": "JFK to ORD"},
+         {"role": "assistant", "content": "On it."},
+         {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1",
+                                       "content": "results"}]}]
+_tailed = app.cache_tail(_msgs)
+# 5m, not 1h: the tail's readers are this turn's own calls, seconds apart;
+# cross-turn reads can never match (client history is bare prose while the
+# turn's bytes embedded the ledger), so the dearer write would buy nothing
+check("the conversation tail carries a 5m cache breakpoint",
+      _tailed[-1]["content"][-1].get("cache_control") == app._CACHE_5M)
+check("...without mutating the loop's own messages list",
+      "cache_control" not in _msgs[-1]["content"][-1] and _msgs[1]["content"] == "On it.")
+_tail_str = app.cache_tail([{"role": "user", "content": "plain string"}])
+check("a string tail is wrapped into a block so the breakpoint can attach",
+      _tail_str[-1]["content"][0]["type"] == "text"
+      and _tail_str[-1]["content"][0]["cache_control"] == app._CACHE_5M)
+check("empty or SDK-object tails pass through untouched",
+      app.cache_tail([]) == []
+      and app.cache_tail([{"role": "assistant", "content": types.SimpleNamespace()}])[-1]["content"].__class__ is types.SimpleNamespace)
+
+# both live call sites must use the shared knobs, not a re-hardcoded model
+_src_spend = open(os.path.join(ROOT, "api", "index.py")).read()
+check("no call site hardcodes an old model (the env override must actually rule)",
+      'model="claude-opus-4-8"' not in _src_spend
+      and '"model": "claude-opus-4-8"' not in _src_spend
+      and _src_spend.count("model=ASSISTANT_MODEL") == 1
+      and 'ROUTER_MODEL if use_haiku else ASSISTANT_MODEL' in _src_spend)
+check("no breakpoint is left on the bare default TTL (every marker is explicit)",
+      '"cache_control": {"type": "ephemeral"}' not in _src_spend
+      and "'cache_control': {'type': 'ephemeral'}" not in _src_spend)
+check("the loop caches the tail; the wrap-up does NOT (tool_choice none makes "
+      "the messages tier unreadable, so its write would be pure waste)",
+      _src_spend.count("cache_tail(messages)") == 1
+      and 'tool_choice={"type": "none"},\n                messages=messages,' in _src_spend)
+check("the SSE stream heartbeats through silent thinking gaps",
+      '": ping' in _src_spend,
+      "a 90s quiet gap used to break the stream and double-run the turn")
+check("a mid-think max_tokens exit ships a real sentence, not an ellipsis",
+      'stop_reason == "max_tokens" and not text' in _src_spend)
+
+# --------------------------------------------------------------------------
 section("Reply rendering  — Changelog: 'the spacing the join left behind'")
 # --------------------------------------------------------------------------
 # The renderer joins the model's soft wraps into flowing text. Swapping each
@@ -653,6 +733,14 @@ _w = _re.search(r"PRICE_CTX_SPREAD_D = (\d+)", _src)
 check("README states the baseline's window width",
       bool(_w) and f"{_w.group(1)} days either side" in _readme,
       f"code spreads {_w.group(1) if _w else '?'} days")
+_lm = _re.search(r'ASSISTANT_MODEL"\) or "(claude-[a-z0-9-]+)"', _src)
+check("README names the loop model the code defaults to",
+      bool(_lm) and _lm.group(1) in _readme,
+      f"code defaults to {_lm.group(1) if _lm else '?'} — update the Stack table")
+check("README documents the ASSISTANT_MODEL escape hatch",
+      "ASSISTANT_MODEL" in _readme)
+check("README states the 1-hour cache TTL it now pays 2x writes for",
+      "1h" in _readme or "1-hour" in _readme)
 
 # --------------------------------------------------------------------------
 section("Process guards")
