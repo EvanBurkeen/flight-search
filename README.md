@@ -131,6 +131,17 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
   otherwise have to compute.
 
 **Ranking and truthfulness**
+- **A multi-airport search is one combined pool, and the hub neighbor wins
+  every seat.** "NYC to Gainesville" searched [GNV, MCO, JAX]; Google
+  returned 15 GNV itineraries (American via MIA, from $397) and the
+  pipeline erased every one — the expansion picker chose only MCO
+  (cheapest/nonstop/fastest all live at the hub), the value-ordered cut
+  dropped the pricier GNV one-stops, and the model told the user GNV "came
+  back with nothing through-ticketed." JAX vanished the same way in the
+  same search. Ranking by value is right for ORDER; it must never decide
+  which airports exist. Every cut now guarantees each served airport a
+  seat, and the message carries a per-airport breakdown over the full
+  pre-cut set.
 - **Rank BEFORE truncating.** Google returns results cheapest-first, so cutting
   first silently discards options that were never scored (12 nonstops existed; 11
   priced above the 50th-cheapest fare and vanished).
@@ -183,6 +194,11 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
   sample under 8 dates, and is dropped rather than waited on.
 - Joining the model's soft wraps never leaves a space before punctuation or a
   double space (the July 28 "on Nov 28 , with" report).
+- No cut may erase an airport Google served: the expansion picker, the
+  round-trip more_outbounds cap, the degraded-mode cap, and the one-way ship
+  cut each keep at least one option per destination airport, and search
+  messages state per-airport counts and cheapest fares over the full
+  pre-cut set whenever more than one destination airport is in play.
 
 ## Stack
 
@@ -386,6 +402,29 @@ same SSE events as the real loop, so streaming is fully exercisable locally.
   lakes; run it, then bump the `?v=N` cache-buster on the script tag in index.html).
 
 ## Changelog
+
+**August 2, 2026 (the Gainesville bug: a hub neighbor erased the named airport)**
+Evan's transcript: "NYC to Gainesville" produced 33 outbounds, every one to
+MCO, and the prose "Gainesville itself (GNV) came back with nothing
+through-ticketed" — then a dedicated GNV search found American via Miami
+instantly. Google had returned 15 GNV itineraries all along; three layers
+buried them (expansion picker, more_outbounds value cut, and a model shown
+only MCO). Fixes, each checked:
+- `rescue_airports`: every cut (one-way ship cut, round-trip more_outbounds,
+  degraded mode) keeps at least the best-ranked option per served airport —
+  a cap is a product judgment, an airport silently vanishing is a lie.
+- `representative_outbounds` seats each destination airport's best outbound
+  before spending slots on nonstops and departure spread, so the named
+  field gets real priced pairings, not just a from-price.
+- `airport_breakdown`: search messages now state "By destination airport:
+  MCO 155 from $215, JAX 130 from $274, GNV 15 from $397" over the FULL
+  pre-cut set, and the prompt forbids "came back with nothing" claims from
+  a combined search (a user-named airport showing zero requires a
+  dedicated single-airport search first), tells the model to LEAD with the
+  airport the user actually named, and makes constraint-adding follow-ups
+  ("it has to be American or Delta") search immediately instead of
+  describing the ledger's slice and asking permission. Verified against
+  live Google on the exact transcript query before push.
 
 **July 30, 2026 (API spend: Sonnet 5, deeper caching, and a cost line)**
 The outage's post-mortem question was "where does the money go" — answered by

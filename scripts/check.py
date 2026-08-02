@@ -301,6 +301,56 @@ check("the model is told about outbounds whose returns were not priced",
       '"unpriced_outbounds"' in _compact and '"nonstops": 1' in _compact and '"cheapest_from": 700.0' in _compact)
 
 # --------------------------------------------------------------------------
+section("Multi-airport representation  — Changelog: 'the Gainesville bug'")
+# --------------------------------------------------------------------------
+# "NYC to Gainesville" searched [GNV, MCO] together; Google returned GNV
+# service (American via MIA, $397) and the pipeline buried it three ways —
+# the expansion picker chose only MCO, the value-ordered cut dropped GNV
+# entirely, and the model told the user GNV "came back with nothing
+# through-ticketed." A dedicated search then found it instantly. These
+# reconstruct that shape: 30 cheap MCO nonstops + 3 pricey GNV one-stops.
+def _ob_to(dest, price, dur, stops, hour):
+    return types.SimpleNamespace(
+        price=price, duration=dur, stops=stops,
+        legs=[types.SimpleNamespace(
+            departure_datetime=datetime(2026, 9, 25, hour, 0),
+            arrival_airport=types.SimpleNamespace(name=dest))])
+
+_gnv_pool = [_ob_to("MCO", 215 + i, 175, 0, 6 + (i % 16)) for i in range(30)] + \
+            [_ob_to("GNV", 397 + i * 16, 320, 1, 7 + i * 4) for i in range(3)]
+_exp = app.representative_outbounds(_gnv_pool, 10)
+check("the expansion picker prices returns for EVERY served airport",
+      any(f.legs[-1].arrival_airport.name == "GNV" for f in _exp),
+      f"{sum(1 for f in _exp if f.legs[-1].arrival_airport.name == 'GNV')} GNV of {len(_exp)}")
+
+_gnv_rows = [{"legs": [{"from": "JFK", "to": f.legs[-1].arrival_airport.name}],
+              "price": f.price, "from_total": f.price, "duration": f.duration,
+              "stops": f.stops, "warnings": []} for f in _gnv_pool]
+_kept = app.rescue_airports(_gnv_rows[:24], _gnv_rows, dest_of=app._dest_of_row)
+check("a value cut can no longer erase an airport Google served",
+      any(app._dest_of_row(r) == "GNV" for r in _kept),
+      f"{len(_kept)} kept")
+check("...and the rescue preserves the ranking it was given",
+      [_gnv_rows.index(r) for r in _kept] == sorted(_gnv_rows.index(r) for r in _kept))
+check("a single-airport search stays untouched (no growth, no reorder)",
+      app.rescue_airports(_gnv_rows[:5], _gnv_rows[:5], dest_of=lambda r: "MCO") == _gnv_rows[:5])
+
+_bd = app.airport_breakdown(_gnv_pool, dest_of=app._dest_of_result, price_of=lambda f: f.price)
+check("the model is told the per-airport truth over the FULL pre-cut set",
+      _bd is not None and "MCO 30 from $215" in _bd and "GNV 3 from $397" in _bd, str(_bd))
+check("one airport in play means no breakdown noise",
+      app.airport_breakdown(_gnv_pool[:30], dest_of=app._dest_of_result,
+                            price_of=lambda f: f.price) is None)
+
+_prompt_ga = app.assistant_system_prompt()
+check("the prompt forbids 'came back with nothing' from a combined search",
+      "combined search" in _prompt_ga and "ONLY destination" in _prompt_ga)
+check("the prompt says to LEAD with the airport the user actually named",
+      "LEAD with that airport" in _prompt_ga)
+check("a constraint-adding follow-up searches now, not after permission",
+      "run the constrained search immediately" in _prompt_ga)
+
+# --------------------------------------------------------------------------
 section("Flexible-date grids  — Changelog: 'round-trip grids priced same-day returns'")
 # --------------------------------------------------------------------------
 # Searched without a duration, Google's date grid prices departing AND flying

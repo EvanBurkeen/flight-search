@@ -521,10 +521,13 @@ General aviation and travel questions are fully in scope even with no search inv
 How to handle requests:
 - Vague is fine. Expand cities to their major airports (NYC -> JFK/LGA/EWR). "mid September" or "cheapest time to go" -> flexible_dates. Loyalty hints -> airline filters. A bare month/day means the nearest FUTURE date — if that month/day has already passed this year, it means next year.
 - Small regional airports (HVN, ISP, ORH, GNV-class fields) often have NO through-ticketed routes to each other. If a search from/to a small airport returns nothing, don't retry the same pair — immediately widen to the nearby majors in the same search (e.g. New Haven -> HVN,BDL,HPN and even LGA/JFK; Gainesville -> GNV,JAX,MCO) and tell the user the drive trade-off for each option you recommend.
+- A multi-airport search returns ONE combined pool, and a hub neighbor's cheap nonstops crowd a small field's pricier connections toward the bottom. The result message carries a per-destination-airport breakdown ("By destination airport: MCO 30 from $215, GNV 4 from $397") computed over everything Google returned: consult it before ANY claim about a specific airport. Never say an airport "came back with nothing" or has no through-ticketed service based on a combined search; if an airport the user named shows zero in the breakdown, run a dedicated search with that airport as the ONLY destination before claiming absence, and say what you found.
+- When the user names a specific airport and the breakdown shows it served, LEAD with that airport's options; the cheaper neighbor is the alternative, framed as dollars saved against drive time added, never the headline over the place they actually asked for.
 - "arrive by / be there by X" is an ARRIVAL constraint (arrival_time), never a departure cap.
 - When the user cares about the arrival DAY ("land on Friday"), set arrival_date and pick departure_date by timezone logic. Rules of thumb, not laws: typical daytime trans-Pacific Asia -> US routings land the same local day, but late-evening departures and long westbound routings (via the Middle East or Europe) land the NEXT day; US -> Asia/Europe overnights land the next day. When candidate routings vary widely, run two searches (departing the arrival day AND the day before, both with the same arrival_date) so no valid routing is missed. When they change or relax the arrival day, immediately re-search with the new dates — do not re-serve the old results or just offer to search.
 - "via / through <hub>" questions: search with via_airports. That filter checks every itinerary Google returns; the plain result list you see is only a top-6 sample, so NEVER assert that a routing, hub, or airline "doesn't exist" from the plain list — and never say you "confirmed" or "checked directly" unless a via_airports search actually ran this conversation. If you haven't checked, say so and offer to.
 - Follow-ups: the cards from earlier turns are STILL on the user's screen. When a turn opens with a bracketed [Results already on this user's screen] block, that block is the record of what they are looking at, numbered as shown. Answer "which was the second one", "how long is that layover", or "book the JetBlue" straight from it rather than searching again. Search afresh the moment the question changes what the record was built from (route, dates, cabin, filters) or needs something it does not contain, and never fill a gap in it by inference. If the conversation has moved on, note that those fares are from the earlier search.
+- A follow-up that ADDS a hard constraint (an airline or alliance, nonstop only, a cabin, a specific airport) is a new search, not a reading-comprehension question: run the constrained search immediately in that same turn instead of describing the ledger's thin slice and asking permission to look properly. Describe-then-ask is only right when the constraint is ambiguous.
 - Comparisons: run one search per option (at most 4 per turn). A self-arranged overnight stopover = one search per leg with the correct date on each. Give each search a summary naming the option ("Option A: Thursday nonstop").
 - Empty first results on busy routes are usually transient: retry the SAME search once before broadening. Once a search succeeds, stop; don't also run overlapping broader variants of a question that's already answered. (Empty searches are hidden from the user's page, so never reference "the empty section above.")
 - Multi-city trips (A -> B, B -> C, C -> A, or open-jaw): use trip_type multi_city with multi_city_segments — Google prices the whole trip together, often cheaper than separate one-ways. But NEVER promise "one ticket", through-checked bags, or missed-connection protection unless every leg is on the same carrier or alliance: mixed-carrier combinations (a result's warning will say so) are often issued as separate tickets even though they are priced together. Quote combined prices as "from $X" since the final price varies by seller. Use separate one-way searches when the user wants to compare against self-booking each leg.
@@ -1743,6 +1746,71 @@ def add_highlights(flights: list[dict]) -> None:
 
 # expansion phase: ship what's priced at the deadline; one grace extension
 # when nothing has landed at all (a cold proxy handshake can eat seconds)
+# --------------------------------------------------------------------------
+# Multi-airport searches: the named airport must survive the neighbors
+#
+# The Gainesville bug (Evan's catch, Aug 2): "NYC to Gainesville" searched
+# [GNV, MCO] together, Google returned GNV service (American via MIA, $397),
+# and every layer of the pipeline then buried it — the expansion picker chose
+# only MCO flights (cheapest/nonstop/fastest are all MCO when the neighbor
+# is a hub), the value-ordered more_outbounds cut dropped the pricier GNV
+# one-stops entirely, and the model, shown 33 MCO rows, told the user GNV
+# "came back with nothing through-ticketed." A dedicated GNV search found
+# the flights instantly. The shipped set must represent the option space —
+# and in a multi-airport search that means EVERY airport with service keeps
+# a seat, and the model is told the per-airport truth outright.
+# --------------------------------------------------------------------------
+def _dest_of_result(f):
+    legs = getattr(f, "legs", None)
+    return getattr(getattr(legs[-1], "arrival_airport", None), "name", None) if legs else None
+
+
+def _dest_of_row(f: dict):
+    legs = f.get("legs") or []
+    return legs[-1]["to"] if legs else None
+
+
+def rescue_airports(kept: list, ranked_all: list, dest_of) -> list:
+    """Re-insert the best-ranked row for any airport the cut erased.
+
+    `ranked_all` is already value-ordered; rescued rows keep that order and
+    the list may grow a few rows past its cap — a cap is a product judgment,
+    an airport silently vanishing is a lie. dest_of may return None to
+    exempt a row's airport from the guarantee.
+    """
+    have = {dest_of(r) for r in kept}
+    rescued = list(kept)
+    kept_ids = {id(r) for r in kept}
+    for r in ranked_all:
+        a = dest_of(r)
+        if a is not None and a not in have and id(r) not in kept_ids:
+            rescued.append(r)
+            have.add(a)
+    if len(rescued) > len(kept):
+        rank = {id(r): i for i, r in enumerate(ranked_all)}
+        rescued.sort(key=lambda r: rank.get(id(r), 1 << 30))
+    return rescued
+
+
+def airport_breakdown(items: list, dest_of, price_of) -> str | None:
+    """'By destination: MCO 30 from $215, GNV 4 from $397' — or None if
+    only one airport is in play. Computed over the FULL pre-cut set, so the
+    model knows the truth even about options that did not ship."""
+    stats: dict = {}
+    for it in items:
+        a = dest_of(it)
+        if not a:
+            continue
+        p = price_of(it)
+        n, best = stats.get(a, (0, None))
+        stats[a] = (n + 1, p if p is not None and (best is None or p < best) else best)
+    if len(stats) < 2:
+        return None
+    parts = [f"{a} {n} from ${best:.0f}" if best is not None else f"{a} {n}"
+             for a, (n, best) in sorted(stats.items(), key=lambda kv: -kv[1][0])]
+    return "By destination airport: " + ", ".join(parts) + "."
+
+
 EXPANSION_BUDGET_S = 8.0
 EXPANSION_GRACE_S = 7.0
 
@@ -1757,8 +1825,11 @@ def representative_outbounds(flights: list, top_n: int) -> list:
     cutting before ranking, one stage earlier.
 
     Keeps, in order: the sort's own top picks (an explicit "cheapest" stays
-    obeyed), nonstops, the fastest, then one flight from any departure
-    bucket (before 6, 6-12, 12-18, after 18) still unrepresented.
+    obeyed), each destination airport's cheapest (the Gainesville bug: a
+    hub neighbor's nonstops otherwise claim every slot and the named field
+    never gets a single return priced), nonstops, the fastest, then one
+    flight from any departure bucket (before 6, 6-12, 12-18, after 18)
+    still unrepresented.
     """
     if len(flights) <= top_n:
         return list(flights)
@@ -1772,6 +1843,12 @@ def representative_outbounds(flights: list, top_n: int) -> list:
 
     for f in flights[: max(3, top_n // 3)]:
         add(f)
+    airports_covered = {_dest_of_result(f) for f in chosen}
+    for f in flights:  # each served airport's best-ranked outbound gets a seat
+        a = _dest_of_result(f)
+        if a not in airports_covered:
+            add(f)
+            airports_covered.add(a)
     for f in flights:  # nonstops, cheapest first; leave 2 slots for the rest
         if len(chosen) >= top_n - 2:
             break
@@ -1963,17 +2040,20 @@ def from_priced_only_payload(spec: dict, origins: list, destinations: list,
         x = serialize_flight(f, spec.get("cabin"), ret_date=spec.get("return_date"))
         x["from_total"] = f.price
         extras.append(x)
-    extras = order_by_value(
+    extras_ranked = order_by_value(
         extras,
         price_of=lambda x: x.get("from_total"),
         duration_of=lambda x: x.get("duration"),
         stops_of=lambda x: x.get("stops") or 0,
         warnings_of=lambda x: x.get("warnings"),
         requested_sort=spec.get("sort"),
-    )[:30]
+    )
+    extras = rescue_airports(extras_ranked[:30], extras_ranked, dest_of=_dest_of_row)
     if not extras:
         return None
     ns = sum(1 for x in extras if (x.get("stops") or 0) == 0)
+    bd = airport_breakdown(extras_ranked, dest_of=_dest_of_row,
+                           price_of=lambda x: x.get("from_total"))
     return {
         "type": "itineraries",
         "message": (f"Google listed {len(extras)} outbounds"
@@ -1982,7 +2062,8 @@ def from_priced_only_payload(spec: dict, origins: list, destinations: list,
                       "return pairings on this pass. The user IS seeing every outbound and can "
                       "tap any of them to price its returns on demand. Do NOT claim flights are "
                       "unavailable and do NOT say nothing came back; summarize the from-prices, "
-                      "say returns price on tap, and offer a re-run for full pairings."),
+                      "say returns price on tap, and offer a re-run for full pairings."
+                    + (f" {bd}" if bd else "")),
         "results": [],
         "more_outbounds": extras,
         "spec_echo": _rt_spec_echo(spec, origins, destinations),
@@ -2158,14 +2239,24 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
             x = serialize_flight(f, spec.get("cabin"), ret_date=spec.get("return_date"))
             x["from_total"] = f.price
             extras.append(x)
-        extras = order_by_value(
+        extras_ranked = order_by_value(
             extras,
             price_of=lambda x: x.get("from_total"),
             duration_of=lambda x: x.get("duration"),
             stops_of=lambda x: x.get("stops") or 0,
             warnings_of=lambda x: x.get("warnings"),
             requested_sort=spec.get("sort"),
-        )[:24]
+        )
+        # the Gainesville bug lived here: a hub neighbor's cheap nonstops
+        # filled all 24 slots and the named field's pricier connections
+        # vanished — count what the PRICED groups already cover, then make
+        # sure the cut keeps a seat for every other airport Google served
+        covered_by_groups = [{"legs": it["outbound"].get("legs") or []} for it in itineraries]
+        extras = rescue_airports(
+            extras_ranked[:24], extras_ranked,
+            dest_of=lambda x: (_dest_of_row(x)
+                               if _dest_of_row(x) not in {_dest_of_row(g) for g in covered_by_groups}
+                               else None))
 
         pairings = sum(len(it["return_options"]) for it in itineraries)
         message = (f"Found {len(itineraries)} outbounds with returns priced "
@@ -2176,6 +2267,13 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
                         + (f", including {ns} nonstop{'s' if ns != 1 else ''}" if ns else "")
                         + ". Their returns were NOT priced this turn, so never claim those options "
                           "do not exist; to price one, re-search with departure_time narrowed to its hour.")
+        # per-airport truth over EVERYTHING Google returned, cut or not —
+        # "GNV came back with nothing" must never again be an artifact
+        bd = airport_breakdown(
+            (getattr(searcher, "last_outbounds", None) or []),
+            dest_of=_dest_of_result, price_of=lambda f: f.price)
+        if bd:
+            message += " " + bd + " (from-prices; all still bookable via the board)"
         if arrival_note:
             message = f"{arrival_note}\n{message}"
         return {
@@ -2216,12 +2314,16 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
     total_found, total_nonstop = len(flights), sum(1 for f in flights if f["stops"] == 0)
     cheapest_nonstop = min((f["price"] for f in flights
                             if f["stops"] == 0 and f.get("price") is not None), default=None)
+    ranked_all = flights
     flights = retain_representative(
         flights, SHIP_LIMIT,
         price_of=lambda f: f.get("price"),
         duration_of=lambda f: f.get("duration"),
         stops_of=lambda f: f.get("stops") or 0,
     )
+    # a hub neighbor must not erase the named field from the shipped set
+    # (the Gainesville bug, in its one-way form)
+    flights = rescue_airports(flights, ranked_all, dest_of=_dest_of_row)
     # state the true totals: the shipped list is a sample, and without this
     # Claude reads "everything else needs a connection" off a truncated set
     message = f"Found {total_found} options"
@@ -2231,6 +2333,9 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
                     + (f", cheapest nonstop ${cheapest_nonstop:.0f}." if cheapest_nonstop else "."))
     else:
         message += " None are nonstop."
+    bd = airport_breakdown(ranked_all, dest_of=_dest_of_row, price_of=lambda f: f.get("price"))
+    if bd:
+        message += " " + bd
     if arrival_note:
         message = f"{arrival_note}\n{message}"
     return {
