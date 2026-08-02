@@ -47,8 +47,11 @@
       --heat2: rgba(28, 26, 21, 0.04);
       --heat3: rgba(177, 71, 31, 0.10);
       --heat4: rgba(177, 71, 31, 0.20);
-      --card-shadow: 0 1px 2px rgba(90, 70, 40, 0.05), 0 8px 22px -12px rgba(90, 70, 40, 0.28);
-      --card-shadow-hover: 0 2px 4px rgba(90, 70, 40, 0.06), 0 14px 30px -12px rgba(90, 70, 40, 0.35);
+      /* crisper than the old wash: a broadsheet sits flat, cards should only
+         just clear the paper */
+      --card-shadow: 0 1px 2px rgba(90, 70, 40, 0.06), 0 6px 14px -10px rgba(90, 70, 40, 0.22);
+      --card-shadow-hover: 0 1px 3px rgba(90, 70, 40, 0.08), 0 10px 22px -10px rgba(90, 70, 40, 0.30);
+      --rule-heavy: #1c1a15;  /* the masthead's confident rule */
       --serif: Fraunces, Georgia, "Times New Roman", serif;
       /* one definition of the paper, shared by the page and the fixed compose
          bar: when the bar had a flat fill it read as a different shade of
@@ -59,6 +62,15 @@
         radial-gradient(circle at 85% -10%, rgba(177, 71, 31, 0.08), transparent 45%);
     }
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    /* every number that can be compared sits on the same grid */
+    .card-price, .compact-price, .card-price-note, .route-time, .compact-times,
+    .rt-price, .rt-times, .rt-row-sub, .date-cell .p, .ret-opt .t, .ret-opt .p,
+    .price-ctx, .cal-price, .fcount, .compact-leg {
+      font-variant-numeric: tabular-nums;
+    }
+    ::selection { background: rgba(138, 109, 47, 0.28); }
+    html.dark ::selection { background: rgba(201, 165, 90, 0.35); }
+    :focus-visible { outline: 2px solid var(--brass); outline-offset: 2px; }
     body {
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       background-color: var(--bg);
@@ -78,12 +90,14 @@
       margin-bottom: 2rem; display: flex; justify-content: space-between; align-items: flex-end;
       gap: 1rem; flex-wrap: wrap; padding-bottom: 1.1rem; position: relative;
     }
+    /* broadsheet masthead: one confident rule under a hairline — weight
+       above, air below */
     .header::after {
       content: ""; position: absolute; left: 0; right: 0; bottom: 0;
-      border-bottom: 1px solid var(--rule-strong);
+      border-bottom: 3px solid var(--rule-heavy);
     }
     .header::before {
-      content: ""; position: absolute; left: 0; right: 0; bottom: 3px;
+      content: ""; position: absolute; left: 0; right: 0; bottom: 5px;
       border-bottom: 1px solid var(--rule-soft);
     }
     .masthead { display: flex; align-items: center; gap: 0.9rem; }
@@ -194,9 +208,9 @@
     .msg-user {
       align-self: flex-end; max-width: 85%;
       background: var(--green); color: var(--bg);
-      padding: 0.6rem 1rem; border-radius: 14px 14px 3px 14px;
+      padding: 0.6rem 1rem; border-radius: 10px 10px 2px 10px;
       font-size: 0.875rem; line-height: 1.55; white-space: pre-wrap;
-      box-shadow: 0 1px 4px rgba(28,26,21,0.12);
+      box-shadow: 0 1px 3px rgba(28,26,21,0.12);
     }
 
     .msg-assistant { display: flex; flex-direction: column; gap: 1rem; }
@@ -205,7 +219,12 @@
       border-left: 2px solid var(--accent); padding-left: 1rem;
     }
 
-    .section-head { display: flex; justify-content: space-between; align-items: center; gap: 0.75rem; margin-bottom: 0.4rem; }
+    /* sections open on a rule, the way a broadsheet turns to a new story */
+    .section-head {
+      display: flex; justify-content: space-between; align-items: center; gap: 0.75rem;
+      margin-bottom: 0.4rem; margin-top: 0.5rem;
+      border-top: 1px solid var(--rule-soft); padding-top: 0.85rem;
+    }
     .section-label {
       font-family: var(--serif);
       font-size: 1.05rem; letter-spacing: 0;
@@ -263,7 +282,7 @@
 
     .flight-card {
       border: 1px solid var(--line); background: var(--panel);
-      border-radius: 10px; padding: 1rem 1.1rem;
+      border-radius: 8px; padding: 1rem 1.1rem;
       box-shadow: var(--card-shadow);
       transition: border-color 0.18s, box-shadow 0.18s, transform 0.18s;
     }
@@ -282,7 +301,7 @@
     }
     .card-airline { font-size: 0.875rem; font-weight: 600; }
     .card-code { font-size: 0.72rem; opacity: 0.60; }
-    .card-price { font-family: var(--serif); font-size: 1.5rem; font-weight: 600; text-align: right; color: var(--accent-dark); }
+    .card-price { font-family: var(--serif); font-size: 1.65rem; font-weight: 600; letter-spacing: -0.01em; line-height: 1.1; text-align: right; color: var(--accent-dark); }
     .card-price-note { font-size: 0.68rem; opacity: 0.60; text-align: right; }
 
     .route { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem; }
@@ -632,6 +651,7 @@
       --line: rgba(236, 228, 203, 0.14);
       --line-strong: rgba(236, 228, 203, 0.32);
       --rule-strong: rgba(236, 228, 203, 0.30);
+      --rule-heavy: rgba(236, 228, 203, 0.85);
       --rule-soft: rgba(236, 228, 203, 0.14);
       --panel: #242921;
       --good: #a8d29a;

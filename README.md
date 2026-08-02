@@ -340,7 +340,8 @@ date-range + price + barcode stub, flights.evanburkeen.com footer — with copy
 image / copy text incl. booking link / save / native share) · degraded round
 trips render a notice + tap-to-price board instead of a blank section ·
 concierge styling (Fraunces serif, brass fittings, boarding-pass dividers,
-greeting).
+greeting; August 2 broadsheet pass: heavy masthead rule, per-section
+hairlines, tabular numerals on all figures, crisper shadows).
 
 ## Local development
 
@@ -402,6 +403,17 @@ same SSE events as the real loop, so streaming is fully exercisable locally.
   lakes; run it, then bump the `?v=N` cache-buster on the script tag in index.html).
 
 ## Changelog
+
+**August 2, 2026 (editorial polish: the broadsheet pass)**
+Evan asked for an aesthetic once-over in the direction of the world's best
+editorial sites (The Economist, minus the red) without losing the concierge
+identity. Discipline, not redesign: a 3px masthead rule under a hairline
+(cream-on-espresso in dark mode), a hairline rule opening every results
+section the way a broadsheet turns to a new story, tabular numerals on
+every price/time/date so columns of figures align, crisper card shadows
+(cards should only just clear the paper), unified 8px card radii, a larger
+serif card price, brass ::selection and :focus-visible rings, and a
+sharper user-message bubble. Verified in both themes locally before push.
 
 **August 2, 2026 (the Gainesville bug: a hub neighbor erased the named airport)**
 Evan's transcript: "NYC to Gainesville" produced 33 outbounds, every one to
