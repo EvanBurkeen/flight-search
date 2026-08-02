@@ -13,6 +13,7 @@ the check's docstring and the Changelog entry it names before "fixing" the test.
 from __future__ import annotations
 
 import base64
+import json
 import os
 import sys
 import threading
@@ -701,6 +702,118 @@ check("the reply sits in a panel that answers the user's bubble, in sans",
       "border-radius: 10px 10px 10px 2px" in _fe_now
       and "width: fit-content" in _fe_now
       and "font-family: var(--serif); font-optical-sizing" not in _fe_now)
+
+# --------------------------------------------------------------------------
+section("Inventory completeness  — Changelog: 'the missing carrier'")
+# --------------------------------------------------------------------------
+# Beijing->Chengdu, Aug 2: the app showed a wall of China Southern at $421
+# while Google's own UI led with China Eastern at $314 and a cheapest tab of
+# $242 — an entire carrier lost. Two layers now defend against ANY cause of
+# "flights that should exist don't appear":
+#   1. wrb chunks are UNIONED by itinerary identity, not chosen-from.
+#   2. the date grid (an independent endpoint pricing the searched date)
+#      vets the list's cheapest fare; a provably short list is retried as a
+#      new identity and, failing that, honestly labeled.
+def _wrow(airline, number, price):
+    # minimal raw row: row[0] = detail, detail[2] = legs (the identity),
+    # detail[9] = duration; row[1] carries our probe's price marker
+    detail = [None, None, [[airline, number, "2027-01-06T09:00"]], None, None,
+              None, None, None, None, 175]
+    return [detail, price]
+
+# merge_wrb_chunks mutates the richest chunk (fine in production: chunks are
+# parsed fresh per response) — so every assertion builds fresh fixtures
+_ck_cs = lambda: [None, None, [[_wrow("CS", "8101", 421), _wrow("CS", "8102", 421)]], None]
+_ck_ce = lambda: [None, None, [[_wrow("CE", "5301", 314)]], None]
+_merged = app.merge_wrb_chunks([_ck_cs(), _ck_ce()])
+check("carriers split across chunks are UNIONED, not chosen between",
+      len(_merged[2][0]) == 3,
+      f"{len(_merged[2][0])} rows (richest-chunk would keep 2)")
+_m2 = app.merge_wrb_chunks([_ck_cs(), [None, None, [[_wrow("CS", "8101", 399)]], None]])
+check("a re-rendered itinerary dedupes to one row, the later snapshot's price",
+      len(_m2[2][0]) == 2 and any(r[1] == 399 for r in _m2[2][0])
+      and not any(r[1] == 421 and r[0][2][0][1] == "8101" for r in _m2[2][0]))
+_m3 = app.merge_wrb_chunks(
+    [[None, None, [[_wrow("XW", "1", 200)]], [[_wrow("XW", "2", 210)]]], _ck_ce()])
+check("bucket-3 rows merge without duplicating into fli's concat",
+      len(_m3[2][0]) == 3 and _m3[3][0] == [])
+_solo = _ck_cs()
+check("a single chunk passes through untouched",
+      app.merge_wrb_chunks([_solo]) is _solo and len(_solo[2][0]) == 2)
+check("no chunks yields None, not a crash", app.merge_wrb_chunks([]) is None)
+
+_sent_handle = {"dep": "2027-01-06", "nights": None, "future": None,
+                "grid": [{"date": "2027-01-06", "price": 242.0},
+                         {"date": "2027-01-07", "price": 250.0}]}
+_short = {"type": "flights", "message": "m",
+          "results": [{"price": 421.0, "legs": [{"from": "PKX", "to": "TFU"}]}]}
+_reruns: list = []
+def _rerun_cheap(spec):
+    _reruns.append(1)
+    return {"type": "flights", "message": "m",
+            "results": [{"price": 314.0, "legs": [{"from": "PKX", "to": "CTU"}]}]}
+_out = app.verify_completeness({"departure_date": "2027-01-06"}, dict(_short),
+                               _sent_handle, rerun=_rerun_cheap)
+check("a provably short list is retried and the honest-cheaper set wins",
+      len(_reruns) == 1 and app.payload_anchor_price(_out) == 314.0)
+check("...and a STILL-short list is labeled so the model must disclose",
+      "COMPLETENESS WARNING" in _out["message"]
+      and _out["completeness_warning"]["grid_from"] == 242.0)
+_reruns.clear()
+_ok = {"type": "flights", "message": "m",
+       "results": [{"price": 250.0, "legs": [{"from": "PKX", "to": "TFU"}]}]}
+_out2 = app.verify_completeness({"departure_date": "2027-01-06"}, dict(_ok),
+                                _sent_handle, rerun=_rerun_cheap)
+check("a list consistent with the grid is never retried or labeled",
+      len(_reruns) == 0 and "completeness_warning" not in _out2)
+_reruns.clear()
+def _rerun_fixed(spec):
+    _reruns.append(1)
+    return {"type": "flights", "message": "m",
+            "results": [{"price": 249.0, "legs": [{"from": "PKX", "to": "CTU"}]}]}
+_out3 = app.verify_completeness({"departure_date": "2027-01-06"}, dict(_short),
+                                _sent_handle, rerun=_rerun_fixed)
+check("a retry that recovers the inventory ships clean, no warning",
+      app.payload_anchor_price(_out3) == 249.0 and "completeness_warning" not in _out3)
+check("no grid evidence means no sentinel (never a retry on a hunch)",
+      app.verify_completeness({"departure_date": "2027-01-06"}, dict(_short),
+                              {"dep": "2027-01-06", "grid": [], "future": None},
+                              rerun=_rerun_cheap) == _short and len(_reruns) == 1)
+
+# the actual Beijing root cause: Google served China Eastern's SCHEDULE but
+# withheld its FARES, and every layer counted only priced rows — the reply
+# called $421 "the going rate" with the cheaper carrier sitting unpriced in
+# the same payload. Unpriced inventory is inventory.
+check("unpriced rows rank after priced ones by design, never crash",
+      app.trip_cost(None, 175, 0, [], 175) == float("inf"))
+_mixed = ([{"airline": "China Southern", "price": 421.0, "duration": 175, "stops": 0,
+            "warnings": [], "legs": [{"from": "PKX", "to": "TFU",
+                                      "departure": "2027-01-06T09:00:00",
+                                      "arrival": "2027-01-06T11:55:00"}]}] * 3
+          + [{"airline": "China Eastern", "price": None, "duration": 175, "stops": 0,
+              "warnings": [], "legs": [{"from": "PKX", "to": "CTU",
+                                        "departure": "2027-01-06T07:15:00",
+                                        "arrival": "2027-01-06T10:10:00"}]}] * 2)
+_cn = app.carrier_note(_mixed)
+check("the message names fare-withheld carriers as SCHEDULED BUT UNPRICED",
+      _cn is not None and "SCHEDULED BUT UNPRICED: China Eastern 2" in _cn
+      and "China Southern 3 from $421" in _cn)
+check("...and forbids calling the priced floor the going rate",
+      "going rate" in _cn and "Book link" in _cn)
+check("an all-priced list carries no unpriced note", app.carrier_note(_mixed[:3]) is None)
+_cp = json.loads(app.compact_for_model({"type": "flights", "message": "m",
+                                        "results": _mixed * 2}))
+check("the model is told about unpriced carriers even outside the top-6 sample",
+      _cp.get("unpriced_carriers", {}).get("counts", {}).get("China Eastern") == 4)
+_cut = app.rescue_airports(_mixed[:3], _mixed, dest_of=lambda f: f.get("airline"))
+check("the ship cut cannot erase a fare-withheld carrier",
+      any(f.get("price") is None for f in _cut))
+_prompt_up = app.assistant_system_prompt()
+check("the prompt teaches unpriced inventory (withheld from the session, not the user)",
+      "not from the user" in _prompt_up and "unpriced carriers exist" in _prompt_up)
+_fe_up = open(os.path.join(ROOT, "public", "index.html")).read()
+check("an unpriced card explains itself instead of showing a bare dash",
+      "fare shows on Google" in _fe_up and "fare on Google" in _fe_up)
 
 # --------------------------------------------------------------------------
 section("Latency overlaps  — Changelog: 'the sequential turn'")

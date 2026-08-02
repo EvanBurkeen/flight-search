@@ -295,23 +295,65 @@ import fli.search.flights as _fli_flights
 from fli.search._wire import iter_wrb_chunks as _iter_wrb_chunks
 
 
-def _parse_richest_wrb_payload(body):
-    best, best_rows = None, -1
-    for inner in _iter_wrb_chunks(body):
-        try:
-            rows = sum(
-                len(inner[i][0])
-                for i in (2, 3)
-                if isinstance(inner[i], list) and inner[i] and isinstance(inner[i][0], list)
-            )
-        except (IndexError, TypeError):
-            rows = 0
-        if rows > best_rows:
-            best, best_rows = inner, rows
+def _chunk_rows(inner, i):
+    try:
+        v = inner[i]
+        if isinstance(v, list) and v and isinstance(v[0], list):
+            return v[0]
+    except (IndexError, TypeError):
+        pass
+    return []
+
+
+def _row_identity(row):
+    """An itinerary's identity is its legs (row[0][2]: flights, numbers,
+    times) — price and booking tokens live elsewhere and vary by snapshot."""
+    try:
+        return json.dumps(row[0][2], default=str)
+    except (IndexError, TypeError):
+        return json.dumps(row, default=str)
+
+
+def merge_wrb_chunks(chunks: list):
+    """The UNION of every chunk's flight rows, not the best single chunk.
+
+    August 2, Beijing->Chengdu: the app showed a wall of China Southern at
+    $421 while Google's own UI led with China Eastern at $314 and a cheapest
+    tab of $242 — an entire carrier missing. The July 24 patch picked the
+    chunk with the MOST rows, which is only correct when chunks are
+    cumulative re-renders; when Google streams per-slice or delta chunks,
+    the biggest one can still be one carrier's inventory. Merging is the
+    strict generalization: cumulative chunks dedupe to the same answer, and
+    split chunks stop losing airlines. Later chunks win on identity clashes
+    (their prices are the fresher snapshot); metadata (session id etc.)
+    comes from the row-richest chunk, exactly as before.
+    """
+    if not chunks:
+        return None
+    best = max(chunks, key=lambda c: len(_chunk_rows(c, 2)) + len(_chunk_rows(c, 3)))
+    if len(chunks) > 1:
+        merged: dict = {}
+        for c in chunks:  # chronological: a later re-render overwrites
+            for i in (2, 3):
+                for row in _chunk_rows(c, i):
+                    merged[_row_identity(row)] = row
+        # the union always wins — even at equal counts a later chunk carries
+        # fresher prices for the same itineraries
+        if merged:
+            try:
+                best[2][0] = list(merged.values())
+                if isinstance(best[3], list) and best[3] and isinstance(best[3][0], list):
+                    best[3][0] = []
+            except (IndexError, TypeError):
+                pass  # unexpected shape: fall back to the richest chunk as-is
     return best
 
 
-_fli_flights.parse_first_wrb_payload = _parse_richest_wrb_payload
+def _parse_merged_wrb_payload(body):
+    return merge_wrb_chunks(list(_iter_wrb_chunks(body)))
+
+
+_fli_flights.parse_first_wrb_payload = _parse_merged_wrb_payload
 
 
 # The old warm_google_session() page-load is gone: the July 24 study found
@@ -559,6 +601,7 @@ Answering:
 - Voice: you are a seasoned travel concierge. Courteous, composed, precise, warm but never gushing. Write in full sentences, the way a fine hotel's head concierge would speak. NEVER use em dashes or en dashes anywhere in your replies; use commas, periods, or a colon instead.
 - The user sees result cards for every search you run, so don't recite every flight. Lead with your recommendation and the key numbers (totals for multi-leg plans, including a note that hotels/ground costs aren't included), then the trade-offs that matter.
 - Results arrive ranked by value, not by fare: the fare plus what its duration and stops actually cost the traveler. Recommend the best-value option rather than reflexively the cheapest, and when the cheapest fare is not your pick, price the difference in plain terms ("$25 more saves you eight hours and a connection"). Flying is tiring; a long layover to save a few dollars is rarely the favour it looks like. If they ask for the cheapest, give them the cheapest without argument.
+- Scheduled-but-unpriced flights (price null, or an "UNPRICED" carrier note) are real inventory whose fares Google withheld from THIS session, not from the user: their Book links show live prices in the user's browser, and the withheld carriers often hold the cheaper fares. Never present the cheapest PRICED fare as the route's going rate while unpriced carriers exist; name those carriers, say roughly when they fly, and tell the user their fares appear on Google via Book.
 - When a result carries price_context, you know where its cheapest fare sits among NEARBY DATES, and one clause of that belongs in the recommendation ("$239 is among the cheapest dates in this window, and the 14th is only $18 less"). It compares dates, not history: never call a fare good "for this route" in general, never call it a deal in the abstract, and never predict which way prices will move. With no price_context, say nothing at all about whether the fare is good.
 - Timestamps carry their own dates: read a flight's arrival DAY from the arrival timestamp itself, never by adding "a day or so" to the departure. lands_plus_days states how many calendar days after departure a flight lands (+1, +2; a dateline crossing can be -1) and matches the +N badge on the user's card. For any "arrive by / land on <day>" question, check each candidate's arrival timestamp against the target day before naming it, and when the arrival date differs from departure, say it outright ("lands the morning of Jan 4, two days after the Jan 2 departure"). If no on-screen option satisfies the day, say so and search rather than bending a near miss.
 - Mention real caveats from the data: nothing arrives before X, prices are one-way vs round-trip totals, self-transfer risks, tight or overnight layovers.
@@ -628,6 +671,19 @@ def compact_for_model(payload: dict) -> str:
     results = payload.get("results") or []
     rows = [_leg_summary(f) for f in results[:6]]
     out = {"kind": "flights", "note": payload.get("message"), "options": rows}
+    unpriced = {}
+    for f in results:
+        if f.get("price") is None:
+            unpriced[f.get("airline") or "?"] = unpriced.get(f.get("airline") or "?", 0) + 1
+    if unpriced:
+        # the Beijing lesson: a fare-withheld carrier must reach the model as
+        # inventory, or the priced floor gets declared "the going rate"
+        out["unpriced_carriers"] = {
+            "counts": unpriced,
+            "note": ("Scheduled flights whose fares Google withheld from this "
+                     "session; the user's Book link shows real prices. Do not "
+                     "call the cheapest priced fare the going rate."),
+        }
     if len(results) > 6:
         out["sample_note"] = (
             f"Showing 6 of {len(results)}, ordered by best value (fare plus the cost of the "
@@ -1955,6 +2011,40 @@ def rescue_airports(kept: list, ranked_all: list, dest_of) -> list:
     return rescued
 
 
+def carrier_note(flights: list) -> str | None:
+    """The by-airline truth, including the fares Google withheld.
+
+    Beijing->Chengdu, Aug 2, the actual root cause: Google served this
+    session China Eastern's SCHEDULE (12 flights) but not its fares, and
+    every layer counted only priced rows — so the reply called $421 'the
+    going rate across the board' while the cheaper carrier sat unpriced in
+    the same payload. Unpriced inventory is inventory: the user's own
+    browser WILL price it through the Book link. Say what is known."""
+    priced: dict = {}
+    unpriced: dict = {}
+    for f in flights:
+        a = f.get("airline") or "?"
+        if f.get("price") is not None:
+            n, best = priced.get(a, (0, None))
+            priced[a] = (n + 1, f["price"] if best is None or f["price"] < best else best)
+        else:
+            unpriced[a] = unpriced.get(a, 0) + 1
+    if not unpriced:
+        return None
+    parts = [f"{a} {n} from ${best:.0f}" for a, (n, best) in
+             sorted(priced.items(), key=lambda kv: kv[1][1] or 1e9)]
+    up = [f"{a} {n}" for a, n in sorted(unpriced.items(), key=lambda kv: -kv[1])]
+    return (
+        ("By airline: " + ", ".join(parts) + ". " if parts else "")
+        + "SCHEDULED BUT UNPRICED: " + ", ".join(up)
+        + " — Google withheld these carriers' fares from this session, NOT from "
+          "the user: each flight's Book link will show its real price in their "
+          "browser, and withheld carriers often hold the cheaper fares. Never "
+          "present the cheapest priced fare as the route's going rate; name the "
+          "unpriced carriers and say their fares appear on Google."
+    )
+
+
 def airport_breakdown(items: list, dest_of, price_of) -> str | None:
     """'By destination: MCO 30 from $215, GNV 4 from $397' — or None if
     only one airport is in play. Computed over the FULL pre-cut set, so the
@@ -2487,6 +2577,11 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
     # a hub neighbor must not erase the named field from the shipped set
     # (the Gainesville bug, in its one-way form)
     flights = rescue_airports(flights, ranked_all, dest_of=_dest_of_row)
+    # ...and a CARRIER must not vanish either: unpriced rows rank last by
+    # design (trip_cost None -> inf), so the cut would drop every trace of a
+    # fare-withheld airline. rescue_airports is generic over its key.
+    flights = rescue_airports(flights, ranked_all,
+                              dest_of=lambda f: f.get("airline"))
     # state the true totals: the shipped list is a sample, and without this
     # Claude reads "everything else needs a connection" off a truncated set
     message = f"Found {total_found} options"
@@ -2499,6 +2594,9 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
     bd = airport_breakdown(ranked_all, dest_of=_dest_of_row, price_of=lambda f: f.get("price"))
     if bd:
         message += " " + bd
+    cn = carrier_note(ranked_all)
+    if cn:
+        message += " " + cn
     if arrival_note:
         message = f"{arrival_note}\n{message}"
     return {
@@ -3007,6 +3105,73 @@ def price_verdict(anchor, grid: list, window: tuple, nights: int | None,
     }
 
 
+COMPLETENESS_SLACK = 1.15  # grid staleness tolerance before a list is "short"
+
+
+def grid_price_for(handle, grid) -> float | None:
+    """The grid's own price for THE SEARCHED DATE — same route, same date,
+    same stay length, from an independent Google endpoint."""
+    dep = (handle or {}).get("dep")
+    if not dep or not grid:
+        return None
+    prices = [g["price"] for g in grid if g.get("date") == dep and g.get("price")]
+    return min(prices) if prices else None
+
+
+def verify_completeness(spec: dict, payload: dict, handle, rerun=None) -> dict:
+    """Catch ANY 'flights that should exist don't appear' failure, whatever
+    the cause. August 2, Beijing->Chengdu: the list said $421 across the
+    board while Google's own UI had China Eastern at $314 and a cheapest
+    tab of $242 — an entire carrier lost somewhere between Google and the
+    cards. Chunk parsing was one cause; a degraded session, a parse drift,
+    or a throttled response would look identical. The date grid we already
+    fetch beside every fixed-date search prices the searched date itself
+    from a separate endpoint, so: cheapest-listed far above the grid's
+    number for the same date = the list is PROVABLY short. One retry as a
+    genuinely new identity (degradation is session-linked doctrine), keep
+    whichever set is honest-cheapest, and if it is STILL short, the model
+    is told to disclose it rather than present the floor of a partial list
+    as the going rate.
+    """
+    if not isinstance(payload, dict) or payload.get("type") not in ("flights", "itineraries"):
+        return payload
+    if not (payload.get("results") or payload.get("more_outbounds")):
+        return payload
+    try:
+        grid = (handle or {}).get("grid")
+        fut = (handle or {}).get("future")
+        if grid is None and fut is not None:
+            grid = fut.result(timeout=2.5)
+    except Exception:
+        return payload
+    ref = grid_price_for(handle, grid)
+    anchor = payload_anchor_price(payload)
+    if not ref or not anchor or anchor <= ref * COMPLETENESS_SLACK + 5:
+        return payload
+
+    print(f"[completeness] cheapest listed ${anchor:.0f} vs grid ${ref:.0f} "
+          f"for {handle.get('dep')} — retrying as a new identity")
+    retire_identity()
+    try:
+        second = (rerun or execute_spec)(spec)
+    except Exception:
+        second = None
+    a2 = payload_anchor_price(second) if isinstance(second, dict) else None
+    if a2 is not None and a2 < anchor:
+        payload, anchor = second, a2
+    if anchor > ref * COMPLETENESS_SLACK + 5:
+        payload["message"] = (payload.get("message") or "") + (
+            f" COMPLETENESS WARNING: Google's own date calendar prices this exact date "
+            f"from ${ref:.0f}, but the cheapest fare in this list is ${anchor:.0f} — "
+            "cheaper flights (possibly whole airlines) are likely MISSING from this "
+            "list right now. Tell the user plainly that options around "
+            f"${ref:.0f} likely exist but did not load, suggest re-running shortly, "
+            "and do NOT present the cheapest listed fare as the going rate."
+        )
+        payload["completeness_warning"] = {"grid_from": ref, "listed_from": anchor}
+    return payload
+
+
 def attach_price_context(payload: dict, handle, deadline: float) -> None:
     """Annotate the payload if the baseline landed in time. Never raises."""
     if not isinstance(payload, dict):
@@ -3153,6 +3318,10 @@ def cached_execute_spec(spec: dict) -> dict:
 
     try:
         payload = execute_spec(spec)
+        # the sentinel runs before the cache write, so a provably-short list
+        # is retried (and at worst honestly labeled) rather than served to
+        # every repeat inside the TTL
+        payload = verify_completeness(spec, payload, ctx)
         if payload.get("results") or payload.get("dates"):
             with _cache_lock:
                 _search_cache[key] = (time.monotonic() + SEARCH_CACHE_TTL, payload)

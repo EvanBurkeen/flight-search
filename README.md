@@ -87,9 +87,25 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
 
 **Google's data layer**
 - **Results arrive as PROGRESSIVE chunks inside one HTTP response.** `GetShoppingResults`
-  returns several `wrb.fr` chunks, each a fuller snapshot (this is why the real UI
-  "fills in"). `fli` parses only the first; we patch it to take the richest.
-  Symptom if this regresses: whole carriers missing on thin routes.
+  returns several `wrb.fr` chunks (this is why the real UI "fills in").
+  `fli` parses only the first; we patch it to take the UNION of every
+  chunk's rows, deduped by itinerary (Aug 2: picking the single richest
+  chunk was only right when chunks are cumulative re-renders — per-slice or
+  delta chunks could still lose whole carriers). Symptom if this regresses:
+  whole carriers missing on thin routes.
+- **Google withholds some carriers' FARES from automated sessions while
+  serving their schedules.** Beijing->Chengdu: our session got China
+  Eastern's 25 flights with price null while Evan's browser showed them at
+  $314 — and every layer counted only priced rows, so the reply called the
+  $421 priced floor "the going rate." Unpriced inventory is inventory: rank
+  it last, ship it, disclose it (carrier_note + unpriced_carriers), and the
+  Book deep link prices it in the user's own browser. POS/language changes
+  (gl=CN, zh-CN) do NOT unlock the fares; a fresh identity does not either.
+- **The date grid can be degraded in the same way as the list** (one row
+  where 43 belong), so the completeness sentinel (list cheapest vs the
+  grid's price for the searched date, retry as a new identity, disclose if
+  still short) catches session flakiness and parse loss, but NOT a
+  uniformly thin session — the unpriced-carrier disclosure covers that.
 - **Refusals are SESSION-STICKY soft blocks, not random flakiness.** HTTP 200 with a
   ~94-byte body (gRPC code 13). A flagged session failed 64/64 consecutive requests
   while brand-new sessions in the same seconds passed 20/32. Retrying on the same
@@ -417,6 +433,31 @@ same SSE events as the real loop, so streaming is fully exercisable locally.
   lakes; run it, then bump the `?v=N` cache-buster on the script tag in index.html).
 
 ## Changelog
+
+**August 2, 2026 (the missing carrier: unpriced inventory is inventory)**
+Evan's screenshots: the app showed Beijing->Chengdu as "$421 across the
+board, all China Southern" while Google's own UI led with China Eastern at
+$314 and a cheapest tab of $242. Diagnosis ran three layers deep, each
+with its own generalizable fix:
+- **Chunk union** (`merge_wrb_chunks`): the richest-single-chunk patch
+  from July 24 is now the union of every chunk's rows deduped by itinerary
+  identity, later snapshots winning on price — immune to per-slice and
+  delta chunk styles, identical on cumulative ones.
+- **Completeness sentinel** (`verify_completeness`): the date grid prices
+  the searched date from an independent endpoint; a list whose cheapest
+  fare sits far above it is provably short -> one retry as a fresh
+  identity, then an honest COMPLETENESS WARNING the model must relay.
+- **The actual root cause — fare withholding**: Google served this session
+  China Eastern's full schedule with price null (the browser gets $314),
+  and every layer counted only priced rows. Now: unpriced rows rank last
+  but ship, the cut cannot erase a fare-withheld carrier
+  (rescue_airports over the airline key), the message and
+  compact_for_model carry "SCHEDULED BUT UNPRICED" per-carrier counts,
+  the prompt forbids calling the priced floor "the going rate" and says
+  the Book link prices these in the user's browser, and unpriced cards
+  explain themselves instead of showing a bare dash. Verified on the
+  exact failing query: 30 unpriced flights across 5 carriers now ship
+  and disclose. 16 checks added.
 
 **August 2, 2026 (the sequential turn, overlapped)**
 Evan: cut search time as much as possible with zero quality cost. The

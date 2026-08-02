@@ -804,7 +804,7 @@
                       <div class="compact-card">
                         <div class="compact-top">
                           <div class="compact-airline" x-text="f.airline"></div>
-                          <div class="compact-price" x-text="formatPrice(f.price, f.currency)"></div>
+                          <div class="compact-price" x-text="f.price == null ? 'fare on Google' : formatPrice(f.price, f.currency)" :style="f.price == null ? 'font-size:0.72rem;opacity:0.7' : ''"></div>
                         </div>
                         <div class="compact-times" x-text="formatTime(f.legs[0].departure) + ' → ' + formatTime(f.legs[f.legs.length-1].arrival) + arrivalDay(f)"></div>
                         <div class="compact-sub" x-text="f.legs[0].from + '–' + f.legs[f.legs.length-1].to + ' · ' + formatDuration(f.duration) + ' · ' + stopsText(f.stops) + ((f.layovers || []).length ? ' via ' + f.layovers.map(l => l.airport).join(', ') : '')"></div>
@@ -832,8 +832,8 @@
                             </div>
                           </div>
                           <div>
-                            <div class="card-price" x-text="formatPrice(f.price, f.currency)"></div>
-                            <div class="card-price-note">one-way, per person</div>
+                            <div class="card-price" x-text="f.price == null ? '—' : formatPrice(f.price, f.currency)"></div>
+                            <div class="card-price-note" x-text="f.price == null ? 'fare shows on Google — tap Book' : 'one-way, per person'"></div>
                           </div>
                         </div>
                         <div class="route">
