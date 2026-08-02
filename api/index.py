@@ -1067,8 +1067,12 @@ def run_assistant(query: str, history: list | None, emit=None,
             # below redoes it on the loop model with the full toolset
             "tools": [SEARCH_TOOL] if use_haiku else [SEARCH_TOOL, web_tool],
             # tail breakpoint: the conversation reads from cache on every call
-            # after the one that wrote it, instead of re-billing at full price
-            "messages": cache_tail(messages),
+            # after the one that wrote it, instead of re-billing at full price.
+            # NOT on the Haiku router call: caches are model-scoped, so its
+            # entries can never be read by the Sonnet calls that follow — the
+            # first live probes showed it writing ~4.4k premium-rate tokens
+            # per plain search that nothing could ever read.
+            "messages": messages if use_haiku else cache_tail(messages),
         }
         if not use_haiku:
             # synthesis (any call after results are in) always runs at full

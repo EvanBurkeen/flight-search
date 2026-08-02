@@ -412,7 +412,13 @@ re-billed at full price on every call), then three levers in one push:
   so it sends no tail marker at all. The same review caught that adaptive
   thinking's silent gaps could outlive the SSE stream's old 90s single
   timeout, which would have re-run whole turns via the fallback path
-  (a double-bill); the stream now heartbeats every 15s.
+  (a double-bill); the stream now heartbeats every 15s. Post-deploy, the
+  first live cost lines caught one more: the Haiku router was writing
+  ~4.4k premium-rate cache tokens per plain search that nothing could
+  ever read (caches are model-scoped; the calls that follow are Sonnet),
+  so the router call now sends no markers. Measured: 8.1 cents for the
+  hour's first turn (it writes the org-wide prefix), ~1.5-2 cents warm,
+  vs 3-5 cents on Opus.
 - **Cost instrumentation:** each call's usage block is priced
   (input/cache-write 2x/cache-read 0.1x/output, per-model list prices) and
   `debug_timings` now reports `est_cost_usd` per turn plus a per-call `~$`
