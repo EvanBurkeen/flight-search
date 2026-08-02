@@ -316,13 +316,13 @@ shipped, which is why the cut keeps nonstops/cheapest/fastest) · **price
 context line** above a fixed-date section (where its cheapest fare sits among
 nearby dates, the cheapest nearby date, and an explicit "not price history"
 footnote) · round-trip
-**mix & match board** (expanded view: every outbound on the left — tapping a
-from-priced row prices its returns IN PLACE via `/api/returns`, ~1-4s, no
-model turn, with an ask-the-concierge fallback — the selected outbound's
-returns on the right, each priced as the real pairing total and filterable/
-sortable, "Load every return" for the full Google list, sticky chosen-pairing
-bar with Book; top-pick cards with the per-card return picker stay as the
-collapsed view) · Best value badge ·
+**mix & match board** (the DEFAULT round-trip view since Aug 2: every
+outbound on the left — tapping a from-priced row prices its returns IN
+PLACE via `/api/returns`, ~1-4s, no model turn, with an ask-the-concierge
+fallback — the selected outbound's returns on the right, each priced as the
+real pairing total and filterable/sortable, "Load every return" for the
+full Google list, sticky chosen-pairing bar with Book; "Show top picks
+only" collapses to the pre-paired cards) · Best value badge ·
 Book deep-links straight to the chosen itinerary on Google · flexible-date grids show best-value dates
 first (within 15% of cheapest) and expand to month calendars heatmapped by price
 (tiers relative to the window's cheapest; cheapest days outlined; round-trip
@@ -331,9 +331,10 @@ sequential longitude unwrapping so every leg takes the short way; outbound solid
 return dashed; layover dots with durations) · timeline layover rings · suggestion
 chips · search ladder (jump-to index of every results section: fixed rail on
 wide screens, floating 'Searches' button + overlay elsewhere) · **streaming
-replies** (the recommendation types letter by letter at an adaptive cadence
-that can never lag the network, then the cards rise in, then the chips;
-automatic fallback to the JSON turn on any transport problem) · **"Send this
+replies** (the reply types out once the answer is settled — a preamble that
+turns out to precede a search is never shown at all — at an eased, bounded
+cadence, then the cards rise in, then the chips; automatic fallback to the
+JSON turn on any transport problem) · **"Send this
 flight"** (a quiet Share beside every Book renders a boarding-pass PNG on
 canvas — trip type, route with flight-arc motif, segment rows with durations,
 date-range + price + barcode stub, flights.evanburkeen.com footer — with copy
@@ -404,6 +405,22 @@ same SSE events as the real loop, so streaming is fully exercisable locally.
   lakes; run it, then bump the `?v=N` cache-buster on the script tag in index.html).
 
 ## Changelog
+
+**August 2, 2026 (Evan's five: masthead, board-first, sans voice, honest typing, boxed replies)**
+- **Masthead** is now a pure wordmark — the tilted-plane crest and its
+  subtitle are gone ("looks vibe coded and cheap"); the credit line lives in
+  the footer colophon beside Evan's name.
+- **Round trips open ON the mix & match board** (choosing per direction IS
+  the product); "Show top picks only" collapses to the pre-paired cards.
+- **The reply voice is back to sans** (the serif experiment lasted one
+  commit), and every reply now sits in a **paper panel** that answers the
+  user's green bubble — both voices are containers, each hugging its own
+  text, ending the boxed-question/floating-answer mismatch.
+- **No more type-then-wipe**: prose is emitted once per FINAL answer after
+  the call resolves, so "Let me take a look" preambles that precede a
+  search are never shown (and the SUGGESTIONS line never types out). The
+  typewriter cadence is eased and bounded (3-14 chars/frame) so long
+  replies read as typing, not pasting. The rAF watchdog stays load-bearing.
 
 **August 2, 2026 (the professional pass: one system, not vibes)**
 Second, deeper aesthetic round on Evan's note that it should read

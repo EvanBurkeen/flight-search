@@ -6,7 +6,7 @@
   <title>Flight Assistant — Evan Burkeen</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;1,9..144,400;1,9..144,600&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fraunces:ital,wght@0,600;1,600&display=swap" rel="stylesheet" />
   <script>
     // theme runs before first paint to avoid a flash of the wrong theme;
     // light is the default — dark only when explicitly chosen
@@ -100,23 +100,13 @@
       content: ""; position: absolute; left: 0; right: 0; bottom: 5px;
       border-bottom: 1px solid var(--rule-soft);
     }
-    .masthead { display: flex; align-items: center; gap: 0.9rem; }
-    .crest {
-      width: 3rem; height: 3rem; border-radius: 50%; flex: none;
-      border: 1px solid var(--brass); box-shadow: inset 0 0 0 2.5px var(--bg), inset 0 0 0 3.5px var(--brass-soft);
-      background: linear-gradient(140deg, rgba(138,109,47,0.16), rgba(138,109,47,0.04));
-      display: flex; align-items: center; justify-content: center;
-      color: var(--brass); font-size: 1.15rem; transform: rotate(-8deg);
-    }
+    /* a masthead is a wordmark and a rule; anything more is a mascot */
+    .masthead { display: flex; align-items: baseline; }
     .header h1 {
       font-family: var(--serif);
-      font-size: 2.5rem; font-weight: 600; letter-spacing: -0.02em; margin-bottom: 0.15rem;
+      font-size: 2.6rem; font-weight: 600; letter-spacing: -0.02em; line-height: 1;
     }
     .header h1 em { font-style: italic; color: var(--accent); }
-    .header p {
-      font-size: 0.7rem; letter-spacing: 0.18em; text-transform: uppercase;
-      color: var(--brass); font-weight: 600;
-    }
 
     .hero { margin: 0.75rem 0 1.9rem; }
     .hero .date {
@@ -214,14 +204,18 @@
     }
 
     .msg-assistant { display: flex; flex-direction: column; gap: 1rem; }
-    /* the concierge's voice is set in the house serif, like a paper's own
-       columns; UI chrome stays sans. No border crutch: the type carries it. */
+    /* the reply sits in a paper panel that answers the user's bubble:
+       both voices are containers now, hugging their own text */
     .msg-text {
-      font-family: var(--serif); font-optical-sizing: auto; font-weight: 400;
-      font-size: 1rem; line-height: 1.72; white-space: pre-wrap; max-width: 44rem;
+      font-size: 0.9rem; line-height: 1.65; white-space: pre-wrap;
+      width: fit-content; max-width: min(44rem, 100%);
+      background: var(--panel); border: 1px solid var(--line);
+      border-radius: 10px 10px 10px 2px; padding: 0.7rem 1rem;
+      box-shadow: 0 1px 3px rgba(28, 26, 21, 0.07);
     }
     .msg-text strong { font-weight: 600; color: var(--accent-dark); }
     html.dark .msg-text strong { color: #e08a5a; }
+    html.dark .msg-text { box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4); }
 
     /* sections open on a rule, the way a broadsheet turns to a new story */
     .section-head {
@@ -643,6 +637,10 @@
 
     .footer { text-align: center; margin-top: 3.5rem; font-size: 0.72rem; }
     .footer .flourish { color: var(--brass); letter-spacing: 0.35em; font-size: 0.6rem; margin-bottom: 0.4rem; }
+    .footer .colophon {
+      margin-top: 0.5rem; font-size: 0.62rem; letter-spacing: 0.14em;
+      text-transform: uppercase; color: var(--brass); opacity: 0.75;
+    }
     .footer a { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2px; opacity: 0.6; }
 
     /* Midnight concierge: same stationery, lights down. The route maps keep
@@ -697,11 +695,7 @@
   <div class="container" x-data="flightApp()">
     <div class="header">
       <div class="masthead">
-        <div class="crest">✈</div>
-        <div>
-          <h1>Flight <em>Assistant</em></h1>
-          <p>Claude · Live Google Flights Data</p>
-        </div>
+        <h1>Flight <em>Assistant</em></h1>
       </div>
       <div class="header-tools">
         <button class="theme-btn" @click="cycleTheme()" :title="themeTitle()" aria-label="Color theme" x-text="themeIcon()"></button>
@@ -1293,6 +1287,7 @@
     <div class="footer">
       <div class="flourish">✦ ✦ ✦</div>
       <a href="https://evanburkeen.com">Evan Burkeen</a>
+      <div class="colophon">Powered by Claude and live Google Flights data</div>
     </div>
 
     <nav class="ladder" :class="ladderOpen ? 'overlay' : ''" x-show="ladder().length > 1" aria-label="Search results index">
@@ -1758,7 +1753,7 @@
           this.history = this.history.slice(-12);
           this.rememberLedger(data.ledger);
 
-          (data.sections || []).forEach(sec => { sec._anchor = 'sec-' + (++this.sectionSeq); });
+          (data.sections || []).forEach(sec => { sec._anchor = 'sec-' + (++this.sectionSeq); this.openBoard(sec); });
           this.messages.push({
             role: 'assistant',
             content: data.message,
@@ -1831,6 +1826,14 @@
 
         liveMsg() { return this.messages[this.messages.length - 1]; },
 
+        // round trips open ON the mix & match board: choosing per direction
+        // is the product (Google's own flow); pre-paired cards are the summary
+        openBoard(sec) {
+          if (sec.type === 'itineraries' && ((sec.results || []).length || (sec.more_outbounds || []).length)) {
+            sec._expanded = true;
+          }
+        },
+
         startTyping(myReq) {
           if (this._typing) return;
           this._typing = true;
@@ -1850,8 +1853,10 @@
               // adaptive cadence: a deeper backlog lands more characters per
               // frame, so the typing can never fall behind the network; a
               // hidden page flushes outright — no one is watching the animation
+              // eased cadence: fast enough to never dawdle on a long
+              // reply, slow enough to read as typing rather than pasting
               const n = document.hidden ? buf.length
-                : Math.max(2, Math.round(buf.length / (this._doneData ? 5 : 12)));
+                : Math.min(Math.max(this._doneData ? 3 : 2, Math.ceil(buf.length / 45)), 14);
               this.liveMsg().content += buf.slice(0, n);
               this._streamBuf = buf.slice(n);
               schedule(tick);
@@ -1873,7 +1878,7 @@
           const d = this._doneData;
           const msg = this.liveMsg();
           msg.content = d.message || msg.content;   // 'done' is authoritative
-          (d.sections || []).forEach(sec => { sec._anchor = 'sec-' + (++this.sectionSeq); });
+          (d.sections || []).forEach(sec => { sec._anchor = 'sec-' + (++this.sectionSeq); this.openBoard(sec); });
           msg.sections = d.sections || [];
           msg.suggestions = d.suggestions || [];
           msg._streaming = false;

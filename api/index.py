@@ -995,8 +995,13 @@ def run_assistant(query: str, history: list | None, emit=None,
 
       sections     a results batch is ready (cards can render immediately —
                    this lands seconds before the prose is written)
-      text_delta   a chunk of the reply as Claude writes it
-      text_reset   the text so far was a preamble to a search; discard it
+      text_delta   the reply's prose, emitted ONCE per final answer after the
+                   call resolves — never live. Live token streaming showed
+                   "Let me take a look" and then wiped it the moment a tool
+                   call followed (Evan: "what's the point"); prose is now
+                   held until a call ends without tools, and the client
+                   typewriter supplies the motion. The SUGGESTIONS line is
+                   stripped before emitting, so it never types out either.
 
     With emit=None the behaviour is identical, just silent.
     """
@@ -1030,12 +1035,6 @@ def run_assistant(query: str, history: list | None, emit=None,
     plain_search = looks_like_plain_search(query)
     first_effort = "low" if plain_search else "medium"
     haiku_router = plain_search  # flips off after one failed Haiku attempt
-    # Streaming the first call's text is a win for questions we answer
-    # directly ("what's Delta's baggage allowance" starts appearing in ~1s),
-    # but on a route search that text is only a lead-in that text_reset then
-    # wipes, so the reader watches a sentence appear and vanish. Suppress it
-    # exactly where it is predictably throwaway.
-    stream_first_text = not plain_search
 
     started = time.monotonic()
     timings: list = []   # [(phase, seconds, detail)] — surfaced for profiling
@@ -1051,7 +1050,6 @@ def run_assistant(query: str, history: list | None, emit=None,
     while rounds < 3 and iterations < 8 and time.monotonic() - started < turn_budget_s:
         iterations += 1
         _t = time.monotonic()
-        streamed_any = False
         use_haiku = haiku_router and iterations == 1
         call_kwargs: dict = {
             "model": ROUTER_MODEL if use_haiku else ASSISTANT_MODEL,
@@ -1083,12 +1081,9 @@ def run_assistant(query: str, history: list | None, emit=None,
             # (Haiku 4.5 rejects output_config.effort — loop model only.)
             call_kwargs["output_config"] = {"effort": first_effort if iterations == 1 else "medium"}
         try:
+            # no live token emission: whether this text is the answer or a
+            # doomed preamble is only knowable once the call resolves
             with client.messages.stream(**call_kwargs) as stream:
-                show_text = stream_first_text or iterations > 1
-                for chunk in stream.text_stream:
-                    if chunk and show_text:
-                        streamed_any = True
-                        emit("text_delta", chunk)
                 response = stream.get_final_message()
         except anthropic.APIStatusError:
             if not use_haiku:
@@ -1126,9 +1121,6 @@ def run_assistant(query: str, history: list | None, emit=None,
             iterations -= 1
             timings.append(("haiku_fallback", 0.0, "no tool call; redoing on the loop model"))
             continue
-        if tool_uses and streamed_any:
-            # whatever was streamed was a lead-in to a search, not the answer
-            emit("text_reset", None)
         if response.stop_reason != "tool_use" or not tool_uses:
             text = "\n".join(b.text for b in response.content if b.type == "text").strip()
             text, suggestions = split_suggestions(text)
@@ -1137,6 +1129,8 @@ def run_assistant(query: str, history: list | None, emit=None,
                 # a bare ellipsis is not an answer anyone can act on
                 text = ("That one took more thinking room than I gave it. "
                         "Ask me again, or narrow the question a little.")
+            if text:
+                emit("text_delta", text)  # the whole answer, once; never a wipe
             return {"message": text or "…", "sections": sections,
                     "suggestions": suggestions, "timings": timings,
                     "cost_usd": round(cost_usd, 4),
@@ -1264,15 +1258,13 @@ def run_assistant(query: str, history: list | None, emit=None,
                 tool_choice={"type": "none"},
                 messages=messages,
             ) as stream:
-                for chunk in stream.text_stream:
-                    if chunk:
-                        emit("text_delta", chunk)
                 response = stream.get_final_message()
             cost_usd += call_cost_usd(ASSISTANT_MODEL, getattr(response, "usage", None))
             timings.append(("claude_wrapup", round(time.monotonic() - _t, 2), ""))
             text = "\n".join(b.text for b in response.content if b.type == "text").strip()
             text, suggestions = split_suggestions(text)
             if text:
+                emit("text_delta", text)
                 return {"message": text, "sections": sections,
                         "suggestions": suggestions or ["keep digging"], "timings": timings,
                         "cost_usd": round(cost_usd, 4),

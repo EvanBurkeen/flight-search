@@ -681,6 +681,27 @@ check("the SSE stream heartbeats through silent thinking gaps",
 check("a mid-think max_tokens exit ships a real sentence, not an ellipsis",
       'stop_reason == "max_tokens" and not text' in _src_spend)
 
+# Evan, Aug 2: streaming typed "let me take a look" and then wiped it. Prose
+# is now emitted once per final answer, after the call resolves — a preamble
+# that precedes a search is simply never shown, and nothing ever un-types.
+check("prose is never live-streamed from the loop (no wipe is possible)",
+      'emit("text_reset"' not in _src_spend
+      and "stream.text_stream" not in _src_spend
+      and _src_spend.count('emit("text_delta", text)') == 2)
+_fe_now = open(os.path.join(ROOT, "public", "index.html")).read()
+check("the typewriter cadence is eased and bounded (types, not pastes)",
+      "buf.length / 45" in _fe_now and ", 14)" in _fe_now)
+check("the masthead is a wordmark; the crest and its subtitle are gone",
+      'class="crest"' not in _fe_now and "Claude · Live Google Flights Data</p>" not in _fe_now)
+check("the credit line moved to the footer colophon",
+      "Powered by Claude and live Google Flights data" in _fe_now)
+check("round trips open on the mix & match board",
+      "openBoard(sec)" in _fe_now and _fe_now.count("this.openBoard(sec);") == 2)
+check("the reply sits in a panel that answers the user's bubble, in sans",
+      "border-radius: 10px 10px 10px 2px" in _fe_now
+      and "width: fit-content" in _fe_now
+      and "font-family: var(--serif); font-optical-sizing" not in _fe_now)
+
 # --------------------------------------------------------------------------
 section("Reply rendering  — Changelog: 'the spacing the join left behind'")
 # --------------------------------------------------------------------------
