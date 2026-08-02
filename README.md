@@ -409,7 +409,8 @@ same SSE events as the real loop, so streaming is fully exercisable locally.
 **August 2, 2026 (Evan's five: masthead, board-first, sans voice, honest typing, boxed replies)**
 - **Masthead** is now a pure wordmark — the tilted-plane crest and its
   subtitle are gone ("looks vibe coded and cheap"); the credit line lives in
-  the footer colophon beside Evan's name.
+  the footer colophon beside Evan's name ("Powered by Claude and Google
+  Flights" — trimmed at Evan's ask).
 - **Round trips open ON the mix & match board** (choosing per direction IS
   the product); "Show top picks only" collapses to the pre-paired cards.
 - **The reply voice is back to sans** (the serif experiment lasted one

@@ -694,7 +694,7 @@ check("the typewriter cadence is eased and bounded (types, not pastes)",
 check("the masthead is a wordmark; the crest and its subtitle are gone",
       'class="crest"' not in _fe_now and "Claude · Live Google Flights Data</p>" not in _fe_now)
 check("the credit line moved to the footer colophon",
-      "Powered by Claude and live Google Flights data" in _fe_now)
+      "Powered by Claude and Google Flights" in _fe_now)
 check("round trips open on the mix & match board",
       "openBoard(sec)" in _fe_now and _fe_now.count("this.openBoard(sec);") == 2)
 check("the reply sits in a panel that answers the user's bubble, in sans",
