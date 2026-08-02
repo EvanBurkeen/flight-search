@@ -254,7 +254,6 @@
       transition: border-color 0.15s, color 0.15s;
     }
     .show-all:hover { border-color: var(--brass); color: var(--accent-dark); }
-    .assumptions { font-size: 0.72rem; opacity: 0.60; margin-top: 0.35rem; }
 
     /* where this fare sits among nearby dates: a quiet line, never a badge —
        it is a comparison across dates, not a verdict on the route */
@@ -1220,9 +1219,6 @@
                         x-show="canExpand(sec)"
                         @click="sec._expanded = !sec._expanded"
                         x-text="expandLabel(sec)"></button>
-
-                <div class="assumptions" x-show="(sec.assumptions || []).length"
-                     x-text="(sec.assumptions || []).map(a => '· ' + a).join('   ')"></div>
               </div>
             </template>
 

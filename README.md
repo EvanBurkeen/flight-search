@@ -406,6 +406,13 @@ same SSE events as the real loop, so streaming is fully exercisable locally.
 
 ## Changelog
 
+**August 2, 2026 (assumptions line removed from cards)**
+- The small "· Assumed..." justification line under result sections is gone
+  (Evan's call): the reply prose already states assumptions where they
+  matter, and the calendar keeps its own trip-length note. The payload
+  field stays (the model still receives and states them); only the UI
+  footnote is removed.
+
 **August 2, 2026 (Evan's five: masthead, board-first, sans voice, honest typing, boxed replies)**
 - **Masthead** is now a pure wordmark — the tilted-plane crest and its
   subtitle are gone ("looks vibe coded and cheap"); the credit line lives in
