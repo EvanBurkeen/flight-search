@@ -338,19 +338,46 @@ def merge_wrb_chunks(chunks: list):
                 for row in _chunk_rows(c, i):
                     merged[_row_identity(row)] = row
         # the union always wins — even at equal counts a later chunk carries
-        # fresher prices for the same itineraries
+        # fresher prices for the same itineraries. Rows may live in bucket 2
+        # OR 3 (Beijing's responses carry inner[2]=None with rows in [3]):
+        # write the union into the first live bucket, empty the other
         if merged:
             try:
-                best[2][0] = list(merged.values())
-                if isinstance(best[3], list) and best[3] and isinstance(best[3][0], list):
-                    best[3][0] = []
+                wrote = False
+                for i in (2, 3):
+                    v = best[i] if i < len(best) else None
+                    if isinstance(v, list) and v and isinstance(v[0], list):
+                        v[0] = list(merged.values()) if not wrote else []
+                        wrote = True
             except (IndexError, TypeError):
                 pass  # unexpected shape: fall back to the richest chunk as-is
     return best
 
 
+def _extract_route_airlines(inner) -> dict | None:
+    """inner[7][1][1] is Google's own airline-filter list for the route —
+    the response TESTIFYING which carriers serve it, independent of which
+    rows this session was given. [(code, name), ...] pairs."""
+    try:
+        pairs = inner[7][1][1]
+        out = {p[0]: p[1] for p in pairs
+               if isinstance(p, list) and len(p) >= 2
+               and isinstance(p[0], str) and 2 <= len(p[0]) <= 3}
+        return out or None
+    except (IndexError, TypeError, KeyError):
+        return None
+
+
 def _parse_merged_wrb_payload(body):
-    return merge_wrb_chunks(list(_iter_wrb_chunks(body)))
+    inner = merge_wrb_chunks(list(_iter_wrb_chunks(body)))
+    # stash the route's carrier manifest for the caller (thread-local: the
+    # main search parses on its own calling thread; expansion threads keep
+    # their own copies and never clobber it)
+    if inner is not None:
+        manifest = _extract_route_airlines(inner)
+        if manifest:
+            _local.route_airlines = manifest
+    return inner
 
 
 _fli_flights.parse_first_wrb_payload = _parse_merged_wrb_payload
@@ -2230,6 +2257,7 @@ def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy
     # per-search cooling is redundant with the process-wide breaker.
     started = time.monotonic()
     last_exc = None
+    _local.route_airlines = None  # each search reads only its own manifest
     for i, attempt_sort in enumerate((sort, sort, SortBy.CHEAPEST, SortBy.CHEAPEST)):
         if i > 0 and time.monotonic() - started > budget_s:
             break  # out of time: surface what we have rather than dig the hole deeper
@@ -2258,6 +2286,37 @@ def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy
     if last_exc:
         raise last_exc
     return []
+
+
+def missing_from_manifest(results: list, manifest: dict | None) -> dict:
+    """Carriers Google's own route data names but this session's rows lack."""
+    if not manifest:
+        return {}
+    seen = set()
+    for r in results:
+        items = r if isinstance(r, tuple) else (r,)
+        for it in items:
+            for lg in getattr(it, "legs", None) or []:
+                code = airline_code(getattr(lg, "airline", None))
+                if code:
+                    seen.add(code)
+    return {c: n for c, n in manifest.items() if c not in seen}
+
+
+def should_probe_missing(results: list, manifest: dict | None) -> bool:
+    """Fire the supplemental search only when the gap is structural.
+
+    Beijing (prod, via the proxy): 6 rows against a 38-carrier manifest.
+    BOS->MIA: ~7 of 9 carriers present, the absentees being interline
+    oddities (Emirates on a domestic hop) — no probe. The gate is coverage,
+    not the existence of any gap."""
+    if not manifest or len(manifest) < 4:
+        return False
+    missing = missing_from_manifest(results, manifest)
+    if not missing:
+        return False
+    covered = 1 - len(missing) / len(manifest)
+    return covered < 0.5 or len(results) < 15
 
 
 def _rt_spec_echo(spec: dict, origins: list, destinations: list) -> dict:
@@ -2339,6 +2398,43 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
             results = []
         else:
             raise
+    route_manifest = getattr(_local, "route_airlines", None)
+
+    # THE SUPPLEMENTAL PROBE (one-way only; round trips disclose below):
+    # when the response's own carrier manifest names airlines this session
+    # got no rows for, ask for them BY NAME once. Beijing proved the pool
+    # exists behind the filter (25 China Eastern schedules, fares withheld)
+    # even when the unfiltered response omits them entirely.
+    manifest_note = None
+    if results and not isinstance(results[0], tuple) and spec.get("trip_type") != "round_trip":
+        missing = missing_from_manifest(results, route_manifest)
+        if missing and should_probe_missing(results, route_manifest):
+            # majors first: alphabetical truncation once probed "9 Air, Air
+            # Macau" while leaving China Eastern outside the cap
+            probe_codes = sorted(missing, key=lambda c: (c not in AIRLINE_ALLIANCE, c))[:8]
+            try:
+                pf = build_filters({**spec, "airlines_include": probe_codes},
+                                   origins, destinations, show_all_results=True)
+                extra = run_search(SearchFlights(), pf, SortBy.CHEAPEST,
+                                   top_n=10, budget_s=16.0) or []
+            except Exception:
+                extra = []
+            if extra:
+                have = {flight_signature(r) for r in results}
+                added = [r for r in extra if flight_signature(r) not in have]
+                results = list(results) + added
+                print(f"[manifest] probe recovered {len(added)} rows for {probe_codes}")
+            still = missing_from_manifest(results, route_manifest)
+            if still:
+                names = ", ".join(n for c, n in sorted(
+                    still.items(), key=lambda kv: (kv[0] not in AIRLINE_ALLIANCE, kv[1]))[:6])
+                manifest_note = (
+                    f" ROUTE NOTE: Google's own route data lists {names} as serving this "
+                    "route, but returned none of their flights to this session even when "
+                    "asked directly. Cheaper fares on those carriers may exist on Google "
+                    "itself; if the listed fares look high, say so and suggest the user "
+                    "also check the route in their browser."
+                )
 
     if not results:
         if spec.get("trip_type") == "round_trip":
@@ -2514,6 +2610,12 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
         pairings = sum(len(it["return_options"]) for it in itineraries)
         message = (f"Found {len(itineraries)} outbounds with returns priced "
                    f"({pairings} pairings; every price is the real total for that exact pairing).")
+        _missing_rt = missing_from_manifest(results, route_manifest)
+        if _missing_rt and should_probe_missing(results, route_manifest):
+            message += (" ROUTE NOTE: Google's route data also lists "
+                        + ", ".join(sorted(_missing_rt.values())[:6])
+                        + " as serving this route, but returned none of their flights to "
+                          "this session — do not treat this list as the whole market.")
         if extras:
             ns = sum(1 for x in extras if (x.get("stops") or 0) == 0)
             message += (f" {len(extras)} more outbounds are listed with from-prices only"
@@ -2597,6 +2699,8 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
     cn = carrier_note(ranked_all)
     if cn:
         message += " " + cn
+    if manifest_note:
+        message += manifest_note
     if arrival_note:
         message = f"{arrival_note}\n{message}"
     return {

@@ -458,6 +458,16 @@ with its own generalizable fix:
   explain themselves instead of showing a bare dash. Verified on the
   exact failing query: 30 unpriced flights across 5 carriers now ship
   and disclose. 16 checks added.
+- **The manifest layer** (post-deploy: prod's proxied session got SIX rows
+  and no unpriced schedules at all, blinding the rows-based disclosure):
+  the response's own airline-filter list (`inner[7][1][1]`) is Google
+  testifying which carriers serve the route. When coverage against it is
+  structurally poor, ONE supplemental search asks for the missing carriers
+  by name (alliance majors first), merges whatever returns, and any
+  unfillable gap ships a ROUTE NOTE the model must relay instead of
+  treating a thin session's slice as the whole market. The chunk union
+  also learned to write rows into bucket 3 when bucket 2 is absent
+  (Beijing's actual response shape). 8 more checks.
 
 **August 2, 2026 (the sequential turn, overlapped)**
 Evan: cut search time as much as possible with zero quality cost. The

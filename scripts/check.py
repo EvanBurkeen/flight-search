@@ -815,6 +815,41 @@ _fe_up = open(os.path.join(ROOT, "public", "index.html")).read()
 check("an unpriced card explains itself instead of showing a bare dash",
       "fare shows on Google" in _fe_up and "fare on Google" in _fe_up)
 
+# the manifest layer: prod's proxied session got SIX rows and no unpriced
+# schedules at all — the only witness left is the response's own airline
+# filter list, so it must be extracted, gated sanely, and acted on
+_inner_m = [None] * 8
+_inner_m[7] = [None, [None, [["CZ", "China Southern"], ["MU", "China Eastern"],
+                             ["MF", "XiamenAir"], ["3U", "Sichuan Airlines"],
+                             ["HU", "Hainan"]]]]
+check("the route's carrier manifest is extracted from the response itself",
+      app._extract_route_airlines(_inner_m) == {
+          "CZ": "China Southern", "MU": "China Eastern", "MF": "XiamenAir",
+          "3U": "Sichuan Airlines", "HU": "Hainan"})
+check("a malformed manifest block yields None, never a crash",
+      app._extract_route_airlines([None] * 8) is None
+      and app._extract_route_airlines([]) is None)
+
+_res_thin = [result([leg("PKX", "TFU", "2027-01-06T09:00", "2027-01-06T11:55",
+                         "CZ", "8101")], 421.0)] * 6
+_manifest5 = app._extract_route_airlines(_inner_m)
+check("missing carriers are computed against actual row airlines",
+      set(app.missing_from_manifest(_res_thin, _manifest5)) == {"MU", "MF", "3U", "HU"})
+check("a structural gap fires the probe (6 rows vs a 5-carrier manifest)",
+      app.should_probe_missing(_res_thin, _manifest5))
+_res_rich = [result([leg("BOS", "MIA", "2026-10-22T09:00", "2026-10-22T12:30",
+                         c, "1")], 200.0) for c in ("AA", "DL", "UA", "B6", "WN", "F9", "AS")] * 5
+_manifest_dom = {c: c for c in ("AA", "DL", "UA", "B6", "WN", "F9", "AS", "EK", "SV")}
+check("interline oddballs on a well-covered route do NOT fire the probe",
+      not app.should_probe_missing(_res_rich, _manifest_dom))
+check("no manifest, no probe, ever",
+      not app.should_probe_missing(_res_thin, None))
+_src_mn = open(os.path.join(ROOT, "api", "index.py")).read()
+check("the probe asks Google for the missing carriers BY NAME, once, bounded",
+      '"airlines_include": probe_codes' in _src_mn and "budget_s=16.0" in _src_mn)
+check("an unfillable gap ships an explicit ROUTE NOTE the model must relay",
+      _src_mn.count("ROUTE NOTE") >= 2)
+
 # --------------------------------------------------------------------------
 section("Latency overlaps  — Changelog: 'the sequential turn'")
 # --------------------------------------------------------------------------
