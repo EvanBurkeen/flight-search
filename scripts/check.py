@@ -363,6 +363,28 @@ _mc_url = app.multi_city_search_url([
     {"origins": ["ATL"], "destinations": ["PEK"], "date": "2027-01-01"},
     {"origins": ["HKG"], "destinations": ["JFK"], "date": "2027-01-15"},
 ])
+# The combined probe keeps its identity-rotating ladder. A version of this
+# line ran ONE attempt, on the theory that multi-city was permanently gated —
+# a conclusion drawn from a home IP whose own one-way control was failing
+# unnoticed. Refusals here are session-sticky like everywhere else, so
+# retrying as a fresh identity is the correct response; only MEASURED
+# consecutive refusals buy a quiet period.
+check("the combined probe keeps a real retry budget (session-sticky refusals)",
+      app.MC_PROBE_BUDGET_S >= 15.0, f"budget_s={app.MC_PROBE_BUDGET_S}")
+_saved_mc = dict(app._mc_probe)
+app._mc_probe.update({"fails": 0, "quiet_until": 0.0})
+for _ in range(app.MC_PROBE_STRIKES):
+    app.note_mc_probe(False)
+check("...and only OBSERVED repeat refusals buy quiet, never an assumption",
+      app._mc_probe["quiet_until"] > time.monotonic())
+app.note_mc_probe(True)
+check("...which any success clears, so an un-gating recovers on its own",
+      app._mc_probe["fails"] == 0 and app._mc_probe["quiet_until"] == 0.0)
+app._mc_probe.update(_saved_mc)
+check("every multi-city payload reports what the probe actually did",
+      open(os.path.join(ROOT, "api", "index.py")).read()
+      .count('"combined_probe": probe_note') == 2)
+
 _mc_tfs_part = _mc_url.split("&curr")[0]
 check("the handoff link is a trip-type-3 search tfs (browser-verified form)",
       "tfs=" in _mc_url and tfs_field(_mc_tfs_part, 19) == 3 and tfs_field(_mc_tfs_part, 2) == 2)

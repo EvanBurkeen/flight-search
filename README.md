@@ -434,24 +434,32 @@ same SSE events as the real loop, so streaming is fully exercisable locally.
 
 ## Changelog
 
-**August 2, 2026 (multi-city is BotGuard-gated: probe once, fall back honestly)**
+**August 2, 2026 (multi-city: a wrong diagnosis, corrected)**
 - The user's ATL-PEK + HKG-JFK multi-city priced at $1,288 on Google's own
-  page while the app said nothing came back. Diagnosis went to the wire:
-  the request encoding was ruled out by replaying the browser's own
-  byte-identical body (still refused), then a live header capture in the
-  Browser pane found the difference: `X-Goog-BatchExecute-Bgr` - BotGuard
-  attestation. Identical body: 133 bytes without the token, 35,770 with.
-  A server cannot mint it; one-way and round-trip remain ungated.
-- Design under the gate: the combined search gets ONE cheap probe (recovery
-  is automatic if Google un-gates it; a full ladder burned 24s and tripped
-  the breaker, choking the fallback that followed), then every leg is
-  searched as its own one-way concurrently - all honesty layers apply per
-  leg - paired by rank into separate-ticket combos with the explicit
-  separate-tickets warning, plus a browser-verified trip-type-3 tfs deep
-  link to Google's own multi-city page for these exact legs ("Price the
-  combined one-ticket itinerary on Google") on the card and in the model's
-  brief. The prompt no longer promises combined pricing and must never
-  claim the through-ticket does not exist. 8 checks added.
+  page while the app returned nothing. FIRST DIAGNOSIS WAS WRONG: header
+  capture in a browser suggested the combined endpoint was BotGuard-gated,
+  and the probe was cut to a single attempt on that basis. The controlled
+  re-test exposed the error — **the local one-way CONTROL was failing too**,
+  i.e. that home IP was soft-blocked and returns the same ~95-byte refusal
+  for everything. A bisection without a control cannot tell "this endpoint
+  is gated" from "this address is blocked". (The BGR token is also
+  single-use, so the one "success" was a replayed capture, and the browser
+  pane shares the same flagged IP.)
+- **Corrected:** the combined probe keeps its full identity-rotating ladder
+  (refusals here are session-sticky like everywhere else, so a fresh
+  identity is exactly the right retry), and only MEASURED consecutive
+  refusals — three — buy a 15-minute quiet period, which any success
+  clears. A real gate then costs ~20s three times instead of forever; an
+  un-gating recovers on its own with no code change.
+- Every multi-city payload now reports `combined_probe` (what the probe
+  actually did), so the next diagnosis reads the answer instead of
+  inferring it.
+- Retained from the first pass (independently useful): the per-leg fallback
+  searches every leg as its own one-way when the combined price is
+  genuinely unavailable, pairs them as separate tickets with the explicit
+  warning, and links Google's own multi-city page for the one-ticket price.
+  Page-scraping was evaluated and ruled out: the flights HTML carries only
+  config blobs (2-7KB), no fares.
 
 **August 2, 2026 (PEI is not Beijing: geography echoes on every search)**
 - The model asserted PEI as a Beijing airport; PEI is Pereira, Colombia,

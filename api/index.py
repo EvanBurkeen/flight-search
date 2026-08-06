@@ -2817,7 +2817,30 @@ def leg_price_index(origins: list, destinations: list, date_: str, cabin: str | 
     return idx
 
 
-def multi_city_fallback(spec: dict, currency: str, leg_search=None) -> dict:
+# The combined multi-city endpoint gets the same treatment as everything
+# else: retry as a fresh identity, and let MEASURED behaviour (not a guess)
+# decide when to stop. Three consecutive refusals buy a quiet period; any
+# success clears it, so recovery is automatic.
+MC_PROBE_BUDGET_S = 20.0     # room for ~3 identity-rotating attempts
+MC_PROBE_STRIKES = 3
+MC_PROBE_QUIET_S = 900.0
+_mc_probe = {"fails": 0, "quiet_until": 0.0}
+_mc_lock = threading.Lock()
+
+
+def note_mc_probe(ok: bool) -> None:
+    with _mc_lock:
+        if ok:
+            _mc_probe["fails"] = 0
+            _mc_probe["quiet_until"] = 0.0
+            return
+        _mc_probe["fails"] += 1
+        if _mc_probe["fails"] >= MC_PROBE_STRIKES:
+            _mc_probe["quiet_until"] = time.monotonic() + MC_PROBE_QUIET_S
+
+
+def multi_city_fallback(spec: dict, currency: str, leg_search=None,
+                        probe_note: str | None = None) -> dict:
     """When Google withholds combined multi-city pricing (BotGuard-gated
     since Aug 2026), fall back to what is still fully knowable: each leg
     searched as its own one-way — every honesty layer applies per leg —
@@ -2857,6 +2880,7 @@ def multi_city_fallback(spec: dict, currency: str, leg_search=None) -> dict:
                         "Google (it is in this section), and offer to retry shortly."),
             "results": [],
             "combined_check_url": check_url,
+            "combined_probe": probe_note,
         }
 
     priced = [[f for f in legs if f.get("price") is not None] or legs for legs in leg_results]
@@ -2886,6 +2910,7 @@ def multi_city_fallback(spec: dict, currency: str, leg_search=None) -> dict:
             "ticket does not exist."),
         "results": combos,
         "combined_check_url": check_url,
+        "combined_probe": probe_note,
     }
 
 
@@ -2951,19 +2976,39 @@ def search_multi_city(spec: dict, currency: str) -> dict:
     # (For 2-leg trips its representative reorder of leg-1 candidates fires
     # too — deliberate: the expansion set should represent the leg, not just
     # be its cheapest corner.)
-    # ONE attempt only (budget_s below the ladder's retry gate): the combined
-    # endpoint is BotGuard-gated as of Aug 2026, so a full 4-attempt ladder
-    # burned ~24s AND tripped the breaker, choking the per-leg fallback that
-    # followed. A single cheap probe keeps automatic recovery if Google ever
-    # un-gates it, without hammering a door we know is locked.
-    try:
-        results = run_search(RepresentativeSearch(), filters, sort, top_n=fanout, budget_s=0.1)
-    except SearchClientError:
-        results = []  # gated or hiccuped: either way the fallback carries the turn
+    #
+    # The combined endpoint keeps its FULL identity-rotating ladder. An
+    # earlier version of this line cut it to a single attempt on the theory
+    # that multi-city was permanently gated — a conclusion drawn from a
+    # home IP that turned out to be soft-blocked (its one-way control was
+    # failing too, unnoticed). Refusals here are session-sticky like
+    # everywhere else, so retrying as a NEW identity is exactly right, and
+    # removing that made the common transient failure permanent.
+    #
+    # What replaces the guesswork: measure. Every probe records its outcome,
+    # and only OBSERVED consecutive refusals (not an assumption) buy a quiet
+    # period, so a genuine gate costs ~20s three times rather than forever,
+    # while an un-gating recovers on its own.
+    probe_note, results = None, []
+    with _mc_lock:
+        quiet = _mc_probe["quiet_until"] > time.monotonic()
+        strikes = _mc_probe["fails"]
+    if quiet:
+        probe_note = f"skipped (combined endpoint refused {strikes}x recently)"
+    else:
+        _tp = time.monotonic()
+        try:
+            results = run_search(RepresentativeSearch(), filters, sort,
+                                 top_n=fanout, budget_s=MC_PROBE_BUDGET_S)
+            probe_note = (f"priced {len(results)} combinations in {time.monotonic() - _tp:.1f}s"
+                          if results else f"returned nothing in {time.monotonic() - _tp:.1f}s")
+        except SearchClientError as e:
+            probe_note = f"{type(e).__name__} after {time.monotonic() - _tp:.1f}s"
+        note_mc_probe(bool(results))
 
     if not results:
         price_pool.shutdown(wait=False, cancel_futures=True)
-        return multi_city_fallback(spec, currency)
+        return multi_city_fallback(spec, currency, probe_note=probe_note)
 
     # harvest the leg prices that finished while the expansion ran; anything
     # still pending gets only a short grace before we degrade to joint prices
