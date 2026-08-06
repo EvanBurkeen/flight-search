@@ -269,6 +269,15 @@ def breaker_wait(cap: float) -> None:
 
 
 def note_search_outcome(ok: bool) -> None:
+    # the combined multi-city endpoint is measurably unreliable in a way the
+    # ungated ones are not (production, clean residential IPs, three fresh
+    # identities: empty every time while one-way and round-trip succeed in
+    # the same process). Letting its refusals drive the process-wide breaker
+    # made every multi-city turn poison the per-leg searches that follow it,
+    # turning one bad endpoint into a 117s turn. Identity retirement still
+    # happens; only the global breaker is spared.
+    if getattr(_local, "suppress_breaker", False):
+        return
     if ok:
         ident = getattr(_local, "identity", None)
         if ident is not None:
@@ -2821,7 +2830,7 @@ def leg_price_index(origins: list, destinations: list, date_: str, cabin: str | 
 # else: retry as a fresh identity, and let MEASURED behaviour (not a guess)
 # decide when to stop. Three consecutive refusals buy a quiet period; any
 # success clears it, so recovery is automatic.
-MC_PROBE_BUDGET_S = 20.0     # room for ~3 identity-rotating attempts
+MC_PROBE_BUDGET_S = 12.0     # ~2 identity-rotating attempts, overlapped with the legs
 MC_PROBE_STRIKES = 3
 MC_PROBE_QUIET_S = 900.0
 _mc_probe = {"fails": 0, "quiet_until": 0.0}
@@ -2840,33 +2849,36 @@ def note_mc_probe(ok: bool) -> None:
 
 
 def multi_city_fallback(spec: dict, currency: str, leg_search=None,
-                        probe_note: str | None = None) -> dict:
+                        probe_note: str | None = None, leg_futs=None) -> dict:
     """When Google withholds combined multi-city pricing (BotGuard-gated
     since Aug 2026), fall back to what is still fully knowable: each leg
     searched as its own one-way — every honesty layer applies per leg —
     paired by rank into separate-ticket combos, with Google's own
     multi-city page linked for the one-ticket price. The truth we can get,
     plus a tap to the truth we cannot."""
-    leg_search = leg_search or cached_execute_spec
     raw_segs = (spec.get("multi_city_segments") or [])[:5]
     if len(raw_segs) < 2:
         return {"type": "multicity",
                 "message": "A multi-city trip needs at least two legs.", "results": []}
 
-    pool = ThreadPoolExecutor(max_workers=min(4, len(raw_segs)))
-    futs = [pool.submit(leg_search, {
-        "origins": seg.get("origins") or [], "destinations": seg.get("destinations") or [],
-        "trip_type": "one_way", "departure_date": seg.get("date"),
-        "cabin": spec.get("cabin"), "adults": spec.get("adults"),
-        "departure_time": seg.get("departure_time"),
-    }) for seg in raw_segs]
+    pool = None
+    if leg_futs is None:  # standalone use (and the offline checks)
+        pool = ThreadPoolExecutor(max_workers=min(4, len(raw_segs)))
+        leg_search = leg_search or cached_execute_spec
+        leg_futs = [pool.submit(leg_search, {
+            "origins": seg.get("origins") or [], "destinations": seg.get("destinations") or [],
+            "trip_type": "one_way", "departure_date": seg.get("date"),
+            "cabin": spec.get("cabin"), "adults": spec.get("adults"),
+            "departure_time": seg.get("departure_time"),
+        }) for seg in raw_segs]
     leg_payloads: list = []
-    for fu in futs:
+    for fu in leg_futs:
         try:
             leg_payloads.append(fu.result(timeout=50))
         except Exception:
             leg_payloads.append(None)
-    pool.shutdown(wait=False, cancel_futures=True)
+    if pool is not None:
+        pool.shutdown(wait=False, cancel_futures=True)
 
     leg_results = [(p.get("results") or []) if isinstance(p, dict) else [] for p in leg_payloads]
     check_url = multi_city_search_url(raw_segs, spec.get("cabin"))
@@ -2972,6 +2984,18 @@ def search_multi_city(spec: dict, currency: str) -> dict:
     with _breaker_lock:
         rough_weather = _breaker["consecutive"] > 0 or _breaker["open_until"] > time.monotonic()
     fanout = 4 if rough_weather else 6
+
+    # The per-leg searches are what we ship whenever the combined price does
+    # not come back, so they start NOW, beside the probe rather than after
+    # it. Sequenced, the two cost 117s in production; overlapped, the turn
+    # costs whichever is slower.
+    leg_pool = ThreadPoolExecutor(max_workers=min(4, max(1, len(raw_segs))))
+    leg_futs = [leg_pool.submit(cached_execute_spec, {
+        "origins": seg.get("origins") or [], "destinations": seg.get("destinations") or [],
+        "trip_type": "one_way", "departure_date": seg.get("date"),
+        "cabin": spec.get("cabin"), "adults": spec.get("adults"),
+        "departure_time": seg.get("departure_time"),
+    }) for seg in raw_segs]
     # RepresentativeSearch for the parallel expansion + identity inheritance.
     # (For 2-leg trips its representative reorder of leg-1 candidates fires
     # too — deliberate: the expansion set should represent the leg, not just
@@ -2997,6 +3021,7 @@ def search_multi_city(spec: dict, currency: str) -> dict:
         probe_note = f"skipped (combined endpoint refused {strikes}x recently)"
     else:
         _tp = time.monotonic()
+        _local.suppress_breaker = True
         try:
             results = run_search(RepresentativeSearch(), filters, sort,
                                  top_n=fanout, budget_s=MC_PROBE_BUDGET_S)
@@ -3004,11 +3029,13 @@ def search_multi_city(spec: dict, currency: str) -> dict:
                           if results else f"returned nothing in {time.monotonic() - _tp:.1f}s")
         except SearchClientError as e:
             probe_note = f"{type(e).__name__} after {time.monotonic() - _tp:.1f}s"
+        finally:
+            _local.suppress_breaker = False
         note_mc_probe(bool(results))
 
     if not results:
         price_pool.shutdown(wait=False, cancel_futures=True)
-        return multi_city_fallback(spec, currency, probe_note=probe_note)
+        return multi_city_fallback(spec, currency, probe_note=probe_note, leg_futs=leg_futs)
 
     # harvest the leg prices that finished while the expansion ran; anything
     # still pending gets only a short grace before we degrade to joint prices

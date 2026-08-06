@@ -453,7 +453,23 @@ same SSE events as the real loop, so streaming is fully exercisable locally.
   un-gating recovers on its own with no code change.
 - Every multi-city payload now reports `combined_probe` (what the probe
   actually did), so the next diagnosis reads the answer instead of
-  inferring it.
+  inferring it. **It answered immediately:** from production's clean
+  residential IPs, with the full ladder across three fresh identities, the
+  combined endpoint returned nothing (26.1s) and then timed out (21.6s),
+  while one-way and round-trip searches succeeded in the same process.
+  That is the controlled comparison the home-IP bisection could not make:
+  combined multi-city pricing genuinely does not come back to this client,
+  whatever the mechanism.
+- That first instrumented run also exposed a worse problem than the missing
+  price: the turn took **117s and shipped zero combos**. Sequencing the
+  per-leg fallback after the probe meant paying both, and the probe's
+  refusals were tripping the process-wide breaker, poisoning the very leg
+  searches meant to rescue the turn. Fixed: the per-leg searches now start
+  BESIDE the probe (turn costs the slower of the two, not the sum), the
+  probe runs with `_local.suppress_breaker` so one measurably-flaky
+  endpoint cannot degrade the healthy ones, and its budget is capped at
+  12s — still 2-3 fresh-identity attempts, since refusals return in
+  seconds.
 - Retained from the first pass (independently useful): the per-leg fallback
   searches every leg as its own one-way when the combined price is
   genuinely unavailable, pairs them as separate tickets with the explicit

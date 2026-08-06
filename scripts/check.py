@@ -369,8 +369,12 @@ _mc_url = app.multi_city_search_url([
 # unnoticed. Refusals here are session-sticky like everywhere else, so
 # retrying as a fresh identity is the correct response; only MEASURED
 # consecutive refusals buy a quiet period.
-check("the combined probe keeps a real retry budget (session-sticky refusals)",
-      app.MC_PROBE_BUDGET_S >= 15.0, f"budget_s={app.MC_PROBE_BUDGET_S}")
+# Refusals come back fast (~1-3s), so this budget still buys 2-3
+# fresh-identity attempts — the point of the ladder — while capping how long
+# the probe can extend a turn. What it must never be again is small enough to
+# permit only ONE attempt: session-sticky refusals need a new identity.
+check("the combined probe keeps room for a fresh-identity retry, and no more",
+      4.0 <= app.MC_PROBE_BUDGET_S <= 12.0, f"budget_s={app.MC_PROBE_BUDGET_S}")
 _saved_mc = dict(app._mc_probe)
 app._mc_probe.update({"fails": 0, "quiet_until": 0.0})
 for _ in range(app.MC_PROBE_STRIKES):
@@ -384,6 +388,23 @@ app._mc_probe.update(_saved_mc)
 check("every multi-city payload reports what the probe actually did",
       open(os.path.join(ROOT, "api", "index.py")).read()
       .count('"combined_probe": probe_note') == 2)
+# Production, clean residential IPs, full ladder: the combined endpoint
+# returned nothing (26.1s) / timed out (21.6s) while one-way and round-trip
+# succeeded in the same process. Sequencing the per-leg fallback AFTER that
+# cost 117s and shipped zero combos, because the probe's refusals also
+# tripped the process-wide breaker and poisoned the legs.
+_src_mc2 = open(os.path.join(ROOT, "api", "index.py")).read()
+check("the per-leg searches overlap the probe instead of queueing behind it",
+      "leg_futs = [leg_pool.submit(" in _src_mc2
+      and _src_mc2.index("leg_futs = [leg_pool.submit(") < _src_mc2.index("note_mc_probe(bool(results))"))
+check("...and are handed to the fallback rather than re-run",
+      "leg_futs=leg_futs" in _src_mc2)
+check("the flaky combined endpoint cannot trip the breaker for other searches",
+      'suppress_breaker' in _src_mc2
+      and _src_mc2.count("_local.suppress_breaker = True") == 1
+      and "_local.suppress_breaker = False" in _src_mc2)
+check("the probe budget cannot dominate the legs it runs beside",
+      app.MC_PROBE_BUDGET_S <= 12.0, f"budget_s={app.MC_PROBE_BUDGET_S}")
 
 _mc_tfs_part = _mc_url.split("&curr")[0]
 check("the handoff link is a trip-type-3 search tfs (browser-verified form)",
