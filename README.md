@@ -434,6 +434,25 @@ same SSE events as the real loop, so streaming is fully exercisable locally.
 
 ## Changelog
 
+**August 2, 2026 (multi-city is BotGuard-gated: probe once, fall back honestly)**
+- The user's ATL-PEK + HKG-JFK multi-city priced at $1,288 on Google's own
+  page while the app said nothing came back. Diagnosis went to the wire:
+  the request encoding was ruled out by replaying the browser's own
+  byte-identical body (still refused), then a live header capture in the
+  Browser pane found the difference: `X-Goog-BatchExecute-Bgr` - BotGuard
+  attestation. Identical body: 133 bytes without the token, 35,770 with.
+  A server cannot mint it; one-way and round-trip remain ungated.
+- Design under the gate: the combined search gets ONE cheap probe (recovery
+  is automatic if Google un-gates it; a full ladder burned 24s and tripped
+  the breaker, choking the fallback that followed), then every leg is
+  searched as its own one-way concurrently - all honesty layers apply per
+  leg - paired by rank into separate-ticket combos with the explicit
+  separate-tickets warning, plus a browser-verified trip-type-3 tfs deep
+  link to Google's own multi-city page for these exact legs ("Price the
+  combined one-ticket itinerary on Google") on the card and in the model's
+  brief. The prompt no longer promises combined pricing and must never
+  claim the through-ticket does not exist. 8 checks added.
+
 **August 2, 2026 (PEI is not Beijing: geography echoes on every search)**
 - The model asserted PEI as a Beijing airport; PEI is Pereira, Colombia,
   and its cheap Bogota two-stops out-ranked the real Beijing fares, so the

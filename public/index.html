@@ -1088,6 +1088,15 @@
                   </div>
                 </template>
 
+                <!-- when Google withholds the combined ticket price from our
+                     session, the one-ticket answer is one tap away on its own
+                     multi-city page for these exact legs -->
+                <a class="show-all" style="display: block; text-align: center; text-decoration: none;"
+                   x-show="sec.type === 'multicity' && sec.combined_check_url"
+                   :href="sec.combined_check_url" target="_blank" rel="noopener noreferrer">
+                  Price the combined one-ticket itinerary on Google →
+                </a>
+
                 <!-- multi-city itineraries, compact -->
                 <template x-if="sec.type === 'multicity' && sec.results && sec.results.length && sectionView(sec) === 'compact'">
                   <div class="compact-grid">

@@ -353,6 +353,60 @@ check("a constraint-adding follow-up searches now, not after permission",
       "run the constrained search immediately" in _prompt_ga)
 
 # --------------------------------------------------------------------------
+section("Multi-city under BotGuard  — Changelog: 'the gated endpoint'")
+# --------------------------------------------------------------------------
+# Aug 2: Google gated combined multi-city pricing behind BotGuard (browser
+# header capture: identical body, 133 bytes without the token, 35,770 with).
+# A server cannot mint the token, so the fallback ships each leg's one-way
+# truth plus Google's own multi-city page for the one-ticket price.
+_mc_url = app.multi_city_search_url([
+    {"origins": ["ATL"], "destinations": ["PEK"], "date": "2027-01-01"},
+    {"origins": ["HKG"], "destinations": ["JFK"], "date": "2027-01-15"},
+])
+_mc_tfs_part = _mc_url.split("&curr")[0]
+check("the handoff link is a trip-type-3 search tfs (browser-verified form)",
+      "tfs=" in _mc_url and tfs_field(_mc_tfs_part, 19) == 3 and tfs_field(_mc_tfs_part, 2) == 2)
+check("a malformed segment degrades to the flights home page, never a crash",
+      app.multi_city_search_url([{"origins": [], "destinations": [], "date": None}])
+      == "https://www.google.com/travel/flights")
+
+def _fake_leg(spec):
+    n = {"PEK": 789.0, "JFK": 450.0}[spec["destinations"][0]]
+    return {"type": "flights", "results": [
+        {"airline": "Turkish", "price": n + i * 10, "duration": 900, "stops": 1, "warnings": [],
+         "legs": [{"from": spec["origins"][0], "to": spec["destinations"][0],
+                   "departure": spec["departure_date"] + "T10:00:00",
+                   "arrival": spec["departure_date"] + "T22:00:00",
+                   "airline_code": "TK", "flight_number": str(30 + i)}]}
+        for i in range(3)]}
+
+_fb = app.multi_city_fallback({"multi_city_segments": [
+    {"origins": ["ATL"], "destinations": ["PEK"], "date": "2027-01-01"},
+    {"origins": ["HKG"], "destinations": ["JFK"], "date": "2027-01-15"},
+]}, "USD", leg_search=_fake_leg)
+check("the fallback pairs per-leg one-ways into separate-ticket combos",
+      len(_fb["results"]) == 3
+      and _fb["results"][0]["total_price"] == 1239.0
+      and _fb["results"][0]["price_basis"] == "separate tickets")
+check("...warns about the separate-ticket trade explicitly",
+      "separate tickets" in _fb["results"][0]["warnings"][0])
+check("...and carries the one-ticket handoff link for card and model alike",
+      _fb.get("combined_check_url", "").startswith("https://www.google.com/travel/flights?tfs=")
+      and "never claim the combined ticket does not exist" in _fb["message"])
+_fb_empty = app.multi_city_fallback({"multi_city_segments": [
+    {"origins": ["ATL"], "destinations": ["PEK"], "date": "2027-01-01"},
+    {"origins": ["HKG"], "destinations": ["JFK"], "date": "2027-01-15"},
+]}, "USD", leg_search=lambda s: {"type": "flights", "results": []})
+check("legs that fail on their own still hand the user the Google link",
+      _fb_empty["results"] == [] and "combined_check_url" in _fb_empty)
+_fe_mc = open(os.path.join(ROOT, "public", "index.html")).read()
+check("the card offers 'price the combined ticket on Google'",
+      "Price the combined one-ticket itinerary on Google" in _fe_mc)
+check("the prompt stopped promising combined pricing and points at the link",
+      "withholds combined one-ticket pricing" in app.assistant_system_prompt()
+      and "never present the separate-ticket sum as the only price" in app.assistant_system_prompt())
+
+# --------------------------------------------------------------------------
 section("Flexible-date grids  — Changelog: 'round-trip grids priced same-day returns'")
 # --------------------------------------------------------------------------
 # Searched without a duration, Google's date grid prices departing AND flying

@@ -617,7 +617,7 @@ REQUEST_RULES = """How to handle requests:
 - A follow-up that ADDS a hard constraint (an airline or alliance, nonstop only, a cabin, a specific airport) is a new search, not a reading-comprehension question: run the constrained search immediately in that same turn instead of describing the ledger's thin slice and asking permission to look properly. Describe-then-ask is only right when the constraint is ambiguous.
 - Comparisons: run one search per option (at most 4 per turn). A self-arranged overnight stopover = one search per leg with the correct date on each. Give each search a summary naming the option ("Option A: Thursday nonstop").
 - Empty first results on busy routes are usually transient: retry the SAME search once before broadening. Once a search succeeds, stop; don't also run overlapping broader variants of a question that's already answered. (Empty searches are hidden from the user's page, so never reference "the empty section above.")
-- Multi-city trips (A -> B, B -> C, C -> A, or open-jaw): use trip_type multi_city with multi_city_segments — Google prices the whole trip together, often cheaper than separate one-ways. But NEVER promise "one ticket", through-checked bags, or missed-connection protection unless every leg is on the same carrier or alliance: mixed-carrier combinations (a result's warning will say so) are often issued as separate tickets even though they are priced together. Quote combined prices as "from $X" since the final price varies by seller. Use separate one-way searches when the user wants to compare against self-booking each leg.
+- Multi-city trips (A -> B, B -> C, C -> A, or open-jaw): use trip_type multi_city with multi_city_segments. Google currently withholds combined one-ticket pricing from automated sessions, so the result usually contains each leg priced as its own one-way, paired as separate tickets, plus a direct link to Google's multi-city page for the exact legs. Present the separate-ticket total honestly, warn about bags and missed-connection protection between separate tickets, and ALWAYS point at the link for the one-ticket price ("the combined ticket, sometimes cheaper when one carrier flies every leg, prices in one tap there"). Never claim the through-ticket does not exist, and never present the separate-ticket sum as the only price.
 - Make reasonable assumptions and state them briefly instead of interrogating the user. City-level vagueness is yours to resolve (airports, date windows, cabin). But ask ONE brief question before searching when the request is genuinely unresolvable: the origin is missing entirely, or the destination is a whole region or continent ("Europe", "Asia", "somewhere warm"). Offer to choose for them in the same breath, e.g. "Anywhere in Europe in particular? If you're open, I'm happy to compare a few favorites like London, Paris, and Lisbon." Never stack multiple questions, and never ask when a sensible assumption exists.
 - Airport precision matters: each result's route field states its true endpoints (e.g. FLL-EWR). Quote airports exactly from that field. Never name an airport the data does not show; EWR is not JFK.
 - IATA codes are assertions from memory, and memory misfiles them (PEI is Pereira, Colombia, not Beijing). Every result opens with "Route as searched" naming each airport's real city and country: READ it before writing a word of prose. If any airport there is not in the place the user asked for, say so plainly, ignore its flights entirely, and re-search without it in the same turn. Reliable expansions: NYC -> JFK/LGA/EWR, London -> LHR/LGW/STN, Tokyo -> HND/NRT, Beijing -> PEK/PKX, Shanghai -> PVG/SHA, Seoul -> ICN/GMP.
@@ -1642,6 +1642,37 @@ def google_flights_url(dep_code: str, arr_code: str, dep_date: str | None,
     if cabin and cabin != "economy":
         q += f" {cabin.replace('_', ' ')}"
     return f"https://www.google.com/travel/flights?q={quote(q)}"
+
+
+def multi_city_search_url(segments: list, cabin: str | None = None) -> str:
+    """The Google multi-city SEARCH page for these legs (no flights chosen).
+
+    August 2: Google gated the multi-city GetShoppingResults endpoint behind
+    BotGuard attestation (verified by header capture in a live browser:
+    identical body 133 bytes without the token, 35,770 with). A server
+    cannot mint that token, so the combined one-ticket price now lives one
+    tap away instead of inline: this tfs deep link (search-level: date and
+    endpoints per segment, trip type 3, no flight numbers) loads Google's
+    own pricing for exactly these legs — browser-verified today."""
+    try:
+        seat = CABIN_MAP.get(cabin or "economy", SeatType.ECONOMY).value
+        body = _pb_int(1, 28) + _pb_int(2, 2)
+        for seg in segments:
+            org = (seg.get("origins") or [None])[0]
+            dst = (seg.get("destinations") or [None])[0]
+            if not org or not dst or not seg.get("date"):
+                return "https://www.google.com/travel/flights"
+            body += _pb_msg(3,
+                _pb_str(2, seg["date"])
+                + _pb_msg(13, _pb_int(1, 1) + _pb_str(2, str(org).upper()))
+                + _pb_msg(14, _pb_int(1, 1) + _pb_str(2, str(dst).upper())))
+        body += _pb_int(8, seat) + _pb_int(9, 1) + _pb_int(14, 1)
+        body += _pb_msg(16, _pb_int(1, -1))
+        body += _pb_int(19, 3)
+        tfs = base64.urlsafe_b64encode(body).decode().rstrip("=")
+        return f"https://www.google.com/travel/flights?tfs={tfs}&curr=USD"
+    except Exception:
+        return "https://www.google.com/travel/flights"
 
 
 def multi_city_url(parts: list, cabin: str | None = None) -> str:
@@ -2786,6 +2817,78 @@ def leg_price_index(origins: list, destinations: list, date_: str, cabin: str | 
     return idx
 
 
+def multi_city_fallback(spec: dict, currency: str, leg_search=None) -> dict:
+    """When Google withholds combined multi-city pricing (BotGuard-gated
+    since Aug 2026), fall back to what is still fully knowable: each leg
+    searched as its own one-way — every honesty layer applies per leg —
+    paired by rank into separate-ticket combos, with Google's own
+    multi-city page linked for the one-ticket price. The truth we can get,
+    plus a tap to the truth we cannot."""
+    leg_search = leg_search or cached_execute_spec
+    raw_segs = (spec.get("multi_city_segments") or [])[:5]
+    if len(raw_segs) < 2:
+        return {"type": "multicity",
+                "message": "A multi-city trip needs at least two legs.", "results": []}
+
+    pool = ThreadPoolExecutor(max_workers=min(4, len(raw_segs)))
+    futs = [pool.submit(leg_search, {
+        "origins": seg.get("origins") or [], "destinations": seg.get("destinations") or [],
+        "trip_type": "one_way", "departure_date": seg.get("date"),
+        "cabin": spec.get("cabin"), "adults": spec.get("adults"),
+        "departure_time": seg.get("departure_time"),
+    }) for seg in raw_segs]
+    leg_payloads: list = []
+    for fu in futs:
+        try:
+            leg_payloads.append(fu.result(timeout=50))
+        except Exception:
+            leg_payloads.append(None)
+    pool.shutdown(wait=False, cancel_futures=True)
+
+    leg_results = [(p.get("results") or []) if isinstance(p, dict) else [] for p in leg_payloads]
+    check_url = multi_city_search_url(raw_segs, spec.get("cabin"))
+    if not all(leg_results):
+        empty = [i + 1 for i, r in enumerate(leg_results) if not r]
+        return {
+            "type": "multicity",
+            "message": (f"Google is not returning combined multi-city pricing to this session, and "
+                        f"leg {', '.join(map(str, empty))} came back empty on its own too. Tell the "
+                        "user plainly and give them the direct link to price the whole trip on "
+                        "Google (it is in this section), and offer to retry shortly."),
+            "results": [],
+            "combined_check_url": check_url,
+        }
+
+    priced = [[f for f in legs if f.get("price") is not None] or legs for legs in leg_results]
+    combos = []
+    for rank in range(min(5, min(len(x) for x in priced))):
+        parts = [legs[rank] for legs in priced]
+        prices = [p.get("price") for p in parts]
+        total = sum(p for p in prices if p is not None) if all(p is not None for p in prices) else None
+        combos.append({
+            "total_price": total, "currency": currency, "price_basis": "separate tickets",
+            "separate_price": total, "combined_price": None,
+            "parts": parts,
+            "warnings": ["Booked as separate tickets: no through-checked bags or "
+                          "missed-connection protection between legs"],
+            "booking_url": check_url,
+        })
+    return {
+        "type": "multicity",
+        "message": (
+            "Google now withholds combined one-ticket multi-city pricing from automated "
+            "sessions, so each leg was searched as its own one-way instead (fully priced "
+            "below) and paired by rank as separate tickets. IMPORTANT: a through-ticketed "
+            "single itinerary may exist at a different price, sometimes cheaper, especially "
+            "when one carrier serves every leg. The section carries a direct link to "
+            "Google's own multi-city page for these exact legs and dates: tell the user "
+            "the one-ticket price is one tap away there, and never claim the combined "
+            "ticket does not exist."),
+        "results": combos,
+        "combined_check_url": check_url,
+    }
+
+
 def search_multi_city(spec: dict, currency: str) -> dict:
     resolved = []
     invalid: list[str] = []
@@ -2848,15 +2951,19 @@ def search_multi_city(spec: dict, currency: str) -> dict:
     # (For 2-leg trips its representative reorder of leg-1 candidates fires
     # too — deliberate: the expansion set should represent the leg, not just
     # be its cheapest corner.)
-    results = run_search(RepresentativeSearch(), filters, sort, top_n=fanout, budget_s=45.0)
+    # ONE attempt only (budget_s below the ladder's retry gate): the combined
+    # endpoint is BotGuard-gated as of Aug 2026, so a full 4-attempt ladder
+    # burned ~24s AND tripped the breaker, choking the per-leg fallback that
+    # followed. A single cheap probe keeps automatic recovery if Google ever
+    # un-gates it, without hammering a door we know is locked.
+    try:
+        results = run_search(RepresentativeSearch(), filters, sort, top_n=fanout, budget_s=0.1)
+    except SearchClientError:
+        results = []  # gated or hiccuped: either way the fallback carries the turn
 
     if not results:
         price_pool.shutdown(wait=False, cancel_futures=True)
-        return {
-            "type": "multicity",
-            "message": "No multi-city itineraries found. Try shifting a date or splitting the legs into separate one-way searches.",
-            "results": [],
-        }
+        return multi_city_fallback(spec, currency)
 
     # harvest the leg prices that finished while the expansion ran; anything
     # still pending gets only a short grace before we degrade to joint prices
