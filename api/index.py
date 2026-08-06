@@ -620,6 +620,7 @@ REQUEST_RULES = """How to handle requests:
 - Multi-city trips (A -> B, B -> C, C -> A, or open-jaw): use trip_type multi_city with multi_city_segments — Google prices the whole trip together, often cheaper than separate one-ways. But NEVER promise "one ticket", through-checked bags, or missed-connection protection unless every leg is on the same carrier or alliance: mixed-carrier combinations (a result's warning will say so) are often issued as separate tickets even though they are priced together. Quote combined prices as "from $X" since the final price varies by seller. Use separate one-way searches when the user wants to compare against self-booking each leg.
 - Make reasonable assumptions and state them briefly instead of interrogating the user. City-level vagueness is yours to resolve (airports, date windows, cabin). But ask ONE brief question before searching when the request is genuinely unresolvable: the origin is missing entirely, or the destination is a whole region or continent ("Europe", "Asia", "somewhere warm"). Offer to choose for them in the same breath, e.g. "Anywhere in Europe in particular? If you're open, I'm happy to compare a few favorites like London, Paris, and Lisbon." Never stack multiple questions, and never ask when a sensible assumption exists.
 - Airport precision matters: each result's route field states its true endpoints (e.g. FLL-EWR). Quote airports exactly from that field. Never name an airport the data does not show; EWR is not JFK.
+- IATA codes are assertions from memory, and memory misfiles them (PEI is Pereira, Colombia, not Beijing). Every result opens with "Route as searched" naming each airport's real city and country: READ it before writing a word of prose. If any airport there is not in the place the user asked for, say so plainly, ignore its flights entirely, and re-search without it in the same turn. Reliable expansions: NYC -> JFK/LGA/EWR, London -> LHR/LGW/STN, Tokyo -> HND/NRT, Beijing -> PEK/PKX, Shanghai -> PVG/SHA, Seoul -> ICN/GMP.
 """
 
 ANSWER_RULES = """
@@ -1768,6 +1769,26 @@ def coords_for(code: str) -> dict | None:
     return {"code": code, "lat": a["lat"], "lon": a["lon"]} if a else None
 
 
+def airport_place(code: str) -> str:
+    """'PEK (Beijing, CN)' — the fact that unmasks a hallucinated code.
+
+    August 2: the model emitted PEI for Beijing. PEI is Pereira, Colombia;
+    its cheap two-stops via Bogota out-ranked the real Beijing fares and
+    the cards presented Colombia as China. A code is an assertion the model
+    makes from memory, so every search result now states each airport's
+    actual place, making a wrong code contradict itself in-context."""
+    a = airport_coords().get(code)
+    return f"{code} ({a['city']}, {a['country']})" if a and a.get("city") else code
+
+
+def route_echo(origins: list, destinations: list) -> str:
+    return ("Route as searched: "
+            + " / ".join(airport_place(a.name) for a in origins)
+            + " -> "
+            + " / ".join(airport_place(a.name) for a in destinations)
+            + ". If any airport is NOT in the place the user asked for, say so and re-search without it immediately.")
+
+
 def route_points(result) -> list[dict]:
     codes = []
     for leg in result.legs or []:
@@ -2086,7 +2107,8 @@ def airport_breakdown(items: list, dest_of, price_of) -> str | None:
         stats[a] = (n + 1, p if p is not None and (best is None or p < best) else best)
     if len(stats) < 2:
         return None
-    parts = [f"{a} {n} from ${best:.0f}" if best is not None else f"{a} {n}"
+    parts = [f"{airport_place(a)} {n} from ${best:.0f}" if best is not None
+             else f"{airport_place(a)} {n}"
              for a, (n, best) in sorted(stats.items(), key=lambda kv: -kv[1][0])]
     return "By destination airport: " + ", ".join(parts) + "."
 
@@ -3473,6 +3495,9 @@ def execute_spec(spec: dict) -> dict:
             "results": [],
         }
 
+    # geography before prose: a hallucinated code must contradict itself
+    # before the model writes a word about the "destination"
+    payload["message"] = f"{route_echo(origins, destinations)}\n{payload.get('message') or ''}"
     if spec.get("summary"):
         payload["message"] = f"{spec['summary']}\n\n{payload['message']}"
     # search fns may add their own notes (e.g. assumed trip length) — keep them

@@ -434,6 +434,18 @@ same SSE events as the real loop, so streaming is fully exercisable locally.
 
 ## Changelog
 
+**August 2, 2026 (PEI is not Beijing: geography echoes on every search)**
+- The model asserted PEI as a Beijing airport; PEI is Pereira, Colombia,
+  and its cheap Bogota two-stops out-ranked the real Beijing fares, so the
+  cards presented Colombia as China. Codes are assertions from memory and
+  memory misfiles them. Every search result now opens with "Route as
+  searched: ATL (Atlanta, US) -> PEI (Pereira, CO) / PEK (Beijing, CN)"
+  built from airportsdata, the per-airport breakdown names places too, and
+  the prompt orders the model to read the geography before writing prose
+  and to re-search without any airport that is not where the user asked —
+  plus trusted expansions for Beijing/Shanghai/Seoul alongside NYC/London/
+  Tokyo. A wrong code now contradicts itself in the model's own context.
+
 **August 2, 2026 (the missing carrier: unpriced inventory is inventory)**
 Evan's screenshots: the app showed Beijing->Chengdu as "$421 across the
 board, all China Southern" while Google's own UI led with China Eastern at

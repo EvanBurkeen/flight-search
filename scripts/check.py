@@ -338,7 +338,8 @@ check("a single-airport search stays untouched (no growth, no reorder)",
 
 _bd = app.airport_breakdown(_gnv_pool, dest_of=app._dest_of_result, price_of=lambda f: f.price)
 check("the model is told the per-airport truth over the FULL pre-cut set",
-      _bd is not None and "MCO 30 from $215" in _bd and "GNV 3 from $397" in _bd, str(_bd))
+      _bd is not None and "MCO (Orlando, US) 30 from $215" in _bd
+      and "GNV (Gainesville, US) 3 from $397" in _bd, str(_bd))
 check("one airport in play means no breakdown noise",
       app.airport_breakdown(_gnv_pool[:30], dest_of=app._dest_of_result,
                             price_of=lambda f: f.price) is None)
@@ -849,6 +850,29 @@ check("the probe asks Google for the missing carriers BY NAME, once, bounded",
       '"airlines_include": probe_codes' in _src_mn and "budget_s=16.0" in _src_mn)
 check("an unfillable gap ships an explicit ROUTE NOTE the model must relay",
       _src_mn.count("ROUTE NOTE") >= 2)
+
+# the PEI incident: the model asserted PEI meant Beijing; PEI is Pereira,
+# Colombia, and its cheap Bogota two-stops shipped as "Beijing" cards. A
+# code is an assertion from memory — every result now opens with the
+# geography, so a wrong code contradicts itself before the prose is written.
+check("airport_place unmasks a hallucinated code",
+      app.airport_place("PEI") == "PEI (Pereira, CO)"
+      and app.airport_place("PEK") == "PEK (Beijing, CN)")
+check("an unknown code degrades to itself, never a crash",
+      app.airport_place("ZZZ") == "ZZZ")
+_o_re, _ = app.resolve_airports(["ATL"])
+_d_re, _ = app.resolve_airports(["PEI", "PEK"])
+_echo = app.route_echo(_o_re, _d_re)
+check("every search result opens with the route's real geography",
+      "ATL (Atlanta, US)" in _echo and "PEI (Pereira, CO)" in _echo
+      and "PEK (Beijing, CN)" in _echo and "re-search without it" in _echo)
+check("...wired into execute_spec for every fixed and flexible search",
+      "route_echo(origins, destinations)" in _src_mn)
+check("the per-airport breakdown names places, not just codes",
+      "airport_place(a)" in _src_mn.split("def airport_breakdown")[1].split("def ")[0])
+check("the prompt orders a re-search when the geography contradicts the ask",
+      "READ it before writing a word of prose" in app.assistant_system_prompt()
+      and "Beijing -> PEK/PKX" in app.assistant_system_prompt(router=True))
 
 # --------------------------------------------------------------------------
 section("Latency overlaps  — Changelog: 'the sequential turn'")
