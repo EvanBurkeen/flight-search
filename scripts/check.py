@@ -345,8 +345,10 @@ check("one airport in play means no breakdown noise",
                             price_of=lambda f: f.price) is None)
 
 _prompt_ga = app.assistant_system_prompt()
-check("the prompt forbids 'came back with nothing' from a combined search",
-      "combined search" in _prompt_ga and "ONLY destination" in _prompt_ga)
+# superseded by the Aug 6 rule: the server now PROVES absence with a
+# dedicated search rather than asking the model to go and check
+check("the prompt still forbids absence claims from a combined pool",
+      "combined pool" in _prompt_ga and "searched ALONE automatically" in _prompt_ga)
 check("the prompt says to LEAD with the airport the user actually named",
       "LEAD with that airport" in _prompt_ga)
 check("a constraint-adding follow-up searches now, not after permission",
@@ -405,6 +407,48 @@ check("the flaky combined endpoint cannot trip the breaker for other searches",
       and "_local.suppress_breaker = False" in _src_mc2)
 check("the probe budget cannot dominate the legs it runs beside",
       app.MC_PROBE_BUDGET_S <= 12.0, f"budget_s={app.MC_PROBE_BUDGET_S}")
+
+# Aug 6, HVN/BDL -> FLL: the reply said "HVN has no service to FLL". It has
+# an Avelo nonstop, cheaper than the BDL flight recommended instead. Re-run
+# minutes later, the combined search DID include the HVN row - so nothing was
+# crowded out (it is the cheapest and only nonstop; the cut protects both).
+# A thin session and an empty route look identical from the rows alone, and
+# only a dedicated search can tell them apart.
+_bdl_only = [result([leg("BDL", "FLL", "2026-09-24T19:04", "2026-09-25T00:50", "DL", str(i))], 230.0 + i)
+             for i in range(8)]
+_o_hb, _ = app.resolve_airports(["HVN", "BDL"])
+_d_hb, _ = app.resolve_airports(["FLL"])
+check("a named airport with zero rows is identified, not assumed absent",
+      app.airports_with_no_rows(_o_hb, _bdl_only, app._orig_of_result) == ["HVN"])
+check("...and an airport that DID return rows is never re-probed",
+      app.airports_with_no_rows(_d_hb, _bdl_only, app._dest_of_result) == [])
+
+_hvn_row = [result([leg("HVN", "FLL", "2026-09-24T08:50", "2026-09-24T11:58", "Avelo", "101")], 180.0)]
+_spec_hb = {"origins": ["HVN", "BDL"], "destinations": ["FLL"], "departure_date": "2026-09-24"}
+_found = app.probe_missing_airports(_spec_hb, _o_hb, _d_hb, _bdl_only, None,
+                                    searcher_cls=lambda: types.SimpleNamespace(
+                                        search=lambda *a, **k: _hvn_row))
+check("the dedicated probe recovers service the combined search missed",
+      len(_found[0]) == 1 and _found[1] is None)
+_empty = app.probe_missing_airports(_spec_hb, _o_hb, _d_hb, _bdl_only, None,
+                                    searcher_cls=lambda: types.SimpleNamespace(
+                                        search=lambda *a, **k: []))
+check("only a dedicated search that ALSO came back empty licenses 'no service'",
+      _empty[0] == [] and "VERIFIED NO SERVICE" in (_empty[1] or "")
+      and "HVN (New Haven, US)" in _empty[1])
+check("a single-airport search never probes itself",
+      app.probe_missing_airports({"origins": ["HVN"], "destinations": ["FLL"]},
+                                 *app.resolve_airports(["HVN"])[:1], _d_hb, [], None) == ([], None)
+      if False else
+      app.probe_missing_airports({"origins": ["HVN"], "destinations": ["FLL"]},
+                                 app.resolve_airports(["HVN"])[0], _d_hb, _bdl_only, None)[0] == [])
+check("the prompt distinguishes 'we did not get options' from 'no service'",
+      "VERIFIED NO SERVICE" in app.assistant_system_prompt()
+      and "NEVER that it has no service" in app.assistant_system_prompt())
+_src_ap = open(os.path.join(ROOT, "api", "index.py")).read()
+check("both sides of the route get a breakdown and a rescued seat",
+      '("origin", _orig_of_row)' in _src_ap
+      and "rescue_airports(flights, ranked_all, dest_of=_orig_of_row)" in _src_ap)
 
 _mc_tfs_part = _mc_url.split("&curr")[0]
 check("the handoff link is a trip-type-3 search tfs (browser-verified form)",
@@ -1004,9 +1048,9 @@ check("knowledge questions still keep full effort",
 _router_p = app.assistant_system_prompt(router=True)
 _full_p = app.assistant_system_prompt()
 check("the router prompt is the request-handling half, not the whole concierge",
-      len(_router_p) < 0.7 * len(_full_p)
+      len(_router_p) < 0.75 * len(_full_p)
       and "SUGGESTIONS" not in _router_p
-      and "combined search" in _router_p,   # the Gainesville rules stay
+      and "combined pool" in _router_p,   # the airport-honesty rules stay
       f"{len(_router_p)}/{len(_full_p)} chars")
 check("the full prompt still carries every answering rule",
       "SUGGESTIONS" in _full_p and "lands_plus_days" in _full_p

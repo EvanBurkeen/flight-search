@@ -617,7 +617,7 @@ General aviation and travel questions are fully in scope even with no search inv
 REQUEST_RULES = """How to handle requests:
 - Vague is fine. Expand cities to their major airports (NYC -> JFK/LGA/EWR). "mid September" or "cheapest time to go" -> flexible_dates. Loyalty hints -> airline filters. A bare month/day means the nearest FUTURE date — if that month/day has already passed this year, it means next year.
 - Small regional airports (HVN, ISP, ORH, GNV-class fields) often have NO through-ticketed routes to each other. If a search from/to a small airport returns nothing, don't retry the same pair — immediately widen to the nearby majors in the same search (e.g. New Haven -> HVN,BDL,HPN and even LGA/JFK; Gainesville -> GNV,JAX,MCO) and tell the user the drive trade-off for each option you recommend.
-- A multi-airport search returns ONE combined pool, and a hub neighbor's cheap nonstops crowd a small field's pricier connections toward the bottom. The result message carries a per-destination-airport breakdown ("By destination airport: MCO 30 from $215, GNV 4 from $397") computed over everything Google returned: consult it before ANY claim about a specific airport. Never say an airport "came back with nothing" or has no through-ticketed service based on a combined search; if an airport the user named shows zero in the breakdown, run a dedicated search with that airport as the ONLY destination before claiming absence, and say what you found.
+- A multi-airport search returns ONE combined pool. The result message carries per-ORIGIN and per-DESTINATION airport breakdowns ("By origin airport: BDL 49 from $141, HVN 1 from $180") computed over everything Google returned: consult them before ANY claim about a specific airport. A named airport that returns nothing is now searched ALONE automatically before the results reach you, so: if the message says VERIFIED NO SERVICE for an airport, you may say it has no service that day; if an airport is simply absent from the breakdown with no such line, say you did not get options for it and offer to look again, NEVER that it has no service. A thin session and a genuinely empty route look identical, and only the dedicated search can tell them apart.
 - When the user names a specific airport and the breakdown shows it served, LEAD with that airport's options; the cheaper neighbor is the alternative, framed as dollars saved against drive time added, never the headline over the place they actually asked for.
 - "arrive by / be there by X" is an ARRIVAL constraint (arrival_time), never a departure cap.
 - When the user cares about the arrival DAY ("land on Friday"), set arrival_date and pick departure_date by timezone logic. Rules of thumb, not laws: typical daytime trans-Pacific Asia -> US routings land the same local day, but late-evening departures and long westbound routings (via the Middle East or Europe) land the NEXT day; US -> Asia/Europe overnights land the next day. When candidate routings vary widely, run two searches (departing the arrival day AND the day before, both with the same arrival_date) so no valid routing is missed. When they change or relax the arrival day, immediately re-search with the new dates — do not re-serve the old results or just offer to search.
@@ -2077,6 +2077,16 @@ def _dest_of_row(f: dict):
     return legs[-1]["to"] if legs else None
 
 
+def _orig_of_result(f):
+    legs = getattr(f, "legs", None)
+    return getattr(getattr(legs[0], "departure_airport", None), "name", None) if legs else None
+
+
+def _orig_of_row(f: dict):
+    legs = f.get("legs") or []
+    return legs[0]["from"] if legs else None
+
+
 def rescue_airports(kept: list, ranked_all: list, dest_of) -> list:
     """Re-insert the best-ranked row for any airport the cut erased.
 
@@ -2133,7 +2143,7 @@ def carrier_note(flights: list) -> str | None:
     )
 
 
-def airport_breakdown(items: list, dest_of, price_of) -> str | None:
+def airport_breakdown(items: list, dest_of, price_of, side: str = "destination") -> str | None:
     """'By destination: MCO 30 from $215, GNV 4 from $397' — or None if
     only one airport is in play. Computed over the FULL pre-cut set, so the
     model knows the truth even about options that did not ship."""
@@ -2150,7 +2160,7 @@ def airport_breakdown(items: list, dest_of, price_of) -> str | None:
     parts = [f"{airport_place(a)} {n} from ${best:.0f}" if best is not None
              else f"{airport_place(a)} {n}"
              for a, (n, best) in sorted(stats.items(), key=lambda kv: -kv[1][0])]
-    return "By destination airport: " + ", ".join(parts) + "."
+    return f"By {side} airport: " + ", ".join(parts) + "."
 
 
 EXPANSION_BUDGET_S = 8.0
@@ -2350,6 +2360,76 @@ def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy
     return []
 
 
+AIRPORT_PROBE_BUDGET_S = 12.0
+AIRPORT_PROBE_MAX = 2
+
+
+def airports_with_no_rows(named: list, results: list, side_of) -> list:
+    """User-named airports that this search returned NOTHING for.
+
+    Aug 6, HVN/BDL -> FLL: the combined search came back all-BDL and the
+    reply told the user "HVN has no service to FLL". It does — an Avelo
+    nonstop, cheaper than the BDL flight recommended instead. Re-running
+    the same search minutes later DID include the HVN row, so nothing was
+    crowded out (it is the cheapest and the only nonstop; the cut protects
+    both): the session simply got a thin slice, and a thin slice is
+    indistinguishable from absence unless you go and look.
+    """
+    seen = set()
+    for r in results:
+        for it in (r if isinstance(r, tuple) else (r,)):
+            a = side_of(it)
+            if a:
+                seen.add(a)
+    return [a.name for a in named if a.name not in seen]
+
+
+def probe_missing_airports(spec: dict, origins: list, destinations: list,
+                           results: list, sort, searcher_cls=None) -> tuple:
+    """One dedicated search per named airport that returned nothing.
+
+    Bounded and only for airports the USER named: this is the difference
+    between "we looked and there is no service" and "we did not look".
+    """
+    if not results or isinstance(results[0], tuple):
+        return [], None   # round trips disclose instead; tuples need pairing
+    searcher_cls = searcher_cls or SearchFlights
+    extra, still_empty = [], []
+    todo = ([("origin", a) for a in
+             airports_with_no_rows(origins, results, _orig_of_result)]
+            + [("destination", a) for a in
+               airports_with_no_rows(destinations, results, _dest_of_result)])
+    if len(origins) + len(destinations) < 3:
+        todo = []  # single-airport search: nothing to disambiguate
+    for side, code in todo[:AIRPORT_PROBE_MAX]:
+        one = {**spec, "origins": [code]} if side == "origin" else {**spec, "destinations": [code]}
+        o2, _ = resolve_airports(one["origins"])
+        d2, _ = resolve_airports(one["destinations"])
+        if not o2 or not d2:
+            continue
+        try:
+            rows = run_search(searcher_cls(),
+                              build_filters(one, o2, d2, show_all_results=True),
+                              sort, top_n=10, budget_s=AIRPORT_PROBE_BUDGET_S) or []
+        except Exception:
+            rows = []
+        rows = [r for r in rows if not isinstance(r, tuple)]
+        if rows:
+            have = {flight_signature(r) for r in results}
+            extra += [r for r in rows if flight_signature(r) not in have]
+            print(f"[airport-probe] {code} alone returned {len(rows)} rows "
+                  f"(combined search had none)")
+        else:
+            still_empty.append(code)
+            print(f"[airport-probe] {code} alone also returned nothing")
+    note = None
+    if still_empty:
+        note = (" VERIFIED NO SERVICE: " + ", ".join(airport_place(c) for c in still_empty)
+                + " returned nothing even when searched ALONE for this date, so it is "
+                  "honest to say that airport has no service on this route today.")
+    return extra, note
+
+
 def missing_from_manifest(results: list, manifest: dict | None) -> dict:
     """Carriers Google's own route data names but this session's rows lack."""
     if not manifest:
@@ -2467,6 +2547,16 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
     # got no rows for, ask for them BY NAME once. Beijing proved the pool
     # exists behind the filter (25 China Eastern schedules, fares withheld)
     # even when the unfiltered response omits them entirely.
+    # A named airport with zero rows is the one case a cut cannot explain
+    # and rescue cannot repair: go and look at it alone before anyone says
+    # "no service".
+    airport_note = None
+    if results and not isinstance(results[0], tuple) and spec.get("trip_type") != "round_trip":
+        _extra_ap, airport_note = probe_missing_airports(
+            spec, origins, destinations, results, sort)
+        if _extra_ap:
+            results = list(results) + _extra_ap
+
     manifest_note = None
     if results and not isinstance(results[0], tuple) and spec.get("trip_type") != "round_trip":
         missing = missing_from_manifest(results, route_manifest)
@@ -2739,8 +2829,15 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
         stops_of=lambda f: f.get("stops") or 0,
     )
     # a hub neighbor must not erase the named field from the shipped set
-    # (the Gainesville bug, in its one-way form)
+    # (the Gainesville bug, in its one-way form) — on BOTH sides of the
+    # route. Aug 6: HVN/BDL -> FLL crowded out every HVN row, and because
+    # the guarantee and the breakdown were destination-only (one
+    # destination here, so no breakdown at all), the model had zero HVN
+    # evidence and asserted "HVN has no service to FLL". Google had Breeze
+    # at $111 and an Avelo NONSTOP at $180, cheaper than the BDL flight we
+    # recommended, from the airport the user named first.
     flights = rescue_airports(flights, ranked_all, dest_of=_dest_of_row)
+    flights = rescue_airports(flights, ranked_all, dest_of=_orig_of_row)
     # ...and a CARRIER must not vanish either: unpriced rows rank last by
     # design (trip_cost None -> inf), so the cut would drop every trace of a
     # fare-withheld airline. rescue_airports is generic over its key.
@@ -2755,14 +2852,18 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
                     + (f", cheapest nonstop ${cheapest_nonstop:.0f}." if cheapest_nonstop else "."))
     else:
         message += " None are nonstop."
-    bd = airport_breakdown(ranked_all, dest_of=_dest_of_row, price_of=lambda f: f.get("price"))
-    if bd:
-        message += " " + bd
+    for _side, _key in (("origin", _orig_of_row), ("destination", _dest_of_row)):
+        bd = airport_breakdown(ranked_all, dest_of=_key,
+                               price_of=lambda f: f.get("price"), side=_side)
+        if bd:
+            message += " " + bd
     cn = carrier_note(ranked_all)
     if cn:
         message += " " + cn
     if manifest_note:
         message += manifest_note
+    if airport_note:
+        message += airport_note
     if arrival_note:
         message = f"{arrival_note}\n{message}"
     return {

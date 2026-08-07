@@ -434,6 +434,33 @@ same SSE events as the real loop, so streaming is fully exercisable locally.
 
 ## Changelog
 
+**August 6, 2026 ("HVN has no service to FLL" — it does)**
+- Asked for HVN/BDL into FLL, the reply asserted HVN had no service and
+  recommended a $204 BDL flight. HVN has an Avelo NONSTOP at $180, from
+  the airport the user named first. My first read was crowd-out; Evan
+  pushed back correctly — the HVN fare is the CHEAPEST in the set, and
+  both the cheapest and the only-nonstop are explicitly protected by the
+  cut, so a dropped row cannot explain it. Re-running the same search
+  minutes later DID return the HVN row. The session had simply been given
+  a thin slice, and **a thin slice is indistinguishable from absence
+  unless you go and look**.
+- `probe_missing_airports`: any airport the USER NAMED that returns zero
+  rows in a multi-airport search is now searched ALONE (bounded: 2 probes,
+  12s) before results ship. Rows found are merged; an airport that is
+  still empty ships `VERIFIED NO SERVICE`, and the prompt now permits "no
+  service" ONLY on that line — otherwise the model must say it did not get
+  options and offer to look again. The server proves absence instead of
+  asking the model to remember to check.
+- Airport representation is symmetric at last: `rescue_airports` and the
+  breakdown ran destination-only, so a single-destination search emitted
+  no breakdown at all and the model had zero counter-evidence. Both sides
+  now get a guaranteed seat and a reported line ("By origin airport: BDL
+  (Windsor Locks, US) 104 from $141, HVN (New Haven, US) 1 from $180").
+- Known and disclosed, not fixed: Google's API withholds the $111 Breeze
+  HVN-FLL fare even from a dedicated HVN search. The manifest layer names
+  such carriers rather than pretending the cheapest priced fare is the
+  route's floor.
+
 **August 2, 2026 (multi-city: a wrong diagnosis, corrected)**
 - The user's ATL-PEK + HKG-JFK multi-city priced at $1,288 on Google's own
   page while the app returned nothing. FIRST DIAGNOSIS WAS WRONG: header
