@@ -1158,6 +1158,15 @@ _n = _re.search(r"run_search\(searcher, filters, sort, top_n=(\d+)\)", _src)
 check("README's round-trip group count matches top_n",
       bool(_n) and f"~{_n.group(1)} round-trip OUTBOUND groups" in _readme,
       f"code expands top_n={_n.group(1) if _n else '?'}")
+# The Aug 2/6 sessions each lost real time to a confidently wrong diagnosis.
+# The cure is written down; these keep it written down.
+check("README teaches the control-first debugging rule",
+      "ALWAYS RUN A CONTROL" in _readme and "debugging your own network" in _readme)
+check("README carries the open-bug list a new session must see",
+      "KNOWN OPEN BUGS" in _readme and "leg_price_index" in _readme
+      and "itinerary_url" in _readme)
+check("README states the generalize-the-fix rule up front",
+      "Fix the CLASS, not the instance" in _readme)
 check("README documents streaming as live iff the frontend consumes it",
       ("streamTurn" in _fe) == ("Streaming is LIVE" in _readme))
 check("README documents the cross-turn ledger iff the code carries one",

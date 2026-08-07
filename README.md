@@ -25,6 +25,12 @@ this file, then **"Lessons the hard way"** below before debugging anything.
   earlier version passed while `HOUR_VALUE` was zeroed, and that reached prod.
 - **Fresh clone, one-time:** `git config core.hooksPath .githooks` (hooks are not
   cloned, and `check.py` fails until you set it).
+- **Fix the CLASS, not the instance.** Every durable improvement here came
+  from asking "what is the general shape of this bug?" — one missing
+  airport became "no cut may erase an airport Google served", one wrong
+  date became "state the day offset so the model never computes it", one
+  false "no service" became "prove absence with a dedicated search".
+  A fix that only handles the reported example will be re-reported.
 - **Never `git reset --hard` with uncommitted work** and never `git add -A` for a
   throwaway commit; both cost real work here on July 24, 2026. Commit or stash
   the good work first, and stage probe files explicitly.
@@ -70,6 +76,25 @@ this file, then **"Lessons the hard way"** below before debugging anything.
   July 24; the calendar heatmap and streaming replies shipped July 25; the
   cross-turn results ledger — the useful slice of "trip memory" without login
   — and price context shipped July 28.)
+- **KNOWN OPEN BUGS (as of Aug 6, 2026) — pick these up before new features:**
+  1. **Multi-city quotes a price it should not.** Production returned 8
+     combos with "$5,409 one ticket" as best value while the per-leg
+     searches in the SAME turn found $789 + $701 = $1,490 separate.
+     `leg_price_index` only matches by exact flight signature, so
+     `all_matched` is usually false and the separate-vs-combined comparison
+     silently never fires. The per-leg futures (`leg_futs`) already run in
+     parallel — use them as the separate-ticket floor, and never present a
+     combined price above a purchasable separate one. This is the
+     "quote what you can actually buy" invariant, currently violated.
+  2. **Passenger count never reaches the Book link.** Cards say "per
+     person" and the SEARCH honors `adults`/`children`, but `itinerary_url`
+     defaults `adults=1` at all four call sites. A family-of-four search
+     books one seat. Also settle whether `result.price` is per-person or
+     party-total and label it.
+  3. **Google withholds some fares entirely.** The $111 Breeze HVN-FLL fare
+     never appears, even from a dedicated single-airport search. Disclosed
+     by the manifest layer rather than hidden; probably not fixable
+     client-side, but worth re-testing occasionally.
 - **Known trade-offs accepted by Evan:** timeline layover dots use naive local
   times (schematic, not exact); Claude sees only top-6 summaries per search
   (with truncation warning baked in); the value-ranking weights
@@ -84,6 +109,33 @@ Non-obvious things this project already paid for. **Read the relevant part befor
 debugging in its area** — each cost a real investigation, and several are
 counterintuitive enough that a fresh assistant will otherwise repeat the bug.
 `scripts/check.py` guards the testable ones.
+
+**Debugging discipline (read this first — it is what actually costs time here)**
+- **ALWAYS RUN A CONTROL.** Aug 2: multi-city searches were refused from
+  this laptop, and the conclusion was "Google gated the multi-city
+  endpoint" — published, committed, and wrong. The machine's IP had been
+  soft-blocked, and a blocked address refuses EVERY trip type with the same
+  ~95-byte body. A bisection with no control cannot tell "this endpoint is
+  broken" from "this address is blocked". Before concluding anything from a
+  failed request, run a request you KNOW should work (a plain one-way) in
+  the same process, minutes apart. If the control fails, stop: you are
+  debugging your own network, not the product.
+- **Production is the only clean testbed.** It has the residential proxy;
+  this laptop does not. When local evidence is ambiguous, instrument the
+  code to report what it did (`combined_probe`, `price_context_status`,
+  `est_cost_usd` all exist for exactly this reason), push, and read the
+  answer from prod instead of inferring it locally.
+- **The nearest plausible story is usually not the true one.** Aug 6: HVN
+  flights were missing and the first diagnosis was "the value cut crowded
+  them out" — impossible, since the HVN fare was the CHEAPEST in the set
+  and the cut explicitly protects the cheapest and the only nonstop. The
+  real cause was a thin session returning zero HVN rows. When Evan pushes
+  back on a diagnosis, he is usually right; re-derive it from the data
+  rather than defending it.
+- **A wrong fix is worse than no fix.** That same wrong diagnosis cut the
+  multi-city retry ladder to a single attempt, disabling the
+  identity-rotation that beats the most common failure mode here. Check
+  what a "fix" REMOVES, not just what it adds.
 
 **Google's data layer**
 - **Results arrive as PROGRESSIVE chunks inside one HTTP response.** `GetShoppingResults`
@@ -433,6 +485,26 @@ same SSE events as the real loop, so streaming is fully exercisable locally.
   lakes; run it, then bump the `?v=N` cache-buster on the script tag in index.html).
 
 ## Changelog
+
+**August 6, 2026 (the README learns what the sessions learned)**
+- Evan: "why don't you add that to the readme — the lessons learned and the
+  important stuff a new agent should know?" Three additions, each pinned by
+  a drift check so they cannot quietly rot:
+  - **Debugging discipline**, now the FIRST subsection of Lessons: always
+    run a control (the Aug 2 "Google gated multi-city" conclusion was a
+    soft-blocked laptop IP, and a blocked address refuses every trip type
+    identically); production is the only clean testbed, so instrument and
+    read rather than infer locally; the nearest plausible story is usually
+    not the true one (Aug 6 "the cut crowded out HVN" — impossible, the HVN
+    fare was the cheapest and the cut protects the cheapest); and check
+    what a fix REMOVES, since that same wrong diagnosis deleted the
+    multi-city retry ladder.
+  - **KNOWN OPEN BUGS**, so unfinished work is visible before a new session
+    starts something else: the multi-city separate-vs-combined comparison
+    that silently never fires, the passenger count that never reaches the
+    Book link, and the fares Google withholds outright.
+  - **"Fix the CLASS, not the instance"** in the opening section — the
+    instruction that turned each reported example into a general invariant.
 
 **August 6, 2026 ("HVN has no service to FLL" — it does)**
 - Asked for HVN/BDL into FLL, the reply asserted HVN had no service and
