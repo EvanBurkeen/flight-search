@@ -135,6 +135,63 @@ check("f2 stays constant at 2 for every trip type",
 check("a leg with no departure time yields no link rather than a broken one",
       app.itinerary_url([[types.SimpleNamespace(departure_datetime=None)]]) is None)
 
+# Aug 7: the schema comment said "8: seat, 9: adults" — backwards, and the
+# 1-adult-economy fixture above cannot catch it (both readings encode as a
+# single value 1). Decoded from Google's OWN tokens (2 adults + 2 children,
+# economy vs business, same session): f8 is one varint per traveler
+# (adult=1, child=2), f9 is the seat. Before the fix, business-class Book
+# links encoded "one lap infant, economy" — and a family of four booked one
+# seat (the README's open bug 2, now closed).
+def tfs_fields(url: str, field: int) -> list:
+    """Every varint value of a repeated top-level tfs field, in order."""
+    raw = url.split("tfs=")[1].split("&")[0]
+    b = base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))
+
+    def varint(i):
+        v = s = 0
+        while i < len(b):
+            c = b[i]; i += 1
+            v |= (c & 0x7F) << s; s += 7
+            if not c & 0x80:
+                return v, i
+        raise ValueError("truncated varint")
+
+    i, out = 0, []
+    while i < len(b):
+        key, i = varint(i)
+        f, w = key >> 3, key & 7
+        if w == 0:
+            v, i = varint(i)
+            if f == field:
+                out.append(v)
+        elif w == 2:
+            ln, i = varint(i)
+            i += ln
+        else:
+            break
+    return out
+
+
+_fam_leg = [leg("FLL", "JFK", "2026-11-29T10:00", "2026-11-29T13:00", "B6", "1802")]
+_fam = app.itinerary_url([_fam_leg], trip_type=2, adults=2, children=2)
+check("passengers ride in f8, one entry per traveler (adult=1, child=2)",
+      tfs_fields(_fam, 8) == [1, 1, 2, 2] and tfs_fields(_fam, 9) == [1],
+      f"f8={tfs_fields(_fam, 8)} f9={tfs_fields(_fam, 9)}")
+_biz = app.itinerary_url([_fam_leg], cabin="business", trip_type=2)
+check("the seat class rides in f9 (business=3), never in the passenger field",
+      tfs_fields(_biz, 8) == [1] and tfs_fields(_biz, 9) == [3],
+      f"f8={tfs_fields(_biz, 8)} f9={tfs_fields(_biz, 9)}")
+check("the defaults stay byte-identical to the pax-free call (fixture guard)",
+      app.itinerary_url([_fam_leg], trip_type=2, adults=1, children=0) == one_way)
+_sf_pax = app.serialize_flight(result(list(_fam_leg), 239.0), "economy", adults=2, children=1)
+check("serialize_flight threads the party into the Book link",
+      tfs_fields(_sf_pax["booking_url"], 8) == [1, 1, 2])
+_mc_fam = app.multi_city_search_url([
+    {"origins": ["ATL"], "destinations": ["PEK"], "date": "2027-01-01"},
+    {"origins": ["HKG"], "destinations": ["JFK"], "date": "2027-01-15"}], adults=2, children=1)
+check("the multi-city handoff link carries the party too",
+      tfs_fields(_mc_fam.split("&curr")[0], 8) == [1, 1, 2])
+
 # --------------------------------------------------------------------------
 section("Value ranking  — Changelog: 'value ranking', 'representative results'")
 # --------------------------------------------------------------------------
@@ -236,6 +293,72 @@ check("quotes the purchasable price, not the joint fare nobody buys",
 check("says which basis it quoted", it.get("price_basis") == "separate tickets")
 check("warns that mixed carriers may be separate tickets",
       any("separate tickets" in w for w in it.get("warnings") or []))
+
+# Aug 7: production presented "$5,409 one ticket" as best value while the
+# SAME turn's per-leg searches found $789 + $701 purchasable. The exact-
+# signature comparison above only fires when the combined itinerary reuses
+# the standalone one-ways' EXACT flights (all_matched) — usually false — so
+# the honest number silently never surfaced. The per-leg payloads already
+# running beside the probe now provide a purchasable separate-ticket FLOOR
+# that ships as its own honestly-labeled option.
+_fp1 = result([leg("ATL", "PEK", "2026-12-01T10:00", "2026-12-02T14:00", "DL", "100")], 5409, stops=1, duration=1100)
+_fp2 = result([leg("HKG", "JFK", "2026-12-10T10:00", "2026-12-10T15:00", "KE", "200")], 5409, stops=0, duration=900)
+_mc_floor_spec = {"multi_city_segments": [
+    {"origins": ["ATL"], "destinations": ["PEK"], "date": "2026-12-01"},
+    {"origins": ["HKG"], "destinations": ["JFK"], "date": "2026-12-10"}]}
+
+
+def _floor_leg_payload(spec):
+    if "ATL" in (spec.get("origins") or []):
+        return {"type": "flights", "results": [app.serialize_flight(result(
+            [leg("ATL", "PEK", "2026-12-01T09:00", "2026-12-02T13:00", "UA", "55")], 789, stops=1, duration=1150))]}
+    return {"type": "flights", "results": [app.serialize_flight(result(
+        [leg("HKG", "JFK", "2026-12-10T11:00", "2026-12-10T16:00", "CX", "88")], 701, stops=0, duration=920))]}
+
+
+_real_ces = app.cached_execute_spec
+app.run_search = lambda *a, **k: [(_fp1, _fp2)]
+app.leg_price_index = lambda *a, **k: {}  # signatures never match -> old path dead
+app.cached_execute_spec = _floor_leg_payload
+_mcf = app.search_multi_city(dict(_mc_floor_spec), "USD")
+app.run_search, app.leg_price_index, app.cached_execute_spec = _real_run, _real_index, _real_ces
+_top = (_mcf.get("results") or [{}])[0]
+check("the purchasable per-leg sum outranks a joint fare nobody would buy",
+      _top.get("total_price") == 1490 and _top.get("price_basis") == "separate tickets",
+      f"top={_top.get('total_price')} basis={_top.get('price_basis')}")
+check("...and says its flights are NOT the one-ticket options' flights",
+      any("DIFFERENT flights" in w for w in _top.get("warnings") or [])
+      and any("separate tickets" in w.lower() for w in _top.get("warnings") or []))
+_comb = next((r for r in _mcf["results"] if r.get("price_basis") == "one ticket"), {})
+check("the one-ticket card keeps ITS OWN price and names both numbers",
+      _comb.get("total_price") == 5409
+      and any("5,409" in w and "1,490" in w for w in _comb.get("warnings") or []))
+check("the success payload carries the Google handoff link and the rule",
+      str(_mcf.get("combined_check_url", "")).startswith("https://www.google.com/travel/flights?tfs=")
+      and "never present a one-ticket price above it" in _mcf["message"])
+
+# the floor must degrade to exactly the old behavior when the legs fail...
+app.run_search = lambda *a, **k: [(_fp1, _fp2)]
+app.leg_price_index = lambda *a, **k: {}
+app.cached_execute_spec = lambda spec: (_ for _ in ()).throw(RuntimeError("leg boom"))
+_mc_broke = app.search_multi_city(dict(_mc_floor_spec), "USD")
+app.run_search, app.leg_price_index, app.cached_execute_spec = _real_run, _real_index, _real_ces
+check("every leg failing degrades to the joint quote, never a crash",
+      len(_mc_broke["results"]) == 1 and _mc_broke["results"][0]["total_price"] == 5409)
+
+# ...and the exact-signature comparison stays authoritative when it fires:
+# a floor ABOVE the matched separate total appends nothing
+app.run_search = lambda *a, **k: [(p1, p2)]
+app.leg_price_index = lambda origins, dests, date_, cabin, win=None: (
+    {(("DL", "201"),): 844.0} if "FLL" in list(origins) else {(("OZ", "339"),): 182.0})
+app.cached_execute_spec = _floor_leg_payload  # sums to 1490 > 1026
+_mc_match = app.search_multi_city({"multi_city_segments": [
+    {"origins": ["FLL"], "destinations": ["ICN"], "date": "2026-12-28"},
+    {"origins": ["ICN"], "destinations": ["HRB"], "date": "2027-01-01"}]}, "USD")
+app.run_search, app.leg_price_index, app.cached_execute_spec = _real_run, _real_index, _real_ces
+check("when the same-flights comparison fires below the floor, it wins alone",
+      _mc_match["results"][0]["total_price"] == 1026
+      and sum(1 for r in _mc_match["results"] if r["price_basis"] == "separate tickets") == 1)
 
 # --------------------------------------------------------------------------
 section("Round-trip expansion breadth  — Changelog: 'the board, and representative expansion'")
@@ -588,6 +711,36 @@ _huge = {"entries": [dict(_entry, options=_entry["options"] * 400) for _ in rang
 check("a client-supplied ledger is capped, not trusted",
       len(app.ledger_context([_huge, _huge])) < app.LEDGER_MAX_CHARS + 2000,
       f"{len(app.ledger_context([_huge, _huge]))} chars")
+
+# a single oversized OPTION once stalled the halving loop at [:1] forever —
+# ledger_context runs before any model call, so one crafted POST hung the
+# whole request and pinned its SSE worker. The loop now proves progress on
+# every pass or drops the ledger.
+_poison = [{"entries": [{"route": "A to B", "kind": "flights",
+                         "options": [{"airline": "X" * 20000}]}]}]
+_led_out = [False, "unset"]
+
+
+def _led_run():
+    _led_out[1] = app.ledger_context(_poison)
+    _led_out[0] = True
+
+
+_led_t = threading.Thread(target=_led_run, daemon=True)
+_led_t.start()
+_led_t.join(5)
+check("an unsalvageable oversized entry is dropped, never spun on forever",
+      _led_out[0] and _led_out[1] is None)
+
+# multi-city specs keep their route in the segments; the generic join
+# recorded the literal string ' to ' for every multi-city search
+_mc_led = app.ledger_entry(
+    {"trip_type": "multi_city", "multi_city_segments": [
+        {"origins": ["ATL"], "destinations": ["PEK"]},
+        {"origins": ["HKG"], "destinations": ["JFK"]}]},
+    {"type": "multicity", "results": [{"total_price": 1490, "price_basis": "separate tickets", "parts": []}]})
+check("a multi-city ledger entry records the real route, not ' to '",
+      _mc_led["route"] == "ATL-PEK then HKG-JFK", repr(_mc_led.get("route")))
 
 # --------------------------------------------------------------------------
 section("Price context  — Changelog: 'is this a good fare'")
@@ -1128,6 +1281,108 @@ check("list lines survive the join",
 check("bold still renders", "<strong>$239</strong>" in render_text("it is **$239** today"))
 
 # --------------------------------------------------------------------------
+section("Date coherence  — Changelog: 'a round trip that returned before it left'")
+# --------------------------------------------------------------------------
+# roll_past_dates rolled each date INDEPENDENTLY: asked for "Aug 1 to Aug 20"
+# a few days after Aug 1, the departure rolled a year and the return stayed —
+# an incoherent filter Google met with silence, reported to the user as
+# "No flights found" for a perfectly answerable question. (For flexible
+# windows fli silently SWAPS an inverted from/to, turning the asked month
+# into an ~11-month grid — same class, different symptom.)
+from datetime import timedelta as _td
+
+_t0 = datetime.now()
+_past6 = (_t0 - _td(days=6)).strftime("%Y-%m-%d")
+_soon13 = (_t0 + _td(days=13)).strftime("%Y-%m-%d")
+_rolled, _rnotes = app.roll_past_dates(
+    {"trip_type": "round_trip", "departure_date": _past6, "return_date": _soon13})
+check("a rolled departure drags the return past it (never return-before-depart)",
+      _rolled["return_date"] > _rolled["departure_date"],
+      f"{_rolled['departure_date']} -> {_rolled['return_date']}")
+check("...and says so in the notes the user sees", len(_rnotes) >= 2)
+_rolled_fx, _ = app.roll_past_dates(
+    {"flexible_dates": {"from_date": _past6, "to_date": (_t0 + _td(days=24)).strftime("%Y-%m-%d")}})
+check("a flexible window can never invert",
+      _rolled_fx["flexible_dates"]["to_date"] >= _rolled_fx["flexible_dates"]["from_date"])
+_rolled_arr, _ = app.roll_past_dates(
+    {"trip_type": "one_way", "departure_date": _past6, "arrival_date": _soon13})
+check("arrival-day targets stay on or after the rolled departure",
+      _rolled_arr["arrival_date"] >= _rolled_arr["departure_date"])
+_pd40 = _t0 - _td(days=40)
+_sp_q = f"jfk to ord {_pd40.strftime('%b').lower()} {_pd40.day}"
+_sp = app.speculative_spec(_sp_q)
+check("speculation guesses the FUTURE date the router will emit (else the cache never matches)",
+      _sp is None or _sp["departure_date"] >= _t0.strftime("%Y-%m-%d"),
+      f"{_sp_q!r} -> {_sp and _sp['departure_date']}")
+
+# --------------------------------------------------------------------------
+section("Party totals  — Changelog: 'the family of four that booked one seat'")
+# --------------------------------------------------------------------------
+# Live A/B (JFK->ORD, 1 adult vs 2 adults + 1 child): all nine common flights
+# priced at 2.99-3.00x — Google returns PARTY TOTALS for the searched pax
+# mix, never per-person. Cards said "per person" and every Book link
+# defaulted to one adult.
+_ppay = app.stamp_party({"type": "flights", "message": "Found 3 options.", "results": []},
+                        {"adults": 2, "children": 2})
+check("payloads carry the party and tell the model prices are party totals",
+      _ppay["party"]["travelers"] == 4
+      and "TOTAL for 2 adult(s) + 2 child(ren)" in _ppay["message"])
+check("a solo search keeps its message untouched",
+      app.stamp_party({"type": "flights", "message": "m", "results": []}, {})["message"] == "m")
+_src_pax = open(os.path.join(ROOT, "api", "index.py")).read()
+check("the multi-city leg sub-specs stop dropping children",
+      _src_pax.count('"children": spec.get("children"),') >= 2)
+check("the price-context cache key splits on children",
+      '"children": spec.get("children") or 0,' in _src_pax)
+check("the /api/returns spec_echo keeps the party (tap-to-price books it too)",
+      app._rt_spec_echo({"adults": 3, "children": 1}, *[[types.SimpleNamespace(name="JFK")],
+                        [types.SimpleNamespace(name="FLL")]])["adults"] == 3)
+_fe_pax = open(os.path.join(ROOT, "public", "index.html")).read()
+check("the frontend labels party totals instead of claiming 'per person'",
+      "partyN(sec)" in _fe_pax and "paxSuffix(sec)" in _fe_pax
+      and "total for ' + partyN(sec) + ' travelers" in _fe_pax)
+check("share cards say whose total the price is",
+      "total for ' + this.partyN(sec) + ' travelers" in _fe_pax)
+
+# --------------------------------------------------------------------------
+section("Wire efficiency  — Changelog: 'the bytes the client threw away'")
+# --------------------------------------------------------------------------
+_src_eff = open(os.path.join(ROOT, "api", "index.py")).read()
+check("the sections frame is a count marker, not a payload the client discards",
+      'emit("sections", {"count": len(fresh)})' in _src_eff
+      and 'emit("sections", fresh)' not in _src_eff)
+check("SSE frames serialize compact (no ', '/': ' padding)",
+      "separators=(',', ':')" in _src_eff)
+_jfk_pt = app.coords_for("JFK")
+check("route points ship rounded coordinates (3 decimals ~ 110m)",
+      bool(_jfk_pt) and abs(_jfk_pt["lat"] * 1000 - round(_jfk_pt["lat"] * 1000)) < 1e-6
+      and abs(_jfk_pt["lon"] * 1000 - round(_jfk_pt["lon"] * 1000)) < 1e-6)
+_fe_eff = open(os.path.join(ROOT, "public", "index.html")).read()
+check("world.js defers instead of blocking first paint",
+      '<script defer src="/world.js' in _fe_eff)
+check("world.js is immutable-cached (it is ?v= cache-busted)",
+      "immutable" in open(os.path.join(ROOT, "vercel.json")).read())
+
+# --------------------------------------------------------------------------
+section("Frontend robustness  — Changelog: Aug 7 paper cuts")
+# --------------------------------------------------------------------------
+check("a degraded multi-city section still shows the Google link it promises",
+      "s.type === 'multicity' && s.combined_check_url" in _fe_eff)
+check("Stop stops the typewriter too, and never leaves an empty bubble",
+      "this.reqId++;" in _fe_eff.split("stop(silent)")[1].split("async search")[0]
+      and "this.messages.pop()" in _fe_eff.split("stop(silent)")[1].split("async search")[0])
+check("IME Enter commits the composition, not the message",
+      "isComposing" in _fe_eff)
+check("a chip or calendar tap never wipes a typed draft",
+      "if (!queryOverride)" in _fe_eff)
+check("share image actions require a rendered image",
+      'x-show="share.blob"' in _fe_eff)
+check("the multi-city basis label counts the real legs",
+      "'as ' + (it.parts || []).length + ' separate tickets'" in _fe_eff)
+check("/api/returns rejects unknown airports as a 400, not a raw 500",
+      "unrecognized leg airport" in _src_eff)
+
+# --------------------------------------------------------------------------
 section("README drift  — the doc must match the code it describes")
 # --------------------------------------------------------------------------
 # The pre-push hook forces a README edit per code push, but a Changelog line
@@ -1187,6 +1442,12 @@ check("README documents the ASSISTANT_MODEL escape hatch",
       "ASSISTANT_MODEL" in _readme)
 check("README states the 1-hour cache TTL it now pays 2x writes for",
       "1h" in _readme or "1-hour" in _readme)
+check("README documents the tfs passenger/seat fields as verified",
+      "one varint per traveler" in _readme and "f9" in _readme)
+check("README states the party-total pricing invariant",
+      "party total" in _readme.lower())
+check("README pins the separate-ticket floor invariant",
+      "separate-ticket floor" in _readme)
 
 # --------------------------------------------------------------------------
 section("Process guards")

@@ -18,7 +18,9 @@
       window.__applyTheme = apply;
     })();
   </script>
-  <script src="/world.js?v=2"></script>
+  <!-- defer: world.js only feeds Alpine's init() (also deferred, later in
+       document order), so it must not block first paint -->
+  <script defer src="/world.js?v=2"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
   <style>
     :root {
@@ -812,7 +814,7 @@
                           <template x-for="(h, k) in f.highlights" :key="k"><span class="badge" :class="badgeClass(h)" x-text="h"></span></template>
                         </div>
                         <div class="compact-warn" x-show="(f.warnings || []).length" x-text="'⚠ ' + (f.warnings || []).length + ' caveat' + (f.warnings.length > 1 ? 's' : '') + ' — see Detailed'"></div>
-                        <a :href="f.booking_url" target="_blank" rel="noopener noreferrer" class="compact-book">Book →</a><button class="share-quiet" @click="shareFlight(f)">Share</button>
+                        <a :href="f.booking_url" target="_blank" rel="noopener noreferrer" class="compact-book">Book →</a><button class="share-quiet" @click="shareFlight(f, sec)">Share</button>
                       </div>
                     </template>
                   </div>
@@ -833,7 +835,7 @@
                           </div>
                           <div>
                             <div class="card-price" x-text="f.price == null ? '—' : formatPrice(f.price, f.currency)"></div>
-                            <div class="card-price-note" x-text="f.price == null ? 'fare shows on Google — tap Book' : 'one-way, per person'"></div>
+                            <div class="card-price-note" x-text="f.price == null ? 'fare shows on Google — tap Book' : (partyN(sec) > 1 ? 'one-way, total for ' + partyN(sec) + ' travelers' : 'one-way, per person')"></div>
                           </div>
                         </div>
                         <div class="route">
@@ -868,7 +870,7 @@
                         <template x-for="(w, k) in (f.warnings || [])" :key="'w'+k">
                           <div class="warning" x-text="w"></div>
                         </template>
-                        <a :href="f.booking_url" target="_blank" rel="noopener noreferrer" class="card-action">Book on Google Flights</a><button class="share-quiet" @click="shareFlight(f)">Share</button>
+                        <a :href="f.booking_url" target="_blank" rel="noopener noreferrer" class="card-action">Book on Google Flights</a><button class="share-quiet" @click="shareFlight(f, sec)">Share</button>
                       </div>
                     </template>
                   </div>
@@ -885,7 +887,7 @@
                         </div>
                         <div class="compact-leg"><span class="lbl">Out</span><span x-text="formatTime(it.outbound.legs[0].departure) + ' → ' + formatTime(it.outbound.legs[it.outbound.legs.length-1].arrival) + arrivalDay(it.outbound) + ' · ' + stopsText(it.outbound.stops)"></span></div>
                         <div class="compact-leg"><span class="lbl">Ret</span><span x-text="formatTime(it.return.legs[0].departure) + ' → ' + formatTime(it.return.legs[it.return.legs.length-1].arrival) + arrivalDay(it.return) + ' · ' + stopsText(it.return.stops)"></span></div>
-                        <div class="compact-sub" x-text="'round trip total' + (((it.outbound.warnings || []).length + (it.return.warnings || []).length) ? ' · ⚠ see Detailed' : '')"></div>
+                        <div class="compact-sub" x-text="'round trip total' + paxSuffix(sec) + (((it.outbound.warnings || []).length + (it.return.warnings || []).length) ? ' · ⚠ see Detailed' : '')"></div>
                         <div class="compact-ret" x-show="(it.return_options || []).length > 1">
                           <select class="fselect" @change="pickReturn(it, +$event.target.value)">
                             <template x-for="(r, ri) in (it.return_options || [])" :key="ri">
@@ -897,7 +899,7 @@
                         <div class="compact-badges" x-show="it.outbound.stops === 0 && it.return.stops === 0">
                           <span class="badge badge-direct">Direct both ways</span>
                         </div>
-                        <a :href="it.booking_url" target="_blank" rel="noopener noreferrer" class="compact-book">Book →</a><button class="share-quiet" @click="sharePairing(it)">Share</button>
+                        <a :href="it.booking_url" target="_blank" rel="noopener noreferrer" class="compact-book">Book →</a><button class="share-quiet" @click="sharePairing(it, sec)">Share</button>
                       </div>
                     </template>
                   </div>
@@ -918,7 +920,7 @@
                           </div>
                           <div>
                             <div class="card-price" x-text="formatPrice(it.total_price, it.currency)"></div>
-                            <div class="card-price-note">total, both directions</div>
+                            <div class="card-price-note" x-text="'total, both directions' + paxSuffix(sec)"></div>
                           </div>
                         </div>
                         <div>
@@ -993,7 +995,7 @@
                         <template x-for="(w, k) in (it.outbound.warnings || []).concat(it.return.warnings || [])" :key="'w'+k">
                           <div class="warning" x-text="w"></div>
                         </template>
-                        <a :href="it.booking_url" target="_blank" rel="noopener noreferrer" class="card-action">Book on Google Flights</a><button class="share-quiet" @click="sharePairing(it)">Share</button>
+                        <a :href="it.booking_url" target="_blank" rel="noopener noreferrer" class="card-action">Book on Google Flights</a><button class="share-quiet" @click="sharePairing(it, sec)">Share</button>
                       </div>
                     </template>
                   </div>
@@ -1067,7 +1069,7 @@
                             </template>
                             <template x-if="rtFetchState(sec) !== 'loading'">
                               <div class="rt-unpriced-inner">
-                                <p>This outbound exists at <b x-text="formatPrice(rtSelected(sec).from_total, rtCurrency(rtSelected(sec)))"></b> round trip.
+                                <p>This outbound exists at <b x-text="formatPrice(rtSelected(sec).from_total, rtCurrency(rtSelected(sec)))"></b><span x-text="' round trip' + paxSuffix(sec) + '.'"></span>
                                   <span x-show="rtFetchState(sec) === 'error'">Google didn't answer just now; it usually does on a second try.</span></p>
                                 <button class="chip" @click="rtPrice(sec)" :disabled="isLoading">Price the returns for this flight</button>
                                 <button class="chip" x-show="rtFetchState(sec) === 'error'" @click="rtAskReturns(sec)" :disabled="isLoading">Ask the concierge instead</button>
@@ -1081,9 +1083,9 @@
                     <div class="rt-summary" x-show="rtSelected(sec) && !rtSelected(sec).unpriced">
                       <div class="rt-summary-txt">
                         <div class="rt-summary-legs" x-text="rtSummaryText(sec)"></div>
-                        <div class="rt-summary-price" x-text="rtSelected(sec) ? formatPrice(rtSelected(sec).total_price, rtCurrency(rtSelected(sec))) + ' total' : ''"></div>
+                        <div class="rt-summary-price" x-text="rtSelected(sec) ? formatPrice(rtSelected(sec).total_price, rtCurrency(rtSelected(sec))) + ' total' + paxSuffix(sec) : ''"></div>
                       </div>
-                      <a class="card-action rt-book" :href="rtSelected(sec) && rtSelected(sec).booking_url" target="_blank" rel="noopener noreferrer">Book this pairing</a><button class="share-quiet" @click="sharePairing(rtSelected(sec))">Share</button>
+                      <a class="card-action rt-book" :href="rtSelected(sec) && rtSelected(sec).booking_url" target="_blank" rel="noopener noreferrer">Book this pairing</a><button class="share-quiet" @click="sharePairing(rtSelected(sec), sec)">Share</button>
                     </div>
                   </div>
                 </template>
@@ -1109,8 +1111,8 @@
                         <template x-for="(p, k) in it.parts" :key="k">
                           <div class="compact-leg"><span class="lbl" x-text="'Leg ' + (k+1)"></span><span x-text="p.legs[0].from + '→' + p.legs[p.legs.length-1].to + ' · ' + formatTime(p.legs[0].departure) + '–' + formatTime(p.legs[p.legs.length-1].arrival) + arrivalDay(p) + ' · ' + stopsText(p.stops)"></span></div>
                         </template>
-                        <div class="compact-sub" x-text="(it.price_basis === 'separate tickets' ? 'as 2 separate tickets' : 'one combined ticket') + ((it.warnings || []).length ? ' · ⚠' : '')"></div>
-                        <a :href="it.booking_url" target="_blank" rel="noopener noreferrer" class="compact-book">Book →</a><button class="share-quiet" @click="shareMulti(it)">Share</button>
+                        <div class="compact-sub" x-text="(it.price_basis === 'separate tickets' ? 'as ' + (it.parts || []).length + ' separate tickets' : 'one combined ticket') + ((it.warnings || []).length ? ' · ⚠' : '')"></div>
+                        <a :href="it.booking_url" target="_blank" rel="noopener noreferrer" class="compact-book">Book →</a><button class="share-quiet" @click="shareMulti(it, sec)">Share</button>
                       </div>
                     </template>
                   </div>
@@ -1131,7 +1133,7 @@
                           </div>
                           <div>
                             <div class="card-price" x-text="formatPrice(it.total_price, it.currency)"></div>
-                            <div class="card-price-note" x-text="'total, all legs · ' + (it.price_basis || 'one ticket')"></div>
+                            <div class="card-price-note" x-text="'total' + paxSuffix(sec) + ', all legs · ' + (it.price_basis || 'one ticket')"></div>
                           </div>
                         </div>
                         <template x-for="(p, k) in it.parts" :key="k">
@@ -1167,7 +1169,7 @@
                           <div class="warning" x-text="w"></div>
                         </template>
                         <div class="route-map" x-show="multiCityPoints(it).length > 1" x-html="mapSvg(multiCityPoints(it))"></div>
-                        <a :href="it.booking_url" target="_blank" rel="noopener noreferrer" class="card-action">Book on Google Flights</a><button class="share-quiet" @click="shareMulti(it)">Share</button>
+                        <a :href="it.booking_url" target="_blank" rel="noopener noreferrer" class="card-action">Book on Google Flights</a><button class="share-quiet" @click="shareMulti(it, sec)">Share</button>
                       </div>
                     </template>
                   </div>
@@ -1260,9 +1262,9 @@
         <img class="share-preview" :src="share.imgUrl" x-show="share.imgUrl" alt="Flight card" />
         <div class="share-actions">
           <button class="card-action" x-show="share.canNative" @click="shareNative()">Share…</button>
-          <button class="card-action" @click="shareCopyImage()">Copy image</button>
+          <button class="card-action" x-show="share.blob" @click="shareCopyImage()">Copy image</button>
           <button class="card-action" @click="shareCopyText()">Copy text</button>
-          <button class="card-action" @click="shareDownload()">Save image</button>
+          <button class="card-action" x-show="share.blob" @click="shareDownload()">Save image</button>
           <span class="share-toast" x-show="share.toast" x-text="share.toast"></span>
         </div>
       </div>
@@ -1646,6 +1648,9 @@
         },
 
         onEnter(e) {
+          // an IME user's Enter commits the composition ("東京"), not the
+          // message — keydown fires with isComposing (or legacy keyCode 229)
+          if (e.isComposing || e.keyCode === 229) return;
           if (e.shiftKey) return; // allow newline
           e.preventDefault();
           this.search();
@@ -1677,11 +1682,22 @@
         stop(silent) {
           if (!this.isLoading) return;
           this.controller?.abort();
+          // once 'done' has arrived the fetch is finished and abort is a
+          // no-op, but the typewriter is still draining — invalidate the
+          // turn so the tick loop and finalize both bail, and release any
+          // pending drain so streamTurn's await resolves
+          this.reqId++;
+          const r = this._drainResolve; this._drainResolve = null; if (r) r();
           this.isLoading = false;
           this.stopLoadingCycle();
-          // an interrupted streaming reply keeps its partial text, minus the caret
+          // an interrupted streaming reply keeps its partial text, minus the
+          // caret; one stopped before ANY text landed would render as an
+          // empty paper panel forever — drop it instead
           const last = this.messages[this.messages.length - 1];
-          if (last && last._streaming) last._streaming = false;
+          if (last && last._streaming) {
+            last._streaming = false;
+            if (!last.content && !(last.sections || []).length) this.messages.pop();
+          }
           // mark the interruption so Claude reads the next message as a correction
           this.history.push({ role: 'assistant', content: '(Search interrupted by the user before results came back.)' });
           this.history = this.history.slice(-12);
@@ -1699,8 +1715,12 @@
           const myReq = ++this.reqId;
           this.controller = new AbortController();
 
-          this.input = '';
-          this.$nextTick(() => this.autosize());
+          // clear the box only when it was the source of the query — a
+          // suggestion chip or calendar tap must not wipe a half-typed draft
+          if (!queryOverride) {
+            this.input = '';
+            this.$nextTick(() => this.autosize());
+          }
           this.hasSearched = true;
           this.messages.push({ role: 'user', content: q });
           this.isLoading = true;
@@ -1910,17 +1930,20 @@
 
         // ---- share: a boarding-pass PNG drawn on canvas with the page's own
         // fonts; the card stays cream in every theme, like the route maps ----
-        shareFlight(f) {
+        shareFlight(f, sec) {
           const legs = f.legs || [];
           this.openShare({
             kind: 'one way',
             route: legs[0].from + ' → ' + legs[legs.length - 1].to,
             segs: [this._shareSeg('Flight', f)],
             price: this.formatPrice(f.price, f.currency),
-            priceNote: 'one way, per person', url: f.booking_url,
+            priceNote: this.partyN(sec) > 1
+              ? 'one way, total for ' + this.partyN(sec) + ' travelers'
+              : 'one way, per person',
+            url: f.booking_url,
           });
         },
-        sharePairing(it) {
+        sharePairing(it, sec) {
           if (!it) return;
           const o = it.outbound.legs;
           this.openShare({
@@ -1928,10 +1951,13 @@
             route: o[0].from + ' → ' + o[o.length - 1].to,
             segs: [this._shareSeg('Out', it.outbound), this._shareSeg('Back', it.return)],
             price: this.formatPrice(it.total_price, it.currency),
-            priceNote: 'round trip total, per person', url: it.booking_url,
+            priceNote: this.partyN(sec) > 1
+              ? 'round trip, total for ' + this.partyN(sec) + ' travelers'
+              : 'round trip total, per person',
+            url: it.booking_url,
           });
         },
-        shareMulti(it) {
+        shareMulti(it, sec) {
           const parts = it.parts || [];
           const chain = parts.map(p => p.legs[0].from);
           chain.push(parts[parts.length - 1].legs[parts[parts.length - 1].legs.length - 1].to);
@@ -1940,7 +1966,8 @@
             route: chain.join(' → '),
             segs: parts.map((p, i) => this._shareSeg('Leg ' + (i + 1), p)),
             price: this.formatPrice(it.total_price, it.currency),
-            priceNote: 'total, per person' + (it.price_basis === 'separate tickets' ? ', as separate tickets' : ''),
+            priceNote: (this.partyN(sec) > 1 ? 'total for ' + this.partyN(sec) + ' travelers' : 'total, per person')
+              + (it.price_basis === 'separate tickets' ? ', as separate tickets' : ''),
             url: it.booking_url,
           });
         },
@@ -2008,6 +2035,7 @@
           catch (e) { this._toast('Copy blocked by the browser'); }
         },
         shareDownload() {
+          if (!this.share.imgUrl) return; // render failed; nothing to save
           const a = document.createElement('a');
           a.href = this.share.imgUrl;
           a.download = 'flight.png';
@@ -2159,20 +2187,30 @@
           return msg.split('\n')[0];
         },
 
+        // prices are PARTY TOTALS for the searched travelers (server-verified);
+        // these two drive every label that must stop saying "per person"
+        partyN(sec) { return (sec && sec.party && sec.party.travelers) || 1; },
+        paxSuffix(sec) { const n = this.partyN(sec); return n > 1 ? ' for ' + n + ' travelers' : ''; },
+
         visibleSections(msg) {
           // empty searches (transient hiccups the assistant retried) stay out
           // of the page; the reply text already tells that story. A section
           // with only from-priced outbounds (degraded round trip) DOES show:
           // every row is one tap from priced.
           return (msg.sections || []).filter(s =>
-            (s.results || []).length || (s.dates || []).length || (s.more_outbounds || []).length);
+            (s.results || []).length || (s.dates || []).length || (s.more_outbounds || []).length
+            // a degraded multi-city section may carry ONLY the Google
+            // multi-city link — the prose says "the link is in this
+            // section", so hiding the section broke that promise
+            || (s.type === 'multicity' && s.combined_check_url));
         },
 
         ladder() {
           const items = [];
           for (const m of this.messages) {
             for (const sec of m.sections || []) {
-              if (sec._anchor && ((sec.results || []).length || (sec.dates || []).length || (sec.more_outbounds || []).length)) {
+              if (sec._anchor && ((sec.results || []).length || (sec.dates || []).length || (sec.more_outbounds || []).length
+                  || (sec.type === 'multicity' && sec.combined_check_url))) {
                 items.push({ anchor: sec._anchor, label: this.sectionLabel(sec) });
               }
             }

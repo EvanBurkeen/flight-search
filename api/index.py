@@ -821,9 +821,18 @@ def _ledger_flight(f: dict, n: int | None = None) -> dict:
 def ledger_entry(spec: dict, payload: dict) -> dict | None:
     """One search, as the user still sees it on screen."""
     kind = payload.get("type")
+    # a multi-city spec keeps its route in the segments (top-level
+    # origins/destinations are ignored by the tool schema), so the generic
+    # join produced the literal record '" to "' for every multi-city search
+    if spec.get("multi_city_segments"):
+        route = " then ".join(
+            f"{'/'.join(sg.get('origins') or ['?'])}-{'/'.join(sg.get('destinations') or ['?'])}"
+            for sg in spec["multi_city_segments"])
+    else:
+        route = f"{'/'.join(spec.get('origins') or [])} to {'/'.join(spec.get('destinations') or [])}"
     entry: dict = {
         "search": spec.get("summary") or None,
-        "route": f"{'/'.join(spec.get('origins') or [])} to {'/'.join(spec.get('destinations') or [])}",
+        "route": route if route.strip() != "to" else None,
         "depart": spec.get("departure_date"),
         # a one-way spec often still carries a return_date (the models and the
         # stub both set one); recording it would file a one-way search in the
@@ -934,6 +943,7 @@ def ledger_context(ledgers: list | None) -> str | None:
         return None
     body = json.dumps({"searches": entries}, default=str)
     while len(body) > LEDGER_MAX_CHARS:
+        prev_len = len(body)
         if len(entries) > 1:
             entries = entries[1:]  # oldest goes first
         elif any(entries[0].get(k) for k in ("options", "cheapest_dates")):
@@ -943,6 +953,13 @@ def ledger_context(ledgers: list | None) -> str | None:
         else:
             return None  # nothing left worth carrying
         body = json.dumps({"searches": entries}, default=str)
+        # _sanitize_entry bounds strings and list LENGTHS but not the size of
+        # a dict inside options, so one bloated option could stall the halving
+        # at [:1] forever — this ran before any model call, so a single crafted
+        # POST hung /api/search and pinned the SSE worker. If a pass failed to
+        # shrink the body, the entry is unsalvageable: drop the ledger.
+        if len(body) >= prev_len:
+            return None
     return (
         "[Results already on this user's screen from earlier in this conversation, "
         "numbered as they were shown. Quote these fares, times, and flight numbers "
@@ -1198,6 +1215,12 @@ def speculative_spec(query: str) -> dict | None:
             return None
         date_ = f"{datetime.now().year}-{mo:02d}-{day:02d}"
         datetime.strptime(date_, "%Y-%m-%d")  # reject 2/30-style nonsense
+        # the prompt orders the model to use the nearest FUTURE date, so a
+        # past month/day guessed with the current year could never match the
+        # router's spec in the cache — the speculation was a pure waste then
+        if date_ < datetime.now().strftime("%Y-%m-%d"):
+            date_ = f"{datetime.now().year + 1}-{mo:02d}-{day:02d}"
+            datetime.strptime(date_, "%Y-%m-%d")  # Feb 29 next year -> skip
     except (TypeError, ValueError):
         return None
     spec = {"origins": [a], "destinations": [b], "trip_type": "one_way",
@@ -1213,8 +1236,10 @@ def run_assistant(query: str, history: list | None, emit=None,
                   ledgers: list | None = None) -> dict:
     """Run the agent loop. `emit(event, data)` receives progress as it happens:
 
-      sections     a results batch is ready (cards can render immediately —
-                   this lands seconds before the prose is written)
+      sections     a results batch is ready — a lightweight {"count": N}
+                   marker, NOT the payload (the shipped client reveals prose
+                   first and takes all cards from 'done'; the old full-body
+                   frame was pure discarded bytes)
       text_delta   the reply's prose, emitted ONCE per final answer after the
                    call resolves — never live. Live token streaming showed
                    "Let me take a look" and then wiped it the moment a tool
@@ -1483,10 +1508,15 @@ def run_assistant(query: str, history: list | None, emit=None,
         timings.append((f"searches_{rounds}", round(time.monotonic() - _tsearch, 2),
                         f"n={len(budgeted)} fired mid-stream; this phase is only the wait "
                         "AFTER the model call | " + " | ".join(search_log[-len(budgeted):])))
-        # cards can render now, well before the prose that describes them
+        # progress marker only: the frontend deliberately renders nothing
+        # until 'done' (prose first, then cards — Aug 2), so shipping the
+        # full serialized sections here doubled every streamed turn's bytes
+        # (~340KB measured on a 10x20 round trip) for a frame the client
+        # parsed and threw away. The count keeps the wire event alive for
+        # any future progressive-reveal consumer without paying the payload.
         fresh = [s for s in sections if (s.get("results") or s.get("dates"))]
         if fresh:
-            emit("sections", fresh)
+            emit("sections", {"count": len(fresh)})
         messages.append({"role": "user", "content": [tool_results_by_id[tu.id] for tu in tool_uses]})
 
     # Out of budget for more searching. If data landed, the user still gets a
@@ -1653,7 +1683,8 @@ def google_flights_url(dep_code: str, arr_code: str, dep_date: str | None,
     return f"https://www.google.com/travel/flights?q={quote(q)}"
 
 
-def multi_city_search_url(segments: list, cabin: str | None = None) -> str:
+def multi_city_search_url(segments: list, cabin: str | None = None,
+                          adults: int = 1, children: int = 0) -> str:
     """The Google multi-city SEARCH page for these legs (no flights chosen).
 
     August 2: Google gated the multi-city GetShoppingResults endpoint behind
@@ -1675,7 +1706,7 @@ def multi_city_search_url(segments: list, cabin: str | None = None) -> str:
                 _pb_str(2, seg["date"])
                 + _pb_msg(13, _pb_int(1, 1) + _pb_str(2, str(org).upper()))
                 + _pb_msg(14, _pb_int(1, 1) + _pb_str(2, str(dst).upper())))
-        body += _pb_int(8, seat) + _pb_int(9, 1) + _pb_int(14, 1)
+        body += _pb_party(adults, children) + _pb_int(9, seat) + _pb_int(14, 1)
         body += _pb_msg(16, _pb_int(1, -1))
         body += _pb_int(19, 3)
         tfs = base64.urlsafe_b64encode(body).decode().rstrip("=")
@@ -1713,8 +1744,20 @@ def multi_city_url(parts: list, cabin: str | None = None) -> str:
 #   1: 28 (constant)   2: 2 (constant)
 #   3: segment (repeated: one per journey leg; a segment's own repeated f4
 #      entries are the connecting flights that make it up)
-#   8: seat class   9: adults   14: 1 (constant)   16: {1: -1} (no max price)
+#   8: PASSENGERS — one unpacked varint per traveler (adult=1, child=2),
+#      adults first, exactly as Google emits them
+#   9: SEAT CLASS — 1 economy, 2 premium economy, 3 business, 4 first
+#   14: 1 (constant)   16: {1: -1} (no max price)
 #   19: TRIP TYPE — 1 round trip, 2 one-way, 3 multi-city
+# Aug 7, 2026: f8/f9 were originally documented HERE as "8: seat, 9: adults" —
+# a swap the 1-adult-economy byte-identity fixture cannot catch, because both
+# readings encode as a single value 1. Decoding Google's own tokens for a
+# 2-adult + 2-child search settled it: f8 = [1,1,2,2] in both cabins, f9
+# flipped 1 -> 3 when the UI switched economy -> business. Before that fix,
+# premium-cabin links wrote the cabin into the passenger field (business
+# encoded as one lap-infant, economy seat). Do NOT encode infants: the enum
+# values for in-seat vs on-lap are disputed between reverse-engineered
+# schemas, and the search tool only accepts adults + children anyway.
 # Note f2 is NOT the trip type: putting it there made Google reject the URL
 # and fall back to its home page. Verified against real Google links for all
 # three trip types.
@@ -1745,6 +1788,22 @@ def _pb_msg(field: int, body: bytes) -> bytes:
     return _pb_varint((field << 3) | 2) + _pb_varint(len(body)) + body
 
 
+def _pb_party(adults: int = 1, children: int = 0) -> bytes:
+    """f8 passenger entries then the f9 seat is appended by the caller.
+
+    One unpacked varint per traveler, adults before children — Google's own
+    emission order. The default (one adult) encodes as the single byte pair
+    0x40 0x01, which keeps the byte-identity fixture in check.py passing.
+    Children are clamped to 8: Google itself caps bookable parties at 9.
+    """
+    body = b""
+    for _ in range(max(1, min(int(adults or 1), 9))):
+        body += _pb_int(8, 1)
+    for _ in range(max(0, min(int(children or 0), 8))):
+        body += _pb_int(8, 2)
+    return body
+
+
 def _tfs_segment(legs: list) -> bytes:
     """One flown segment: its date, every leg it is made of, and its endpoints."""
     first, last = legs[0], legs[-1]
@@ -1763,7 +1822,7 @@ def _tfs_segment(legs: list) -> bytes:
 
 
 def itinerary_url(segments: list, cabin: str | None = None, trip_type: int = 2,
-                  adults: int = 1) -> str | None:
+                  adults: int = 1, children: int = 0) -> str | None:
     """Deep link straight to these exact flights, or None if we can't build one."""
     try:
         seat = CABIN_MAP.get(cabin or "economy", SeatType.ECONOMY).value
@@ -1772,7 +1831,7 @@ def itinerary_url(segments: list, cabin: str | None = None, trip_type: int = 2,
             if not legs or not legs[0].departure_datetime:
                 return None
             body += _pb_msg(3, _tfs_segment(legs))
-        body += _pb_int(8, seat) + _pb_int(9, max(1, adults)) + _pb_int(14, 1)
+        body += _pb_party(adults, children) + _pb_int(9, seat) + _pb_int(14, 1)
         body += _pb_msg(16, _pb_int(1, -1))
         body += _pb_int(19, trip_type)
         tfs = base64.urlsafe_b64encode(body).decode().rstrip("=")
@@ -1781,7 +1840,8 @@ def itinerary_url(segments: list, cabin: str | None = None, trip_type: int = 2,
         return None  # any surprise in the data falls back to the search URL
 
 
-def result_booking_url(result, cabin: str | None = None, ret_date: str | None = None) -> str:
+def result_booking_url(result, cabin: str | None = None, ret_date: str | None = None,
+                       adults: int = 1, children: int = 0) -> str:
     # built from the itinerary's OWN legs — multi-airport searches mean each
     # result can have a different origin/destination than the search defaults
     legs = result.legs or []
@@ -1792,7 +1852,7 @@ def result_booking_url(result, cabin: str | None = None, ret_date: str | None = 
     dep_date = legs[0].departure_datetime.strftime("%Y-%m-%d") if legs[0].departure_datetime else None
     # one-way deep link; round trips are linked as a pair by the caller
     if not ret_date:
-        deep = itinerary_url([legs], cabin)
+        deep = itinerary_url([legs], cabin, adults=adults, children=children)
         if deep:
             return deep
     return google_flights_url(dep, arr, dep_date, ret_date, cabin)
@@ -1806,7 +1866,9 @@ def airport_coords() -> dict:
 
 def coords_for(code: str) -> dict | None:
     a = airport_coords().get(code)
-    return {"code": code, "lat": a["lat"], "lon": a["lon"]} if a else None
+    # 3 decimals is ~110m — indistinguishable on a 300px map, and the raw
+    # doubles ("-80.94309997558594") cost 14-17 chars on EVERY shipped flight
+    return {"code": code, "lat": round(a["lat"], 3), "lon": round(a["lon"], 3)} if a else None
 
 
 def airport_place(code: str) -> str:
@@ -1865,8 +1927,43 @@ def serialize_leg(leg) -> dict:
     }
 
 
-def serialize_flight(result, cabin: str | None = None, ret_date: str | None = None) -> dict:
-    url = result_booking_url(result, cabin, ret_date)
+def spec_pax(spec: dict) -> dict:
+    """The party a spec searched for, ready to splat into a URL builder.
+
+    The SEARCH always honored adults/children (build_filters), but every Book
+    link defaulted to 1 adult — a family of four landed on Google with one
+    seat selected, at the exact moment of highest stakes. Thread this through
+    every link builder so what the user books is what they searched.
+    """
+    return {"adults": spec.get("adults") or 1, "children": spec.get("children") or 0}
+
+
+def party_of(spec: dict) -> dict:
+    a = max(1, int(spec.get("adults") or 1))
+    c = max(0, int(spec.get("children") or 0))
+    return {"adults": a, "children": c, "travelers": a + c}
+
+
+def stamp_party(payload: dict, spec: dict) -> dict:
+    """Prices from a multi-passenger search are PARTY TOTALS, and every
+    surface must say so. Verified live (JFK->ORD, 1 adult vs 2 adults +
+    1 child): all nine common flights priced at 2.99-3.00x — Google returns
+    the total for the searched party, never per-person. The frontend labels
+    key off `party`; the sentence below reaches the model via the message."""
+    party = party_of(spec)
+    payload["party"] = party
+    if party["travelers"] > 1 and payload.get("message"):
+        payload["message"] += (
+            f" ALL PRICES ARE THE TOTAL for {party['adults']} adult(s)"
+            + (f" + {party['children']} child(ren)" if party["children"] else "")
+            + ", not per person; Book links carry the same party."
+        )
+    return payload
+
+
+def serialize_flight(result, cabin: str | None = None, ret_date: str | None = None,
+                     adults: int = 1, children: int = 0) -> dict:
+    url = result_booking_url(result, cabin, ret_date, adults=adults, children=children)
     legs = [serialize_leg(l) for l in result.legs]
     layovers = [
         {
@@ -2491,7 +2588,7 @@ def from_priced_only_payload(spec: dict, origins: list, destinations: list,
     for f in outs:
         if f.price is None or not f.legs:
             continue
-        x = serialize_flight(f, spec.get("cabin"), ret_date=spec.get("return_date"))
+        x = serialize_flight(f, spec.get("cabin"), ret_date=spec.get("return_date"), **spec_pax(spec))
         x["from_total"] = f.price
         extras.append(x)
     extras_ranked = order_by_value(
@@ -2508,7 +2605,7 @@ def from_priced_only_payload(spec: dict, origins: list, destinations: list,
     ns = sum(1 for x in extras if (x.get("stops") or 0) == 0)
     bd = airport_breakdown(extras_ranked, dest_of=_dest_of_row,
                            price_of=lambda x: x.get("from_total"))
-    return {
+    return stamp_party({
         "type": "itineraries",
         "message": (f"Google listed {len(extras)} outbounds"
                     + (f" ({ns} nonstop)" if ns else "")
@@ -2521,7 +2618,7 @@ def from_priced_only_payload(spec: dict, origins: list, destinations: list,
         "results": [],
         "more_outbounds": extras,
         "spec_echo": _rt_spec_echo(spec, origins, destinations),
-    }
+    }, spec)
 
 
 def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: str) -> dict:
@@ -2667,17 +2764,19 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
                 out, spec.get("cabin"),
                 ret_date=best_ret.legs[0].departure_datetime.strftime("%Y-%m-%d")
                 if best_ret.legs and best_ret.legs[0].departure_datetime else spec.get("return_date"),
+                **spec_pax(spec),
             )
             # every return that pairs with THIS outbound, each priced as the
             # real total so the cost of a better time is visible
             options = []
             for ret, total in g["returns"][:20]:
-                ret_f = serialize_flight(ret, spec.get("cabin"))
+                ret_f = serialize_flight(ret, spec.get("cabin"), **spec_pax(spec))
                 ret_f["total_price"] = total
                 ret_f["extra_over_best"] = round((total or 0) - (best_total or 0))
                 # each pairing books as its own itinerary, so the link has to
                 # travel with the option the user picks
-                ret_f["booking_url"] = (itinerary_url([out.legs, ret.legs], spec.get("cabin"), trip_type=1)
+                ret_f["booking_url"] = (itinerary_url([out.legs, ret.legs], spec.get("cabin"), trip_type=1,
+                                                      **spec_pax(spec))
                                         or out_f["booking_url"])
                 options.append(ret_f)
             options = order_by_value(
@@ -2688,7 +2787,7 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
                 warnings_of=lambda r: r.get("warnings"),
                 requested_sort=spec.get("sort"),
             )
-            shown = options[0] if options else serialize_flight(best_ret, spec.get("cabin"))
+            shown = options[0] if options else serialize_flight(best_ret, spec.get("cabin"), **spec_pax(spec))
             itineraries.append({
                 # the headline must be the total for the pairing actually on
                 # screen, not the group's floor, or the card quotes a price for
@@ -2737,7 +2836,7 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
                 continue
             if not arrival_ok(f, out_target, aw):
                 continue
-            x = serialize_flight(f, spec.get("cabin"), ret_date=spec.get("return_date"))
+            x = serialize_flight(f, spec.get("cabin"), ret_date=spec.get("return_date"), **spec_pax(spec))
             x["from_total"] = f.price
             extras.append(x)
         extras_ranked = order_by_value(
@@ -2783,7 +2882,7 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
             message += " " + bd + " (from-prices; all still bookable via the board)"
         if arrival_note:
             message = f"{arrival_note}\n{message}"
-        return {
+        return stamp_party({
             "type": "itineraries",
             "message": message,
             "results": itineraries,
@@ -2791,7 +2890,7 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
             # everything /api/returns needs to price any outbound on demand,
             # so the board never depends on server-side session state
             "spec_echo": _rt_spec_echo(spec, origins, destinations),
-        }
+        }, spec)
 
     strict = [r for r in results if arrival_ok(r, out_target, aw)]
     if strict:
@@ -2805,7 +2904,7 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
     # than the 50th-cheapest fare — on BOS->FLL Nov 22 that meant 12 nonstops
     # existed but 11 sat at price ranks 83-98, so the list we shipped (and the
     # summary Claude saw) contained exactly one. Score the whole set, then cut.
-    flights = [serialize_flight(r, spec.get("cabin")) for r in results[:RANK_POOL]]
+    flights = [serialize_flight(r, spec.get("cabin"), **spec_pax(spec)) for r in results[:RANK_POOL]]
     add_highlights(flights)
     flights = order_by_value(
         flights,
@@ -2866,11 +2965,11 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
         message += airport_note
     if arrival_note:
         message = f"{arrival_note}\n{message}"
-    return {
+    return stamp_party({
         "type": "flights",
         "message": message,
         "results": flights,
-    }
+    }, spec)
 
 
 def format_money(amount, currency: str = "USD") -> str:
@@ -2970,6 +3069,7 @@ def multi_city_fallback(spec: dict, currency: str, leg_search=None,
             "origins": seg.get("origins") or [], "destinations": seg.get("destinations") or [],
             "trip_type": "one_way", "departure_date": seg.get("date"),
             "cabin": spec.get("cabin"), "adults": spec.get("adults"),
+            "children": spec.get("children"),
             "departure_time": seg.get("departure_time"),
         }) for seg in raw_segs]
     leg_payloads: list = []
@@ -2982,7 +3082,7 @@ def multi_city_fallback(spec: dict, currency: str, leg_search=None,
         pool.shutdown(wait=False, cancel_futures=True)
 
     leg_results = [(p.get("results") or []) if isinstance(p, dict) else [] for p in leg_payloads]
-    check_url = multi_city_search_url(raw_segs, spec.get("cabin"))
+    check_url = multi_city_search_url(raw_segs, spec.get("cabin"), **spec_pax(spec))
     if not all(leg_results):
         empty = [i + 1 for i, r in enumerate(leg_results) if not r]
         return {
@@ -3010,7 +3110,7 @@ def multi_city_fallback(spec: dict, currency: str, leg_search=None,
                           "missed-connection protection between legs"],
             "booking_url": check_url,
         })
-    return {
+    return stamp_party({
         "type": "multicity",
         "message": (
             "Google now withholds combined one-ticket multi-city pricing from automated "
@@ -3024,7 +3124,7 @@ def multi_city_fallback(spec: dict, currency: str, leg_search=None,
         "results": combos,
         "combined_check_url": check_url,
         "combined_probe": probe_note,
-    }
+    }, spec)
 
 
 def search_multi_city(spec: dict, currency: str) -> dict:
@@ -3095,6 +3195,7 @@ def search_multi_city(spec: dict, currency: str) -> dict:
         "origins": seg.get("origins") or [], "destinations": seg.get("destinations") or [],
         "trip_type": "one_way", "departure_date": seg.get("date"),
         "cabin": spec.get("cabin"), "adults": spec.get("adults"),
+        "children": spec.get("children"),
         "departure_time": seg.get("departure_time"),
     }) for seg in raw_segs]
     # RepresentativeSearch for the parallel expansion + identity inheritance.
@@ -3136,6 +3237,7 @@ def search_multi_city(spec: dict, currency: str) -> dict:
 
     if not results:
         price_pool.shutdown(wait=False, cancel_futures=True)
+        leg_pool.shutdown(wait=False)  # futures keep running; the fallback consumes them
         return multi_city_fallback(spec, currency, probe_note=probe_note, leg_futs=leg_futs)
 
     # harvest the leg prices that finished while the expansion ran; anything
@@ -3148,11 +3250,47 @@ def search_multi_city(spec: dict, currency: str) -> dict:
             indexes[i] = {}
     price_pool.shutdown(wait=False, cancel_futures=True)
 
+    # The separate-ticket FLOOR: the cheapest purchasable flight on each leg,
+    # summed. leg_price_index above compares the SAME flights one-ticket vs
+    # separate — but Google's combined itineraries rarely reuse the exact
+    # flights that top the standalone one-ways, so that comparison usually
+    # never fires (all_matched False) and production quoted "$5,409 one
+    # ticket" as best value in the same turn whose per-leg searches found
+    # $789 + $701 purchasable. The full per-leg payloads (leg_futs) already
+    # ran beside the probe; use them. Exception-proof by design: any surprise
+    # degrades to floor=None, which is exactly the old behavior.
+    floor_parts, floor_total = [], None
+    try:
+        parts_acc, total_acc = [], 0.0
+        # one shared deadline, not 8s per leg: the legs launched before the
+        # probe ran, so they are normally already done — this is a grace, and
+        # a slow day must not stack it per future on the 58s turn budget
+        floor_deadline = time.monotonic() + 8.0
+        for fu in leg_futs:
+            try:
+                leg_payload = fu.result(timeout=max(0.1, floor_deadline - time.monotonic()))
+            except Exception:
+                leg_payload = None
+            rows = (leg_payload.get("results") or []) if isinstance(leg_payload, dict) else []
+            best = min((r for r in rows if isinstance(r.get("price"), (int, float))),
+                       key=lambda r: r["price"], default=None)
+            if best is None:  # an unpriced or empty leg means no purchasable floor
+                parts_acc = []
+                break
+            parts_acc.append(best)
+            total_acc += best["price"]
+        if parts_acc and len(parts_acc) == len(raw_segs):
+            floor_parts, floor_total = parts_acc, round(total_acc)
+    except Exception:
+        floor_parts, floor_total = [], None
+    finally:
+        leg_pool.shutdown(wait=False, cancel_futures=True)
+
     itineraries = []
     for combo in results[:8]:
         parts = list(combo) if isinstance(combo, tuple) else [combo]
         prices = [p.price for p in parts if p.price]
-        serialized = [serialize_flight(p, spec.get("cabin")) for p in parts]
+        serialized = [serialize_flight(p, spec.get("cabin"), **spec_pax(spec)) for p in parts]
 
         # what these exact flights cost bought leg by leg
         separate_total, all_matched = 0.0, bool(indexes) and len(parts) == len(indexes)
@@ -3190,6 +3328,16 @@ def search_multi_city(spec: dict, currency: str) -> dict:
                 f"leg by leg versus {format_money(combined_total, currency)} on one ticket. "
                 "Separate tickets mean no through-checked bags and no protection if a leg is late."
             ))
+        # same honesty when the exact-flight comparison could not fire: the
+        # card keeps ITS OWN one-ticket price (a displayed price belongs to
+        # the itinerary beside it), but names the cheaper purchasable path
+        elif (separate_total is None and floor_total is not None
+                and combined_total is not None and floor_total < combined_total * 0.97):
+            ticket_warnings.insert(0, (
+                f"This exact itinerary is one ticket at {format_money(combined_total, currency)}. "
+                f"Booking each leg separately on DIFFERENT flights starts at "
+                f"{format_money(floor_total, currency)} — see the separate-ticket option in this list."
+            ))
 
         itineraries.append({
             "total_price": best_total,
@@ -3200,23 +3348,53 @@ def search_multi_city(spec: dict, currency: str) -> dict:
             "currency": parts[0].currency or currency,
             "parts": serialized,
             "warnings": ticket_warnings,
-            "booking_url": (itinerary_url([p.legs for p in parts], spec.get("cabin"), trip_type=3)
+            "booking_url": (itinerary_url([p.legs for p in parts], spec.get("cabin"), trip_type=3,
+                                          **spec_pax(spec))
                             or multi_city_url(parts, spec.get("cabin"))),
+        })
+    # "Quote what you can actually buy": when the purchasable per-leg sum
+    # beats every combined option, it ships as its own option — the same
+    # shape multi_city_fallback emits, so every layer renders it unchanged.
+    # Its flights are the LEGS' cheapest, not the combined itineraries',
+    # and the warning says so: the cheap price must never look like it buys
+    # the expensive itinerary's flights.
+    check_url = multi_city_search_url(raw_segs, spec.get("cabin"), **spec_pax(spec))
+    priced_totals = [i["total_price"] for i in itineraries if i["total_price"] is not None]
+    if floor_total is not None and priced_totals and floor_total < min(priced_totals):
+        itineraries.append({
+            "total_price": floor_total,
+            "combined_price": None,
+            "separate_price": floor_total,
+            "price_basis": "separate tickets",
+            "currency": currency,
+            "parts": floor_parts,
+            "warnings": [
+                "These are DIFFERENT flights than the one-ticket options: this price buys "
+                "these exact flights only, booked leg by leg",
+                "Booked as separate tickets: no through-checked bags or "
+                "missed-connection protection between legs",
+            ],
+            "booking_url": check_url,
         })
     itineraries.sort(key=lambda i: i["total_price"] or 1e9)
     for i, itin in enumerate(itineraries):
         itin["score"] = round(95 - (i / max(len(itineraries) - 1, 1)) * 55)
     route_text = " → ".join([resolved[0][0][0].name] + [d[0].name for _, d, _, _ in resolved])
-    return {
+    return stamp_party({
         "type": "multicity",
         "message": (
-            f"Found {len(itineraries)} itineraries ({route_text}). total_price is the CHEAPER of "
-            "buying one combined ticket or buying each leg separately (price_basis says which, and "
-            "both numbers are given). Google's search-time quote varies by seller. Mixed-carrier "
-            "combinations are often issued as separate tickets: no through bags, no delay cover."
+            f"Found {len(itineraries)} itineraries ({route_text}). Each option's price_basis says "
+            "whether its price buys one combined ticket or separate tickets. A 'separate tickets' "
+            "option uses DIFFERENT flights than the one-ticket options — its price never buys a "
+            "one-ticket option's flights — and it is the cheapest PURCHASABLE way to fly these "
+            "legs: never present a one-ticket price above it as the best value or the going rate, "
+            "and always give the bags/misconnection caveat when recommending it. Mixed-carrier "
+            "one-ticket combinations are often issued as separate tickets by sellers anyway. "
+            "Google's own page for these legs is linked in the section for one-tap verification."
         ),
         "results": itineraries,
-    }
+        "combined_check_url": check_url,
+    }, spec)
 
 
 DEFAULT_FLEX_TRIP_NIGHTS = 7
@@ -3375,6 +3553,7 @@ def _price_ctx_key(spec: dict, origins: list, destinations: list,
         # a capped or filtered search prices a different question entirely
         "stops": spec.get("max_stops"), "airlines": spec.get("airlines_include"),
         "alliances": spec.get("alliances"), "adults": spec.get("adults") or 1,
+        "children": spec.get("children") or 0,
     }, sort_keys=True, default=str)
 
 
@@ -3630,9 +3809,36 @@ def roll_past_dates(spec: dict) -> tuple[dict, list[str]]:
         notes.append(f"'{ds}' is in the past — interpreted as {rolled}")
         return rolled
 
+    def roll_past(ds: str | None, floor: str | None) -> str | None:
+        """Roll ds forward in whole years until it is not before floor.
+
+        Each date above rolls INDEPENDENTLY, so "Aug 1 to Aug 20" asked on
+        Aug 7 rolled only the departure: a round trip that returned a year
+        before it left. Google answers such a filter with nothing, and the
+        user was told "No flights found" for a perfectly answerable question.
+        """
+        if not ds or not floor or ds >= floor:
+            return ds
+        try:
+            d = datetime.strptime(ds, "%Y-%m-%d")
+        except ValueError:
+            return ds
+        while d.strftime("%Y-%m-%d") < floor:
+            try:
+                d = d.replace(year=d.year + 1)
+            except ValueError:  # Feb 29
+                d = d.replace(year=d.year + 1, day=28)
+        rolled = d.strftime("%Y-%m-%d")
+        notes.append(f"'{ds}' would fall before {floor} — interpreted as {rolled}")
+        return rolled
+
     spec = dict(spec)
     for key in ("departure_date", "return_date", "arrival_date"):
         spec[key] = roll(spec.get(key))
+    # rolling is per-date; coherence is between dates
+    dep = spec.get("departure_date")
+    spec["return_date"] = roll_past(spec.get("return_date"), dep)
+    spec["arrival_date"] = roll_past(spec.get("arrival_date"), dep)
     if spec.get("multi_city_segments"):
         spec["multi_city_segments"] = [
             {**seg, "date": roll(seg.get("date"))} for seg in spec["multi_city_segments"]
@@ -3641,6 +3847,10 @@ def roll_past_dates(spec: dict) -> tuple[dict, list[str]]:
         flex = dict(spec["flexible_dates"])
         flex["from_date"] = roll(flex.get("from_date"))
         flex["to_date"] = roll(flex.get("to_date"))
+        # an inverted window (from rolled a year, to left behind) is silently
+        # SWAPPED by fli into an ~11-month grid — nothing like the asked month
+        if flex.get("from_date") and flex.get("to_date") and flex["to_date"] < flex["from_date"]:
+            flex["to_date"] = roll_past(flex["to_date"], flex["from_date"])
         spec["flexible_dates"] = flex
     return spec, notes
 
@@ -3896,7 +4106,9 @@ async def search_stream(request: Request):
                 continue
             if ev is None:
                 break
-            yield f"event: {ev}\ndata: {json.dumps(data)}\n\n"
+            # compact separators: default ", "/": " padding was ~7% of every
+            # frame — pure whitespace on a 300KB done event
+            yield f"event: {ev}\ndata: {json.dumps(data, separators=(',', ':'))}\n\n"
 
     return StreamingResponse(frames(), media_type="text/event-stream", headers={
         "Cache-Control": "no-cache",
@@ -3926,9 +4138,15 @@ def fetch_returns_for_outbound(spec: dict, legs_in: list, from_total=None) -> di
         airline = getattr(Airline, code, None) or getattr(Airline, "_" + code, None)
         if airline is None or not l.get("departure"):
             raise ValueError(f"unrecognized leg: {code} {l.get('flight_number')}")
+        dep_ap = getattr(Airport, str(l["from"]).upper(), None)
+        arr_ap = getattr(Airport, str(l["to"]).upper(), None)
+        if dep_ap is None or arr_ap is None:
+            # same curated shape as the airline branch: a stale or hand-edited
+            # board request must read as a bad request, not a raw 500
+            raise ValueError(f"unrecognized leg airport: {l.get('from')} or {l.get('to')}")
         return _types.SimpleNamespace(
-            departure_airport=getattr(Airport, str(l["from"]).upper()),
-            arrival_airport=getattr(Airport, str(l["to"]).upper()),
+            departure_airport=dep_ap,
+            arrival_airport=arr_ap,
             departure_datetime=datetime.fromisoformat(l["departure"]),
             arrival_datetime=datetime.fromisoformat(l["arrival"]) if l.get("arrival") else None,
             airline=airline,
@@ -3975,9 +4193,10 @@ def fetch_returns_for_outbound(spec: dict, legs_in: list, from_total=None) -> di
         seen.add(key)
         # in an expansion the return row carries the pairing's cumulative total
         total = max(p for p in [from_total, ret.price, 0] if p is not None)
-        rf = serialize_flight(ret, spec.get("cabin"))
+        rf = serialize_flight(ret, spec.get("cabin"), **spec_pax(spec))
         rf["total_price"] = total
-        rf["booking_url"] = (itinerary_url([sel_legs, ret.legs], spec.get("cabin"), trip_type=1)
+        rf["booking_url"] = (itinerary_url([sel_legs, ret.legs], spec.get("cabin"), trip_type=1,
+                                           **spec_pax(spec))
                              or rf["booking_url"])
         options.append(rf)
 
@@ -3997,6 +4216,7 @@ def fetch_returns_for_outbound(spec: dict, legs_in: list, from_total=None) -> di
         "cheapest_total": cheapest,
         "currency": options[0]["currency"] if options else "USD",
         "count": len(options),
+        "party": party_of(spec),
     }
 
 
@@ -4016,6 +4236,9 @@ async def price_returns(request: Request):
     except SearchClientError:
         return JSONResponse({"error": "Google is slow right now; try that outbound again in a moment."},
                             status_code=502)
+    except ValueError as e:
+        # malformed client-supplied legs/spec (stale board state, hand edits)
+        return JSONResponse({"error": str(e)}, status_code=400)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 

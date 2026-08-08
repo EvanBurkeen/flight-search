@@ -76,25 +76,16 @@ this file, then **"Lessons the hard way"** below before debugging anything.
   July 24; the calendar heatmap and streaming replies shipped July 25; the
   cross-turn results ledger — the useful slice of "trip memory" without login
   — and price context shipped July 28.)
-- **KNOWN OPEN BUGS (as of Aug 6, 2026) — pick these up before new features:**
-  1. **Multi-city quotes a price it should not.** Production returned 8
-     combos with "$5,409 one ticket" as best value while the per-leg
-     searches in the SAME turn found $789 + $701 = $1,490 separate.
-     `leg_price_index` only matches by exact flight signature, so
-     `all_matched` is usually false and the separate-vs-combined comparison
-     silently never fires. The per-leg futures (`leg_futs`) already run in
-     parallel — use them as the separate-ticket floor, and never present a
-     combined price above a purchasable separate one. This is the
-     "quote what you can actually buy" invariant, currently violated.
-  2. **Passenger count never reaches the Book link.** Cards say "per
-     person" and the SEARCH honors `adults`/`children`, but `itinerary_url`
-     defaults `adults=1` at all four call sites. A family-of-four search
-     books one seat. Also settle whether `result.price` is per-person or
-     party-total and label it.
-  3. **Google withholds some fares entirely.** The $111 Breeze HVN-FLL fare
+- **KNOWN OPEN BUGS (as of Aug 7, 2026) — pick these up before new features:**
+  1. **Google withholds some fares entirely.** The $111 Breeze HVN-FLL fare
      never appears, even from a dedicated single-airport search. Disclosed
      by the manifest layer rather than hidden; probably not fixable
      client-side, but worth re-testing occasionally.
+  (The Aug 6 list's other two — the multi-city separate-vs-combined
+  comparison that never fired, and the passenger count that never reached
+  the Book link — were fixed Aug 7; see the Changelog. `leg_price_index`
+  and `itinerary_url` both kept their names, so old notes still point at
+  real code.)
 - **Known trade-offs accepted by Evan:** timeline layover dots use naive local
   times (schematic, not exact); Claude sees only top-6 summaries per search
   (with truncation warning baked in); the value-ranking weights
@@ -187,6 +178,16 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
   flights within it. Endpoints take `{1:1, 2:"IATA"}` or `{1:3, 2:"/m/..."}` for a
   city entity; we always emit airports. The `tfu` token is session-scoped and
   **not required**.
+- **`f8` is the PASSENGER LIST (one varint per traveler, adult=1, child=2,
+  adults first) and `f9` is the seat class (1 economy … 4 first).** The code
+  had these two swapped for weeks and every byte-identity test passed anyway,
+  because the 1-adult economy default encodes as `1` under BOTH readings —
+  a fixture can only catch what makes bytes differ. Settled by decoding
+  Google's own tokens for a 2-adult + 2-child search in two cabins
+  (f8 stayed `[1,1,2,2]`, f9 flipped 1→3). Until then, premium-cabin links
+  had encoded "one lap infant, economy." Do not encode infants: the enum
+  values for in-seat vs on-lap are disputed between reverse-engineered
+  schemas, and the tool only accepts adults + children.
 
 **Model behavior**
 - **Never make the model do calendar math.** Asked for "the latest departure
@@ -243,7 +244,18 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
 - The outright cheapest stays inside the preview; the shipped cut always keeps the
   cheapest, the fastest, and up to 8 nonstops, in value order.
 - Cabin/dates/stops split the search-cache key; only cosmetic fields do not.
-- Multi-city quotes the cheaper of one-ticket and separate-ticket, and says which.
+- Multi-city quotes the cheaper of one-ticket and separate-ticket, and says which —
+  and never quotes a combined price above the purchasable per-leg sum: the
+  **separate-ticket floor** (cheapest priced flight per leg, from the parallel
+  `leg_futs` searches) ships as its own honestly-labeled option when it wins,
+  its DIFFERENT-flights warning intact, while every one-ticket card keeps its
+  own price (a displayed price belongs to the itinerary displayed beside it).
+- Rolled dates stay coherent: a return, arrival target, or flexible `to_date`
+  can never land before the (possibly year-rolled) date it depends on.
+- Prices are the **party total** for the searched travelers (server-verified:
+  2 adults + 1 child priced 3.00x solo), every Book link carries the same
+  party in `f8`, and every "per person" label switches to "total for N
+  travelers" the moment the party exceeds one.
 - `itinerary_url()` returns None rather than a malformed link; callers fall back.
 - A round-trip date grid prices a real stay (7 nights assumed and disclosed when
   the model gives none), never Google's same-day-return default.
@@ -486,7 +498,66 @@ same SSE events as the real loop, so streaming is fully exercisable locally.
 
 ## Changelog
 
-**August 6, 2026 (the README learns what the sessions learned)**
+**August 7, 2026 (both open bugs closed, and the audit's harvest)**
+A full-codebase audit (multi-agent review, every finding adversarially
+verified before touching code) closed the two actionable KNOWN OPEN BUGS and
+a set of smaller ones:
+- **Multi-city now quotes what you can actually buy.** The exact-signature
+  comparison (`leg_price_index`) stays authoritative when it fires, but it
+  usually cannot (combined itineraries rarely reuse the standalone one-ways'
+  flights), so the per-leg searches already running beside the probe
+  (`leg_futs`) now provide a **separate-ticket floor**: when the cheapest
+  purchasable per-leg sum beats every combined option it ships as its own
+  "separate tickets" option (DIFFERENT-flights warning attached), pricier
+  one-ticket cards name both numbers, and the model is forbidden from
+  presenting a one-ticket price above it as best value. The success payload
+  also gained `combined_check_url`, and the compact card stops hardcoding
+  "as 2 separate tickets" for 3+ legs.
+- **The Book link finally books the family.** `itinerary_url` and every
+  caller (all four sites, plus `multi_city_search_url`, which the README's
+  bug list had missed) now thread `adults`/`children` — and fixing that
+  exposed a deeper bug: the tfs schema comment had **f8/f9 semantically
+  swapped** (f8 is one varint per traveler, f9 is the seat), undetectable by
+  the byte-identity fixture because 1-adult economy encodes identically both
+  ways. Verified against Google's own tokens (see Lessons). Premium-cabin
+  deep links are correct for the first time. Prices are party totals
+  (live-verified 3.00x for 2 adults + 1 child), so payloads carry `party`,
+  the message tells the model, and every "per person" label becomes "total
+  for N travelers" when N > 1 — cards, board, and share passes alike. Leg
+  sub-specs stopped dropping `children`; the price-context cache key now
+  splits on it.
+- **A crafted ledger could hang the server.** One oversized option stalled
+  `ledger_context`'s halving loop at `[:1]` forever, before any model call —
+  a single POST pinned the request and its SSE worker (reproduced, then
+  fixed: the loop must shrink the body every pass or drop the ledger).
+- **Dates roll coherently now.** Each date rolled independently, so "Aug 1
+  to Aug 20" asked on Aug 7 became depart-2027/return-2026 — an impossible
+  filter reported as "No flights found"; flexible windows could invert the
+  same way (fli silently swaps them into an ~11-month grid). A rolled
+  departure now drags its return/arrival/`to_date` forward with a visible
+  note. Speculation had the mirror bug: past month/days were guessed with
+  the CURRENT year, guaranteeing a cache miss against the router's rolled
+  spec — a pure waste of a Google search per affected query.
+- **The degraded multi-city section now renders.** `visibleSections` dropped
+  sections with no rows, but the all-legs-empty fallback ships exactly that
+  plus the Google link the prose promises ("it is in this section" — it was
+  not). Sections carrying `combined_check_url` now show.
+- **Stop actually stops.** Stopping before any text landed left a permanent
+  empty reply bubble, and stopping during the typewriter drain (fetch
+  already done) let results finalize after the "Search stopped" note; stop
+  now invalidates the turn and drops the empty placeholder.
+- **Wire diet:** the SSE `sections` frame shipped the full results payload
+  the client deliberately discards (~340KB measured on a 10x20 round trip)
+  — now a `{"count": N}` marker; SSE JSON compacts its separators (~7%);
+  `route_points` coordinates round to 3 decimals (~110m, invisible at card
+  size); `world.js` (21.5KB gzipped) no longer blocks first paint (defer)
+  and is immutable-cached since it is `?v=` busted.
+- **Paper cuts:** IME users' Enter no longer sends mid-composition; a chip
+  or calendar tap no longer wipes a half-typed draft; share's image actions
+  hide when the canvas render failed (Save no longer downloads a junk file
+  from `href="null"`); `/api/returns` returns 400, not a raw 500, for
+  unknown airport codes; multi-city ledger entries record the real route
+  instead of the literal string " to ".
 - Evan: "why don't you add that to the readme — the lessons learned and the
   important stuff a new agent should know?" Three additions, each pinned by
   a drift check so they cannot quietly rot:

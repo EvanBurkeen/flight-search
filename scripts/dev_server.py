@@ -78,7 +78,10 @@ if not os.environ.get("ANTHROPIC_API_KEY"):
         if not specs:
             return {"message": "STUB: give me two airport codes, e.g. 'JFK to ORD'.", "sections": []}
         sections = [app_mod.cached_execute_spec(s) for s in specs]
-        emit("sections", [s for s in sections if s.get("results") or s.get("dates")])
+        # matches the real loop: a lightweight count marker, never the payload
+        fresh = [s for s in sections if s.get("results") or s.get("dates")]
+        if fresh:
+            emit("sections", {"count": len(fresh)})
         # emit() is a no-op on the non-streaming path; the events are still
         # produced so /api/search/stream (see the streaming-experiment branch)
         # stays exercisable locally
