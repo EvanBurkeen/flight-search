@@ -3426,14 +3426,33 @@ def search_flexible_dates(spec: dict, origins: list, destinations: list, currenc
     extra, assumed_nights = flex_grid_params(flex, is_round_trip)
 
     filters = build_filters(spec, origins, destinations, filters_cls=DateSearchFilters, **extra)
+
+    # The window is the yardstick a returned grid is measured against. The
+    # grid degrades exactly like the list ("one row where 43 belong" — see
+    # Lessons), and until Aug 8 any NON-EMPTY grid was accepted as complete:
+    # a one-row grid shipped as a single confident chip, the model called it
+    # "the cheapest dates", and the $135 day sat invisible one square away.
+    try:
+        _wf = datetime.strptime(flex["from_date"], "%Y-%m-%d")
+        _wt = datetime.strptime(flex["to_date"], "%Y-%m-%d")
+        window_days = min(61, max(1, (_wt - _wf).days + 1))  # Google grids cap ~61
+    except (KeyError, TypeError, ValueError):
+        window_days = None
+
+    def grid_is_thin(rows) -> bool:
+        if not window_days:
+            return False
+        priced = sum(1 for dp in rows if dp.price)
+        return priced < max(3, window_days // 2)
+
     searcher = SearchDates()
-    date_prices = None
+    date_prices: list = []  # richest attempt so far — data is never discarded
     last_exc = None
     for i in range(3):
         breaker_wait(1.5 if i == 0 else 8.0)
         checkout_identity()
         try:
-            date_prices = searcher.search(filters, currency="USD")
+            rows = searcher.search(filters, currency="USD") or []
             last_exc = None
         except SearchClientError as e:
             last_exc = e
@@ -3441,15 +3460,18 @@ def search_flexible_dates(spec: dict, origins: list, destinations: list, currenc
             note_search_outcome(False)
             time.sleep(0.6 + 0.6 * i)
             continue
-        if date_prices:
+        if len(rows) > len(date_prices):
+            date_prices = rows
+        if rows and not grid_is_thin(rows):
             note_search_outcome(True)
             break
+        # empty OR provably short for the window: session-shaped either way,
+        # so the retry must arrive as a genuinely new visitor
         retire_identity()
-        note_search_outcome(False)
+        note_search_outcome(bool(rows))
         time.sleep(1)
-    if last_exc:
+    if last_exc and not date_prices:
         raise last_exc
-    date_prices = date_prices or []
     if not date_prices:
         return {
             "type": "dates",
@@ -3457,16 +3479,61 @@ def search_flexible_dates(spec: dict, origins: list, destinations: list, currenc
             "dates": [],
         }
 
-    dates = [
-        {
-            "date": dp.date[0].strftime("%Y-%m-%d"),
-            "return_date": dp.date[1].strftime("%Y-%m-%d") if len(dp.date) > 1 else None,
-            "price": dp.price,
-            "currency": dp.currency or currency,
-        }
-        for dp in date_prices
-        if dp.price
-    ]
+    def rows_to_dates(rows) -> list:
+        return [
+            {
+                "date": dp.date[0].strftime("%Y-%m-%d"),
+                "return_date": dp.date[1].strftime("%Y-%m-%d") if len(dp.date) > 1 else None,
+                "price": dp.price,
+                "currency": dp.currency or currency,
+            }
+            for dp in rows
+            if dp.price
+        ]
+
+    dates = rows_to_dates(date_prices)
+    sparse_airports: list = []
+    grid_probe = None
+    if (window_days and len(dates) < max(3, window_days // 2)
+            and (len(origins) > 1 or len(destinations) > 1)):
+        # A multi-airport grid COLLAPSES TO ITS WORST MEMBER: measured Aug 8,
+        # BDL->FLL alone returned 31/31 days while HVN+BDL+JFK->FLL returned
+        # ONE row — a sparse-grid airport (HVN) poisons the combined calendar.
+        # Same cure as probe_missing_airports on the list side: ask each pair
+        # for its own calendar, merge by date at the min price, and name any
+        # airport whose grid is thin even alone rather than letting its gaps
+        # read as no-service. Bounded: <=6 single-attempt grids, in parallel.
+        pairs = [(o, d) for o in origins for d in destinations][:6]
+
+        def pair_grid(pair):
+            po, pd = pair
+            try:
+                pf = build_filters(spec, [po], [pd], filters_cls=DateSearchFilters, **extra)
+                checkout_identity()
+                rows = SearchDates().search(pf, currency="USD") or []
+                note_search_outcome(bool(rows))
+                return rows
+            except Exception:
+                retire_identity()
+                note_search_outcome(False)
+                return []
+
+        merged: dict = {(d["date"], d["return_date"]): d for d in dates}
+        pool = ThreadPoolExecutor(max_workers=min(4, len(pairs)))
+        try:
+            for (po, pd), rows in zip(pairs, pool.map(pair_grid, pairs)):
+                pair_dates = rows_to_dates(rows)
+                if window_days and len(pair_dates) < max(3, window_days // 2):
+                    sparse_airports.append(po.name if len(origins) > 1 else pd.name)
+                for d in pair_dates:
+                    key = (d["date"], d["return_date"])
+                    if key not in merged or d["price"] < merged[key]["price"]:
+                        merged[key] = d
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+        dates = sorted(merged.values(), key=lambda d: (d["date"], d["return_date"] or ""))
+        grid_probe = (f"combined grid was {len(rows_to_dates(date_prices))} day(s); "
+                      f"merged {len(pairs)} pair grids into {len(dates)}")
     cheapest = min((d["price"] for d in dates), default=None)
     for d in dates:
         d["cheapest"] = d["price"] == cheapest
@@ -3475,6 +3542,25 @@ def search_flexible_dates(spec: dict, origins: list, destinations: list, currenc
         "message": "The best-value dates are shown first; expand for the full calendar. Pick one to see actual flights.",
         "dates": dates,
     }
+    if grid_probe:
+        payload["grid_probe"] = grid_probe  # diagnosis reads the answer, no probe cycle
+    if window_days and len(dates) < max(3, window_days // 2):
+        # still short after the ladder AND the pair fan-out: ship it, but
+        # never as if complete — a thin slice reads as absence unless labeled
+        payload["grid_coverage"] = {"priced_days": len(dates), "window_days": window_days}
+        payload["message"] += (
+            f" GRID COVERAGE WARNING: Google priced only {len(dates)} of the ~{window_days} days"
+            " in this window for this session. The unpriced days are NOT evidence of no service"
+            " or higher fares. Tell the user the calendar came back partial, and offer to re-run"
+            " the window or price specific dates directly."
+        )
+    if sparse_airports:
+        _codes = ", ".join(sorted(set(sparse_airports)))
+        payload["message"] += (
+            f" Note: Google's date grid barely covers {_codes} even searched alone — gaps on"
+            " those airports' days do NOT mean no service (fixed-date searches price them"
+            " normally); the merged calendar leans on the better-covered airports."
+        )
     if assumed_nights:
         payload["message"] += (
             f" Prices are round-trip totals for {assumed_nights}-night trips"

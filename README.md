@@ -150,6 +150,14 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
   grid's price for the searched date, retry as a new identity, disclose if
   still short) catches session flakiness and parse loss, but NOT a
   uniformly thin session — the unpriced-carrier disclosure covers that.
+- **A multi-airport DATE GRID collapses to its worst member** (Aug 8:
+  BDL→FLL alone 31/31 days, HVN alone 1, HVN+BDL+JFK combined 1 — the
+  sparse airport poisoned the shared calendar). The flexible-dates path
+  retries thin grids as fresh identities, rebuilds a thin combined grid
+  from per-pair grids merged at the min price per day (one thin calendar
+  can never erase everyone else's days), and names sparse-grid
+  airports so their gaps never read as no-service. `grid_probe` in the
+  payload says what happened.
 - **Refusals are SESSION-STICKY soft blocks, not random flakiness.** HTTP 200 with a
   ~94-byte body (gRPC code 13). A flagged session failed 64/64 consecutive requests
   while brand-new sessions in the same seconds passed 20/32. Retrying on the same
@@ -253,6 +261,9 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
   own price (a displayed price belongs to the itinerary displayed beside it).
 - Rolled dates stay coherent: a return, arrival target, or flexible `to_date`
   can never land before the (possibly year-rolled) date it depends on.
+- A flexible-dates grid covering less than half its window is retried, then
+  rebuilt per airport pair when multiple airports are in play, and ships
+  with a coverage warning if still short — never as if complete.
 - Prices are the **party total** for the searched travelers (server-verified:
   2 adults + 1 child priced 3.00x solo), every Book link carries the same
   party in `f8`, and every "per person" label switches to "total for N
@@ -502,6 +513,39 @@ same SSE events as the real loop, so streaming is fully exercisable locally.
   lakes; run it, then bump the `?v=N` cache-buster on the script tag in index.html).
 
 ## Changelog
+
+**August 8, 2026 (one chip where seventeen belonged: the poisoned date grid)**
+- Evan's screen: "mid-late December, HVN/BDL/NYC to FLL, best dates" produced
+  a cheapest-dates section holding ONE chip (Dec 20, $146) while the same
+  turn's fixed-date searches found $135 one square away. Two layers, both
+  now fixed as classes:
+  - **The ladder accepted any NON-EMPTY grid as complete.** The grid
+    degrades exactly like the list (a documented lesson), but only an empty
+    grid retried. Now a grid short of HALF its window retries as a fresh
+    identity (richest attempt kept, data never discarded), and an incurably
+    short grid ships with a GRID COVERAGE WARNING to the model plus an
+    on-card note — never as if whole.
+  - **A multi-airport grid collapses to its worst member.** Measured live:
+    BDL→FLL alone returned 31/31 days; HVN alone returned 1; HVN+BDL+JFK
+    returned 1 — one sparse-grid airport poisons the combined calendar.
+    Same cure as probe_missing_airports on the list side: when the combined
+    grid is thin, fan out per airport pair (bounded, ≤6 single-attempt
+    grids in parallel), merge by date at the min price, and name any
+    airport whose calendar is thin even alone — its gaps must never read
+    as "no service" (fixed-date searches price HVN fine). Verified on the
+    exact failing case: 1 day combined → 31/31 merged, HVN disclosed.
+    `grid_probe` rides in the payload so the next diagnosis is free.
+- Display: a bounded window (≤21 priced days — "mid-late December" is ~17)
+  now shows EVERY priced day as chips by default, cheapest outlined;
+  best-value collapsing is reserved for month-plus windows.
+- Also answered in-session: "same question, different answer" is three
+  stacked sources — the concierge plans its own searches each turn (LLM,
+  temperature pinned by adaptive thinking), Google serves different slices
+  per session (this very bug: a 1-day grid one run, fuller the next), and
+  since Aug 8 a repeat ask inside one conversation carries the first
+  answer's history + ledger, so the model legitimately treats it as a
+  follow-up. The grid fix removes the largest data-side variance for
+  date-hunt queries.
 
 **August 8, 2026 (memory: the workspace survives a reload)**
 - Evan's ask, refined together: "a way to look at preloaded routes — recent

@@ -1385,6 +1385,86 @@ check("/api/returns rejects unknown airports as a 400, not a raw 500",
       "unrecognized leg airport" in _src_eff)
 
 # --------------------------------------------------------------------------
+section("Grid coverage  — Changelog: 'one chip where seventeen belonged'")
+# --------------------------------------------------------------------------
+# Aug 8, HVN/BDL/NYC -> FLL "mid-late December": the flexible-dates grid
+# returned ONE row and shipped it as a single confident chip — while the
+# fixed-date searches in the same turn found a cheaper day one square away.
+# The grid degrades exactly like the list (a documented lesson), but the
+# ladder accepted any NON-EMPTY grid as complete. Now a grid short of half
+# its window retries as a fresh identity (keeping the richest attempt), and
+# an incurably short grid ships with a coverage warning, never as if whole.
+def _grid_row(day, price):
+    return types.SimpleNamespace(date=[datetime(2026, 12, day)], price=price, currency="USD")
+
+
+class _ThinThenFull:
+    calls = 0
+
+    def search(self, filters, currency="USD"):
+        _ThinThenFull.calls += 1
+        if _ThinThenFull.calls == 1:
+            return [_grid_row(20, 146.0)]                       # the degraded slice
+        return [_grid_row(15 + i, 130.0 + i) for i in range(17)]  # the real window
+
+
+class _AlwaysThin:
+    def search(self, filters, currency="USD"):
+        return [_grid_row(20, 146.0)]
+
+
+_real_sd = app.SearchDates
+_flex_spec = {"trip_type": "one_way", "flexible_dates": {"from_date": "2026-12-15", "to_date": "2026-12-31"}}
+_o_fx, _ = app.resolve_airports(["HVN", "BDL"])
+_d_fx, _ = app.resolve_airports(["FLL"])
+app.SearchDates = _ThinThenFull
+_full = app.search_flexible_dates(dict(_flex_spec), _o_fx, _d_fx, "USD")
+app.SearchDates = _AlwaysThin
+_thin = app.search_flexible_dates(dict(_flex_spec), _o_fx, _d_fx, "USD")
+app.SearchDates = _real_sd
+check("a grid short of its window is retried, not trusted",
+      _ThinThenFull.calls >= 2 and len(_full["dates"]) == 17,
+      f"attempts={_ThinThenFull.calls}, shipped {len(_full['dates'])} dates")
+check("...and the recovered full window ships with no warning",
+      "grid_coverage" not in _full and "GRID COVERAGE" not in _full["message"])
+check("an incurably short grid ships, but never as if complete",
+      len(_thin["dates"]) == 1
+      and _thin["grid_coverage"] == {"priced_days": 1, "window_days": 17}
+      and "NOT evidence of no service" in _thin["message"])
+_fe_gc = open(os.path.join(ROOT, "public", "index.html")).read()
+check("the card tells the user the calendar came back partial",
+      "sec.grid_coverage" in _fe_gc and "not 'no flights'" in _fe_gc.replace("\\'", "'"))
+check("a bounded window (~3 weeks) shows every priced day by default",
+      "all.length <= 21" in _fe_gc)
+
+# The mechanism behind Evan's one-chip screen, measured live: BDL->FLL alone
+# returned 31/31 days while HVN+BDL+JFK->FLL returned ONE row — a combined
+# grid collapses to its worst member. The cure mirrors probe_missing_airports:
+# per-pair grids, merged at the min price per date, sparse airports named.
+class _PoisonedCombined:
+    def search(self, filters, currency="USD"):
+        seg = filters.flight_segments[0]
+        codes = {a[0].name for a in seg.departure_airport}
+        if codes == {"BDL"}:
+            return [_grid_row(15 + i, 150.0 + i) for i in range(17)]
+        return [_grid_row(20, 146.0)]  # combined AND HVN-alone: one thin row
+
+
+app.SearchDates = _PoisonedCombined
+_merged = app.search_flexible_dates(dict(_flex_spec), _o_fx, _d_fx, "USD")
+app.SearchDates = _real_sd
+check("a poisoned combined grid is rebuilt from per-pair calendars",
+      len(_merged["dates"]) == 17 and "GRID COVERAGE" not in _merged["message"],
+      f"merged {len(_merged['dates'])} days")
+check("...the merge keeps the cheaper price where pair days overlap",
+      next(d["price"] for d in _merged["dates"] if d["date"] == "2026-12-20") == 146.0
+      and next(d for d in _merged["dates"] if d["date"] == "2026-12-20")["cheapest"])
+check("...the sparse airport is named, its gaps decoupled from 'no service'",
+      "HVN" in _merged["message"] and "do NOT mean no service" in _merged["message"])
+check("...and the payload records what the probe did (free diagnosis)",
+      "pair grids" in _merged.get("grid_probe", ""))
+
+# --------------------------------------------------------------------------
 section("Memory  — Changelog: 'the workspace survives a reload'")
 # --------------------------------------------------------------------------
 # One reload, tab crash, or phone lock used to destroy the whole workspace —

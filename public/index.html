@@ -204,6 +204,7 @@
     .recent-route { font-family: var(--serif); font-size: 0.95rem; font-weight: 600; }
     .recent-meta { font-size: 0.7rem; opacity: 0.65; font-variant-numeric: tabular-nums; }
     .recents-note { font-size: 0.68rem; opacity: 0.55; margin-top: 0.5rem; }
+    .grid-coverage { font-size: 0.72rem; color: var(--accent-dark); opacity: 0.85; margin: 0 0 0.5rem; }
     .newconv-btn {
       font-size: 0.7rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase;
       padding: 0.4rem 0.9rem; border: 1px solid var(--line); border-radius: 3px;
@@ -1227,6 +1228,8 @@
                 <!-- flexible-date prices: best-value chips collapsed, calendar heatmap expanded -->
                 <template x-if="sec.type === 'dates' && sec.dates && sec.dates.length">
                   <div>
+                    <div class="grid-coverage" x-show="sec.grid_coverage"
+                         x-text="sec.grid_coverage ? ('Google priced only ' + sec.grid_coverage.priced_days + ' of ~' + sec.grid_coverage.window_days + ' days in this window just now — the gaps are not \'no flights\'. Ask me to re-run it or check a specific date.') : ''"></div>
                     <template x-if="!sec._expanded">
                       <div class="date-grid">
                         <template x-for="(d, j) in visibleDates(sec)" :key="j">
@@ -1551,7 +1554,9 @@
 
         visibleDates(sec) {
           const all = sec.dates || [];
-          if (sec._expanded || all.length <= 12) return all;
+          // a bounded window ("mid-late December", ~3 weeks) shows every
+          // priced day, cheapest outlined; only month-plus windows collapse
+          if (sec._expanded || all.length <= 21) return all;
           // default view: only dates worth considering (within 15% of cheapest)
           const min = Math.min(...all.map(d => d.price));
           let best = all.filter(d => d.price <= min * 1.15);
