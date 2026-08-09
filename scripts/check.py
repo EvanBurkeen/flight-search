@@ -992,7 +992,9 @@ check("the masthead is a wordmark; the crest and its subtitle are gone",
 check("the credit line moved to the footer colophon",
       "Powered by Claude and Google Flights" in _fe_now)
 check("round trips open on the mix & match board",
-      "openBoard(sec)" in _fe_now and _fe_now.count("this.openBoard(sec);") == 2)
+      # 3 call sites: plainTurn, maybeFinishStream, and (Aug 8) restoreConvo —
+      # a restored round trip must land back on the board too
+      "openBoard(sec)" in _fe_now and _fe_now.count("this.openBoard(sec);") == 3)
 check("the reply sits in a panel that answers the user's bubble, in sans",
       "border-radius: 10px 10px 10px 2px" in _fe_now
       and "width: fit-content" in _fe_now
@@ -1381,6 +1383,39 @@ check("the multi-city basis label counts the real legs",
       "'as ' + (it.parts || []).length + ' separate tickets'" in _fe_eff)
 check("/api/returns rejects unknown airports as a 400, not a raw 500",
       "unrecognized leg airport" in _src_eff)
+
+# --------------------------------------------------------------------------
+section("Memory  — Changelog: 'the workspace survives a reload'")
+# --------------------------------------------------------------------------
+# One reload, tab crash, or phone lock used to destroy the whole workspace —
+# the single worst friction against Google Flights, whose state lives in the
+# URL. The conversation now persists per-device and the landing greets you
+# with your recent trips. The honesty rules are the point: a remembered fare
+# always carries its age and never impersonates a live one.
+_fe_mem = open(os.path.join(ROOT, "public", "index.html")).read()
+check("the conversation persists and restores, versioned",
+      "fa_convo_v1" in _fe_mem and "restoreConvo()" in _fe_mem
+      and "fa_recents_v1" in _fe_mem)
+check("runtime keys are stripped on save and anchors re-stamped on restore",
+      "startsWith('_')" in _fe_mem
+      and _fe_mem.count("'sec-' + (++this.sectionSeq)") == 3)
+check("stored cards keep the ledger's budget (last 2 card-bearing replies)",
+      "withCards" in _fe_mem
+      and ".slice(-2)" in _fe_mem.split("persistConvo() {")[1].split("restoreConvo() {")[0])
+check("recents are capped, deduped by query, and re-ask verbatim",
+      ".slice(0, 8)" in _fe_mem and "rememberRecent" in _fe_mem
+      and 'search(r.q)' in _fe_mem)
+check("a remembered fare carries its age, never impersonates a live one",
+      "agoText" in _fe_mem and "'saw ' + this.formatPrice" in _fe_mem
+      and "re-checks live prices" in _fe_mem)
+check("a resumed conversation admits its age once",
+      "Fares shown were quoted then" in _fe_mem)
+check("quota failure keeps the transcript and drops the cards",
+      "memory degrades to this session only" in _fe_mem)
+check("a fresh start keeps the recents (memory of trips, not of the chat)",
+      "removeItem(CONVO_KEY)" in _fe_mem and "New trip" in _fe_mem
+      and "removeItem(RECENTS_KEY)" in _fe_mem.split("clearRecents() {")[1][:200]
+      and "removeItem(RECENTS_KEY)" not in _fe_mem.split("newConversation() {")[1].split("rememberRecent")[0])
 
 # --------------------------------------------------------------------------
 section("README drift  — the doc must match the code it describes")

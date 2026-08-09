@@ -180,6 +180,38 @@
     .cap .cap-title span { color: var(--accent); margin-right: 0.35rem; }
     .cap .cap-body { font-size: 0.75rem; opacity: 0.72; line-height: 1.5; }
 
+    /* recent trips on the landing: remembered context, never remembered
+       truth — every fare carries its age, and a tap re-prices live */
+    .recents { margin: 0 0 2rem; }
+    .recents-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 0.5rem; }
+    .recents-title { font-family: var(--serif); font-size: 1.05rem; font-weight: 600; color: var(--accent-dark); }
+    .recents-clear {
+      font-size: 0.65rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+      background: none; border: none; border-bottom: 1px solid var(--line);
+      color: var(--ink); opacity: 0.55; cursor: pointer; padding: 0 0 0.1rem;
+    }
+    .recents-clear:hover { opacity: 1; color: var(--accent-dark); }
+    .recent-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 15rem), 1fr)); gap: 0.5rem; }
+    .recent-chip {
+      text-align: left; border: 1px solid var(--line); background: var(--panel);
+      border-radius: 3px; padding: 0.6rem 0.75rem; cursor: pointer;
+      display: flex; flex-direction: column; gap: 0.15rem;
+      box-shadow: var(--card-shadow); transition: border-color 0.15s, color 0.15s;
+      color: var(--ink); font-family: inherit;
+    }
+    .recent-chip:hover { border-color: var(--accent); }
+    .recent-chip:hover .recent-route { color: var(--accent-dark); }
+    .recent-route { font-family: var(--serif); font-size: 0.95rem; font-weight: 600; }
+    .recent-meta { font-size: 0.7rem; opacity: 0.65; font-variant-numeric: tabular-nums; }
+    .recents-note { font-size: 0.68rem; opacity: 0.55; margin-top: 0.5rem; }
+    .newconv-btn {
+      font-size: 0.7rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase;
+      padding: 0.4rem 0.9rem; border: 1px solid var(--line); border-radius: 3px;
+      background: var(--panel); color: var(--ink); opacity: 0.75; cursor: pointer;
+      transition: all 0.15s; flex: none;
+    }
+    .newconv-btn:hover { opacity: 1; border-color: var(--accent); color: var(--accent-dark); }
+
     .chips { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 2rem; }
     .chip {
       font-size: 0.75rem; padding: 0.45rem 0.8rem; border-radius: 3px;
@@ -699,6 +731,8 @@
         <h1>Flight <em>Assistant</em></h1>
       </div>
       <div class="header-tools">
+        <button class="newconv-btn" x-show="hasSearched" @click="newConversation()"
+                title="Start fresh — your recent trips are kept">New trip</button>
         <button class="theme-btn" @click="cycleTheme()" :title="themeTitle()" aria-label="Color theme" x-text="themeIcon()"></button>
         <div class="view-toggle">
           <button :class="viewMode === 'detailed' ? 'active' : ''" @click="setView('detailed')">Detailed</button>
@@ -713,6 +747,21 @@
           <div class="date" x-text="longToday()"></div>
           <div class="hello" x-text="greeting()"></div>
           <div class="ask">Where shall we take you? Describe the trip and I'll handle the searching.</div>
+        </div>
+        <div class="recents" x-show="recents.length">
+          <div class="recents-head">
+            <span class="recents-title">Recent trips</span>
+            <button class="recents-clear" @click="clearRecents()">Clear</button>
+          </div>
+          <div class="recent-grid">
+            <template x-for="(r, ri) in recents" :key="ri">
+              <button class="recent-chip" @click="search(r.q)" :title="'Search again: ' + r.q">
+                <span class="recent-route" x-text="r.route"></span>
+                <span class="recent-meta" x-text="recentMeta(r)"></span>
+              </button>
+            </template>
+          </div>
+          <div class="recents-note">Fares move — tapping a trip re-checks live prices.</div>
         </div>
         <div class="capabilities">
           <div class="cap">
@@ -1311,6 +1360,9 @@
 
   <script>
     function flightApp() {
+      // bump a suffix if the stored shape ever changes; old blobs just miss
+      const CONVO_KEY = 'fa_convo_v1';
+      const RECENTS_KEY = 'fa_recents_v1';
       return {
         messages: [],
         input: '',
@@ -1322,6 +1374,7 @@
         // answered from the record instead of a fresh search
         ledgers: [],
         sectionSeq: 0,
+        recents: [],
         ladderOpen: false,
         viewMode: localStorage.getItem('flightViewMode') || 'detailed',
         theme: localStorage.getItem('flightTheme') === 'dark' ? 'dark' : 'light',
@@ -1355,6 +1408,12 @@
             const el = document.getElementById('msg-' + this.newBelow);
             if (!el || el.getBoundingClientRect().top < window.innerHeight - 120) this.newBelow = false;
           }, { passive: true });
+
+          // the workspace survives a reload: recents feed the landing, and
+          // the last conversation (prose + the freshest cards) comes back
+          try { this.recents = JSON.parse(localStorage.getItem(RECENTS_KEY) || '[]') || []; }
+          catch (e) { this.recents = []; }
+          this.restoreConvo();
         },
 
 
@@ -1705,6 +1764,7 @@
             this.messages.push({ role: 'note', content: 'Search stopped — tell me what to change.' });
             this.scrollToBottom();
           }
+          this.persistConvo();
         },
 
         async search(queryOverride) {
@@ -1712,6 +1772,7 @@
           if (!q) return;
           if (this.isLoading) this.stop(true); // correcting mid-search: cancel and restart
 
+          this._lastQ = q; // the recents record re-asks this verbatim
           const myReq = ++this.reqId;
           this.controller = new AbortController();
 
@@ -1786,6 +1847,7 @@
             suggestions: data.suggestions || [],
           });
           this.maybeNudge();
+          this.persistConvo();
         },
 
         async streamTurn(q, myReq) {
@@ -1912,15 +1974,119 @@
           this.history = this.history.slice(-12);
           this.rememberLedger(d.ledger);
           this.maybeNudge();
+          this.persistConvo();
           release();
         },
 
         // the compact record of what this turn put on screen; the next turn
         // sends it back so a follow-up about these exact cards costs no search
         rememberLedger(led) {
+          this.rememberRecent(this._lastQ, led);
           if (!led || !(led.entries || []).length) return;
           this.ledgers.push(led);
           this.ledgers = this.ledgers.slice(-2);
+        },
+
+        // ---- memory: the conversation survives a reload, and the landing
+        // greets you with your recent trips. Per-device (localStorage, no
+        // login). A remembered fare must never impersonate a live one, so
+        // every stored price carries its age and re-pricing is one tap. ----
+        persistConvo() {
+          const strip = (k, v) => (typeof k === 'string' && k.startsWith('_')) ? undefined : v;
+          try {
+            const keep = this.messages.slice(-12);
+            // full sections survive only on the last 2 card-bearing replies —
+            // the same budget the ledger gives the model; older turns keep
+            // their prose and chips, not their cards
+            const withCards = keep.filter(m => m.role === 'assistant' && (m.sections || []).length).slice(-2);
+            const slim = keep.map(m => m.role === 'assistant'
+              ? { role: m.role, content: m.content, suggestions: m.suggestions || [],
+                  sections: withCards.includes(m) ? (m.sections || []) : [] }
+              : { role: m.role, content: m.content });
+            localStorage.setItem(CONVO_KEY, JSON.stringify(
+              { v: 1, savedAt: Date.now(), history: this.history.slice(-12),
+                ledgers: this.ledgers, messages: slim }, strip));
+          } catch (e) {
+            // quota blown: keep the transcript, drop every card
+            try {
+              localStorage.setItem(CONVO_KEY, JSON.stringify({
+                v: 1, savedAt: Date.now(), history: this.history.slice(-12), ledgers: [],
+                messages: this.messages.slice(-12).map(m => ({
+                  role: m.role, content: m.content, suggestions: m.suggestions || [], sections: [] })),
+              }));
+            } catch (e2) { /* memory degrades to this session only */ }
+          }
+        },
+
+        restoreConvo() {
+          let saved = null;
+          try { saved = JSON.parse(localStorage.getItem(CONVO_KEY) || 'null'); } catch (e) { return; }
+          if (!saved || saved.v !== 1 || !(saved.messages || []).length) return;
+          this.history = saved.history || [];
+          this.ledgers = saved.ledgers || [];
+          saved.messages.forEach(m => (m.sections || []).forEach(sec => {
+            sec._anchor = 'sec-' + (++this.sectionSeq);
+            this.openBoard(sec);
+          }));
+          // honesty at the seam: say once how old the resumed fares are
+          if (Date.now() - (saved.savedAt || 0) > 45 * 60 * 1000) {
+            saved.messages.push({ role: 'note', content:
+              'Resumed from ' + this.agoText(saved.savedAt) +
+              '. Fares shown were quoted then — ask me to re-check any of them.' });
+          }
+          this.messages = saved.messages;
+          this.hasSearched = true;
+          this.$nextTick(() => { this.$refs.bottom?.scrollIntoView(); this.syncBar(); });
+        },
+
+        newConversation() {
+          if (this.isLoading) this.stop(true);
+          this.messages = [];
+          this.history = [];
+          this.ledgers = [];
+          this.hasSearched = false;
+          this.newBelow = false;
+          try { localStorage.removeItem(CONVO_KEY); } catch (e) { }
+          window.scrollTo({ top: 0 });
+          this.$nextTick(() => this.syncBar());
+        },
+
+        rememberRecent(q, led) {
+          if (!q || !led || !(led.entries || []).length) return;
+          const e = led.entries[0];
+          const prices = [];
+          (e.options || []).forEach(o => {
+            const p = (o.price != null) ? o.price : o.total_price;
+            if (typeof p === 'number') prices.push(p);
+          });
+          (e.cheapest_dates || []).forEach(d => { if (typeof d.price === 'number') prices.push(d.price); });
+          const rec = { q, route: e.route || q, depart: e.depart || null,
+                        saw: prices.length ? Math.min(...prices) : null, at: Date.now() };
+          const dupe = q.trim().toLowerCase();
+          this.recents = [rec, ...this.recents.filter(r => (r.q || '').trim().toLowerCase() !== dupe)].slice(0, 8);
+          try { localStorage.setItem(RECENTS_KEY, JSON.stringify(this.recents)); } catch (e2) { }
+        },
+
+        clearRecents() {
+          this.recents = [];
+          try { localStorage.removeItem(RECENTS_KEY); } catch (e) { }
+        },
+
+        recentMeta(r) {
+          return [
+            r.depart ? this.formatDate(r.depart) : null,
+            r.saw != null ? 'saw ' + this.formatPrice(r.saw, 'USD') : null,
+            this.agoText(r.at),
+          ].filter(Boolean).join(' · ');
+        },
+
+        agoText(ts) {
+          if (!ts) return '';
+          const m = Math.max(1, Math.round((Date.now() - ts) / 60000));
+          if (m < 60) return m + 'm ago';
+          const h = Math.round(m / 60);
+          if (h < 24) return h + 'h ago';
+          return Math.round(h / 24) + 'd ago';
         },
 
         dropStreamingMsg() {

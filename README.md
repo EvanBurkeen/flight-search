@@ -75,7 +75,8 @@ this file, then **"Lessons the hard way"** below before debugging anything.
   login + saved trips, real booking via Duffel. (Search-result caching shipped
   July 24; the calendar heatmap and streaming replies shipped July 25; the
   cross-turn results ledger — the useful slice of "trip memory" without login
-  — and price context shipped July 28.)
+  — and price context shipped July 28; reload persistence + recent-trip
+  chips, the no-login slice of saved trips, shipped Aug 8.)
 - **KNOWN OPEN BUGS (as of Aug 7, 2026) — pick these up before new features:**
   1. **Google withholds some fares entirely.** The $111 Breeze HVN-FLL fare
      never appears, even from a dedicated single-airport search. Disclosed
@@ -422,7 +423,11 @@ pairings in tooltips) · per-flight atlas maps (land+lakes, graticule,
 sequential longitude unwrapping so every leg takes the short way; outbound solid,
 return dashed; layover dots with durations) · timeline layover rings · suggestion
 chips · search ladder (jump-to index of every results section: fixed rail on
-wide screens, floating 'Searches' button + overlay elsewhere) · **streaming
+wide screens, floating 'Searches' button + overlay elsewhere) · **memory across reloads** (the
+conversation and its freshest cards restore on load; the landing shows
+recent-trip chips — route, date, the fare you saw and how long ago — that
+re-search live on tap; New trip clears the chat, keeps the recents) ·
+**streaming
 replies** (the reply types out once the answer is settled — a preamble that
 turns out to precede a search is never shown at all — at an eased, bounded
 cadence, then the cards rise in, then the chips; automatic fallback to the
@@ -497,6 +502,29 @@ same SSE events as the real loop, so streaming is fully exercisable locally.
   lakes; run it, then bump the `?v=N` cache-buster on the script tag in index.html).
 
 ## Changelog
+
+**August 8, 2026 (memory: the workspace survives a reload)**
+- Evan's ask, refined together: "a way to look at preloaded routes — recent
+  searches." The conversation (prose, suggestion chips, and the freshest
+  cards) now persists per-device in localStorage and restores on load, and
+  the landing screen greets a returning user with **recent trips** — small
+  boarding-stub chips (route, date, "saw $124", "2d ago") that re-ask the
+  original query through the normal search path when tapped.
+- The honesty rules are the feature: a remembered fare always carries its
+  age; a conversation resumed after 45+ minutes opens with a one-line note
+  that its fares were quoted then; tapping a recent trip re-prices LIVE
+  rather than re-showing stale cards; and nothing auto-refreshes on load
+  (each refresh is a real proxied Google search — "preloaded" means the
+  context is preloaded, not that bandwidth is spent silently).
+- Mechanics: stored cards keep the ledger's own budget (full sections only
+  on the last 2 card-bearing replies; older turns keep prose and chips);
+  runtime keys (underscore-prefixed) are stripped on save and section
+  anchors re-stamped on restore, so boards, maps, and filters rebuild from
+  data; the model's `history` and `ledgers` restore too, so "book the
+  JetBlue one" still works after a reboot; quota overflow degrades to
+  transcript-only, then to session-only. A **New trip** header control
+  clears the chat but keeps the recents. This is the no-login slice of the
+  roadmap's "login + saved trips".
 
 **August 7, 2026 (both open bugs closed, and the audit's harvest)**
 A full-codebase audit (multi-agent review, every finding adversarially
