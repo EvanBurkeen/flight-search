@@ -150,14 +150,22 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
   grid's price for the searched date, retry as a new identity, disclose if
   still short) catches session flakiness and parse loss, but NOT a
   uniformly thin session — the unpriced-carrier disclosure covers that.
-- **A multi-airport DATE GRID collapses to its worst member** (Aug 8:
-  BDL→FLL alone 31/31 days, HVN alone 1, HVN+BDL+JFK combined 1 — the
-  sparse airport poisoned the shared calendar). The flexible-dates path
-  retries thin grids as fresh identities, rebuilds a thin combined grid
-  from per-pair grids merged at the min price per day (one thin calendar
-  can never erase everyone else's days), and names sparse-grid
-  airports so their gaps never read as no-service. `grid_probe` in the
-  payload says what happened.
+- **The date grid streams PER-SLICE chunks: one day per chunk, out of
+  order, ending in unpriced placeholders** (Aug 28, HVN→BNA: 19 chunks, 31
+  items, 18 priced days — fli's parser read chunk one and shipped one day
+  while Google's own UI showed the month). `merge_calendar_chunks` unions
+  every chunk's day items; day items are found BY SHAPE (a list opening
+  with a YYYY-MM-DD string) because chunk tails are heterogeneous — keying
+  on chunk[-1] once ingested a bare `31` and overwrote real days. A later
+  chunk's entry wins only when priced. What looked like "HVN's grid is
+  sparse" (Aug 8) was mostly this parse loss.
+- **A multi-airport DATE GRID can still collapse or come back empty** for a
+  degraded session, so the insurance layers stay: thin grids retry as
+  fresh identities; a thin OR EMPTY combined multi-airport grid rebuilds
+  from per-pair grids merged at the min price per day; sparse airports are
+  named so their gaps never read as no-service; and an incurably short
+  grid ships with a coverage warning. `grid_probe` in the payload says
+  what happened.
 - **Refusals are SESSION-STICKY soft blocks, not random flakiness.** HTTP 200 with a
   ~94-byte body (gRPC code 13). A flagged session failed 64/64 consecutive requests
   while brand-new sessions in the same seconds passed 20/32. Retrying on the same
@@ -513,6 +521,38 @@ same SSE events as the real loop, so streaming is fully exercisable locally.
   lakes; run it, then bump the `?v=N` cache-buster on the script tag in index.html).
 
 ## Changelog
+
+**August 28, 2026 (the calendar was in the response all along)**
+- Evan put Google's own full October calendar (18 priced days, HVN area to
+  Nashville) next to our one-chip section and said iterate. The Aug 8
+  fan-out was treating a symptom: the ROOT CAUSE is that `GetCalendarGraph`
+  streams PER-SLICE wrb chunks — measured: 19 chunks, 31 day items, ONE DAY
+  PER CHUNK, out of order (first chunk was Oct 30), ending in a sweep of 13
+  unpriced placeholders — and fli's dates parser reads only the first
+  chunk. Dense routes fit their whole month in chunk 1, which is why
+  BDL→FLL looked fine and the "HVN is sparse" story survived; thin routes
+  stream, so we shipped one day and told the user Google was being sparse.
+  `merge_calendar_chunks` is the calendar edition of `merge_wrb_chunks`:
+  union every chunk's day items, keyed by (date, return_date), a later
+  entry winning only when PRICED (the placeholder sweep must not erase a
+  priced day), sorted back into calendar order.
+- Two traps found while landing it, each now pinned: chunk tails are
+  HETEROGENEOUS (multi-origin responses interleave chunks whose tail is a
+  bare count — the first union keyed on chunk[-1], ingested `31`, and
+  overwrote a healthy chunk's days with it), so day items are identified by
+  SHAPE (a list opening with a YYYY-MM-DD string), never by position; and
+  an EMPTY combined grid was early-returning before the Aug 8 per-pair
+  fan-out could run — empty is the extreme of thin, so multi-airport
+  windows now always reach the rescue. Verified live: HVN→BNA 18/18 priced
+  days matching Google's UI number for number, HVN/BDL→BNA 31/31 from the
+  combined grid alone, round-trip pairs 21/21. The fan-out and the
+  coverage warning remain as insurance for genuinely degraded sessions.
+- The suite itself had a midnight bomb: a check hard-coded a departure date
+  that fli's past-date validator began rejecting when the date passed,
+  killing every check run since. All spec dates in check.py are now
+  computed relative to today, and a "Suite hygiene" self-scan fails A WEEK
+  BEFORE any remaining date literal expires — mechanism over instruction,
+  again. (It immediately caught a second literal four days from blowing.)
 
 **August 8, 2026 (one chip where seventeen belonged: the poisoned date grid)**
 - Evan's screen: "mid-late December, HVN/BDL/NYC to FLL, best dates" produced

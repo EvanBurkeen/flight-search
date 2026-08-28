@@ -392,6 +392,96 @@ def _parse_merged_wrb_payload(body):
 _fli_flights.parse_first_wrb_payload = _parse_merged_wrb_payload
 
 
+# The DATE GRID streams the same way — and worse: GetCalendarGraph emits
+# PER-SLICE chunks, one day per chunk (measured Aug 8, HVN->BNA October:
+# 19 chunks, 31 day items, 18 distinct priced days, first chunk = Oct 30
+# alone), while fli's dates parser reads only the first chunk. That is the
+# whole mystery of the one-chip calendar: the app showed a single day and
+# told the user Google was sparse, while Google's own UI (which reads every
+# chunk) showed the full month. Same cure as the flights side, calendar
+# edition: union every chunk's day items, keyed by date.
+import fli.search.dates as _fli_dates
+
+
+_DAY_ITEM_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _is_day_item(it) -> bool:
+    return bool(isinstance(it, list) and it and isinstance(it[0], str)
+                and _DAY_ITEM_RE.match(it[0]))
+
+
+def _calendar_items(inner) -> list:
+    """Every day item in a chunk, found by SHAPE, not position.
+
+    Chunk tails are heterogeneous: single-origin responses end with the
+    items list, but multi-origin ones interleave chunks whose tail is a
+    bare count or token list. Reading a fixed index ingests that garbage —
+    the first version of this union keyed on chunk[-1] and OVERWROTE a
+    healthy chunk's days with `31` (the month length). A day item is
+    unmistakable — a list opening with a YYYY-MM-DD string — so collect by
+    that shape from whichever top-level list holds the most of them.
+    """
+    if not isinstance(inner, list):
+        return []
+    best_items: list = []
+    for v in reversed(inner):
+        if isinstance(v, list):
+            days = [it for it in v if _is_day_item(it)]
+            if len(days) > len(best_items):
+                best_items = days
+    return best_items
+
+
+def _calendar_priced(item) -> bool:
+    # mirrors SearchDates.__parse_price's reach into item[2][0][1]
+    try:
+        return item[2][0][1] is not None
+    except (IndexError, TypeError):
+        return False
+
+
+def merge_calendar_chunks(chunks: list):
+    """The UNION of every chunk's day rows, sorted back into date order.
+
+    Days are keyed by (out_date, return_date). A later chunk's entry wins
+    only when it is priced: the response ends with a sweep of UNPRICED
+    placeholder items (13 of them in the measured HVN->BNA response), and a
+    placeholder must never erase a priced day. Metadata comes from the
+    item-richest chunk, as on the flights side.
+    """
+    if not chunks:
+        return None
+    best = max(chunks, key=lambda c: len(_calendar_items(c)))
+    if len(chunks) > 1:
+        merged: dict = {}
+        for c in chunks:  # chronological: later snapshots are fresher
+            for item in _calendar_items(c):
+                try:
+                    key = json.dumps(item[:2], default=str)
+                except TypeError:
+                    key = str(item)
+                prev = merged.get(key)
+                if prev is None or _calendar_priced(item) or not _calendar_priced(prev):
+                    merged[key] = item
+        if merged and isinstance(best, list) and best:
+            # fli's parser reads data[-1], so the union lands there whatever
+            # the richest chunk's own tail held. Per-slice chunks arrive in
+            # no calendar order (the measured response opened with Oct 30);
+            # ship days sorted.
+            best[-1] = sorted(
+                merged.values(),
+                key=lambda it: json.dumps(it[:2], default=str))
+    return best
+
+
+def _parse_merged_calendar_payload(body):
+    return merge_calendar_chunks(list(_iter_wrb_chunks(body)))
+
+
+_fli_dates.parse_first_wrb_payload = _parse_merged_calendar_payload
+
+
 # The old warm_google_session() page-load is gone: the July 24 study found
 # unwarmed fresh sessions matched warmed ones (18/32 vs 14/32), so the warmup
 # bought nothing and cost ~1.8 MB of proxy bandwidth per cold process.
@@ -3470,14 +3560,13 @@ def search_flexible_dates(spec: dict, origins: list, destinations: list, currenc
         retire_identity()
         note_search_outcome(bool(rows))
         time.sleep(1)
-    if last_exc and not date_prices:
+    multi_airport = len(origins) > 1 or len(destinations) > 1
+    if last_exc and not date_prices and not multi_airport:
         raise last_exc
-    if not date_prices:
-        return {
-            "type": "dates",
-            "message": "Couldn't get date pricing for that window. Try a narrower range.",
-            "dates": [],
-        }
+    # NOTE: an empty grid does NOT return early here. Empty is the extreme
+    # case of thin, and for multi-airport requests the per-pair fan-out
+    # below is exactly the rescue — the first version early-returned
+    # "couldn't get date pricing" and never gave the pairs a chance.
 
     def rows_to_dates(rows) -> list:
         return [
@@ -3534,6 +3623,12 @@ def search_flexible_dates(spec: dict, origins: list, destinations: list, currenc
         dates = sorted(merged.values(), key=lambda d: (d["date"], d["return_date"] or ""))
         grid_probe = (f"combined grid was {len(rows_to_dates(date_prices))} day(s); "
                       f"merged {len(pairs)} pair grids into {len(dates)}")
+    if not dates:
+        return {
+            "type": "dates",
+            "message": "Couldn't get date pricing for that window. Try a narrower range.",
+            "dates": [],
+        }
     cheapest = min((d["price"] for d in dates), default=None)
     for d in dates:
         d["cheapest"] = d["price"] == cheapest

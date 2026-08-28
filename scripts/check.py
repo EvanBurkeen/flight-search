@@ -71,6 +71,28 @@ def row(price, duration, stops, warnings=None):
             "warnings": warnings or [], "highlights": []}
 
 
+def future(days: int) -> str:
+    """A date `days` from today. Any spec that reaches build_filters MUST use
+    this, never a literal: fli's FlightSegment validator rejects past dates,
+    so a hard-coded "2026-08-08" works for weeks and then kills the whole
+    suite at local midnight (which it did, Aug 8 -> 9)."""
+    from datetime import date, timedelta
+    return (date.today() + timedelta(days=days)).isoformat()
+
+
+# Mechanism over instruction: scan this file for date literals in spec keys
+# and fail A WEEK BEFORE one expires, not at midnight in a pre-push panic.
+import re as _re
+_self_src = open(os.path.abspath(__file__)).read()
+_bombs = []
+for _m in _re.finditer(r'"(?:departure_date|return_date|from_date|to_date|date)":\s*"(20\d\d-\d\d-\d\d)"', _self_src):
+    if _m.group(1) < future(7):
+        _bombs.append(_m.group(1))
+section("Suite hygiene")
+check("no spec date literal in this file expires within a week",
+      not _bombs, ", ".join(_bombs) or "all evergreen")
+
+
 # --------------------------------------------------------------------------
 section("Google deep links (tfs)  — Changelog: 'book the flight you clicked', 'deep links for every trip type'")
 # --------------------------------------------------------------------------
@@ -284,8 +306,8 @@ app.run_search = lambda *a, **k: [(p1, p2)]
 app.leg_price_index = lambda origins, dests, date_, cabin, win=None: (
     {(("DL", "201"),): 844.0} if "FLL" in list(origins) else {(("OZ", "339"),): 182.0})
 mc_out = app.search_multi_city({"multi_city_segments": [
-    {"origins": ["FLL"], "destinations": ["ICN"], "date": "2026-12-28"},
-    {"origins": ["ICN"], "destinations": ["HRB"], "date": "2027-01-01"}]}, "USD")
+    {"origins": ["FLL"], "destinations": ["ICN"], "date": future(140)},
+    {"origins": ["ICN"], "destinations": ["HRB"], "date": future(144)}]}, "USD")
 app.run_search, app.leg_price_index = _real_run, _real_index
 it = (mc_out.get("results") or [{}])[0]
 check("quotes the purchasable price, not the joint fare nobody buys",
@@ -396,9 +418,10 @@ def _fake_run_search(search, filters, sort, top_n, budget_s=35.0):
     return []
 app.run_search = _fake_run_search
 _o, _ = app.resolve_airports(["JFK", "EWR"]); _d, _ = app.resolve_airports(["FLL"])
+_deg_dep, _deg_ret = future(30), future(33)
 _deg = app.search_fixed_dates({"trip_type": "round_trip", "origins": ["JFK", "EWR"],
-                               "destinations": ["FLL"], "departure_date": "2026-08-08",
-                               "return_date": "2026-08-11"}, _o, _d, "USD")
+                               "destinations": ["FLL"], "departure_date": _deg_dep,
+                               "return_date": _deg_ret}, _o, _d, "USD")
 app.run_search = _real_run_search
 check("a pairing-less round trip ships from-priced outbounds, not 'No flights found'",
       _deg.get("type") == "itineraries" and _deg.get("results") == []
@@ -407,7 +430,7 @@ check("a pairing-less round trip ships from-priced outbounds, not 'No flights fo
 check("...each with its honest from-total", (_deg.get("more_outbounds") or [{}])[0].get("from_total") == 277.0)
 check("...and the spec_echo the tap-to-price endpoint needs",
       (_deg.get("spec_echo") or {}).get("origins") == ["JFK", "EWR"]
-      and (_deg.get("spec_echo") or {}).get("return_date") == "2026-08-11")
+      and (_deg.get("spec_echo") or {}).get("return_date") == _deg_ret)
 check("...while telling the model it must not claim flights are unavailable",
       "NOT claim" in (_deg.get("message") or ""))
 
@@ -622,7 +645,7 @@ section("Flexible-date grids  — Changelog: 'round-trip grids priced same-day r
 # Searched without a duration, Google's date grid prices departing AND flying
 # home on the same date. Every "round trip" fare in the calendar was for a
 # 0-night stay — understated and unbuyable in spirit.
-_flex = {"from_date": "2026-09-01", "to_date": "2026-09-30"}
+_flex = {"from_date": future(40), "to_date": future(69)}
 _extra, _assumed = app.flex_grid_params(_flex, is_round_trip=True)
 check("a round-trip grid without a trip length prices a real stay, not a same-day return",
       _extra.get("duration", 0) >= 2, f"duration={_extra.get('duration')}")
@@ -1414,7 +1437,8 @@ class _AlwaysThin:
 
 
 _real_sd = app.SearchDates
-_flex_spec = {"trip_type": "one_way", "flexible_dates": {"from_date": "2026-12-15", "to_date": "2026-12-31"}}
+_flex_spec = {"trip_type": "one_way",
+              "flexible_dates": {"from_date": future(60), "to_date": future(76)}}  # 17-day window
 _o_fx, _ = app.resolve_airports(["HVN", "BDL"])
 _d_fx, _ = app.resolve_airports(["FLL"])
 app.SearchDates = _ThinThenFull
@@ -1463,6 +1487,59 @@ check("...the sparse airport is named, its gaps decoupled from 'no service'",
       "HVN" in _merged["message"] and "do NOT mean no service" in _merged["message"])
 check("...and the payload records what the probe did (free diagnosis)",
       "pair grids" in _merged.get("grid_probe", ""))
+
+# The ACTUAL root cause under all of the above, found Aug 8 when Evan put
+# Google's own full calendar next to our one chip: GetCalendarGraph streams
+# PER-SLICE wrb chunks — one day per chunk, out of order, ending in a sweep
+# of unpriced placeholders — and fli's dates parser read only chunk one.
+# The union must identify day items BY SHAPE: chunk tails are heterogeneous,
+# and the first union keyed on chunk[-1], ingested a bare `31`, and
+# OVERWROTE a healthy chunk's days with it (multi-origin grids broke).
+def _day(day, price, month=10):
+    tok = [[None, price], "tok"] if price is not None else None
+    return [f"2026-{month:02d}-{day:02d}", None, tok, 1]
+
+
+_cal_chunks = [
+    ["meta", [_day(30, 84.0)]],            # per-slice: one day, arrives FIRST
+    ["meta", [31]],                        # garbage tail: month length, no days
+    ["meta", [_day(5, 69.0)]],
+    ["meta", 31],                          # scalar tail
+    ["meta", [_day(30, None), _day(7, None)]],  # unpriced placeholder sweep
+]
+_cal = app.merge_calendar_chunks([list(c) for c in _cal_chunks])
+_cal_items = _cal[-1]
+check("calendar chunks union per-slice days, identified by shape",
+      [it[0] for it in _cal_items] == ["2026-10-05", "2026-10-07", "2026-10-30"]
+      and 31 not in _cal_items,
+      f"{[it[0] for it in _cal_items]}")
+check("...an unpriced placeholder never erases a priced day",
+      next(it for it in _cal_items if it[0] == "2026-10-30")[2][0][1] == 84.0)
+check("...and the dates module actually uses the union",
+      __import__("fli.search.dates", fromlist=["x"]).parse_first_wrb_payload
+      is app._parse_merged_calendar_payload)
+
+
+# An EMPTY combined grid is the extreme of thin: it must reach the per-pair
+# fan-out, not die on an early "couldn't get date pricing" (the first
+# version of the fan-out was unreachable for exactly the failing case).
+class _EmptyCombined:
+    def search(self, filters, currency="USD"):
+        seg = filters.flight_segments[0]
+        codes = {a[0].name for a in seg.departure_airport}
+        if codes == {"BDL"}:
+            return [_grid_row(15 + i, 150.0 + i) for i in range(17)]
+        return []
+
+
+app.SearchDates = _EmptyCombined
+_rescued = app.search_flexible_dates(dict(_flex_spec), _o_fx, _d_fx, "USD")
+app.SearchDates = _real_sd
+check("an empty combined grid still fans out per pair",
+      len(_rescued["dates"]) == 17 and "GRID COVERAGE" not in _rescued["message"],
+      f"{len(_rescued['dates'])} days")
+check("...naming the airport that returned nothing even alone",
+      "HVN" in _rescued["message"])
 
 # --------------------------------------------------------------------------
 section("Memory  — Changelog: 'the workspace survives a reload'")
