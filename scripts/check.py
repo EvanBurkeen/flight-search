@@ -28,6 +28,14 @@ os.environ.pop("FLI_PROXY", None)
 
 import index as app  # noqa: E402
 
+# Offline checks must not pay real wall-clock. Several sections drive the real
+# retry ladders (search_flexible_dates, verify_completeness), whose per-attempt
+# breaker_wait pauses up to 8s — pure timing, no logic, but ~59s across the
+# suite and a pre-push hook that looks hung. breaker_wait is a bounded pause
+# nothing polls on, so no-op'ing it is safe (time.sleep is left alone: some
+# code busy-waits against a monotonic deadline and would spin without it).
+app.breaker_wait = lambda *a, **k: None
+
 FAILURES: list[str] = []
 
 
@@ -276,7 +284,7 @@ app._search_cache.clear()
 _real_execute = app.execute_spec
 app.execute_spec = lambda spec: (calls.append(1), time.sleep(0.4),
                                  {"type": "flights", "results": [{"price": 1}], "message": "m"})[-1]
-spec = {"origins": ["JFK"], "destinations": ["ORD"], "departure_date": "2026-09-18"}
+spec = {"origins": ["JFK"], "destinations": ["ORD"], "departure_date": future(13)}
 threads = [threading.Thread(target=lambda: app.cached_execute_spec(dict(spec))) for _ in range(3)]
 [t.start() for t in threads]
 [t.join() for t in threads]
@@ -1368,6 +1376,42 @@ check("the frontend labels party totals instead of claiming 'per person'",
       and "total for ' + partyN(sec) + ' travelers" in _fe_pax)
 check("share cards say whose total the price is",
       "total for ' + this.partyN(sec) + ' travelers" in _fe_pax)
+
+# --------------------------------------------------------------------------
+section("Bag-aware pricing  — Changelog: 'the cheapest fare that was not'")
+# --------------------------------------------------------------------------
+# Live A/B (FLL->BOS, no bags vs 1 carry-on + 1 checked): $90 -> $135, the
+# real +$45 fee Google bakes in when bags are set. The cheapest headline
+# fare is often a budget carrier that charges for a bag, so a bag-inclusive
+# search can flip the ranking — the honest answer to 'is this basic economy'.
+_o_bag, _ = app.resolve_airports(["FLL"])
+_d_bag, _ = app.resolve_airports(["BOS"])
+_bag_spec = {"trip_type": "one_way", "carry_on": True, "checked_bags": 1, "departure_date": future(40)}
+_f_bags = app.build_filters(_bag_spec, _o_bag, _d_bag)
+_f_none = app.build_filters({"trip_type": "one_way", "departure_date": future(40)}, _o_bag, _d_bag)
+check("build_filters attaches a BagsFilter only when bags were asked",
+      _f_bags.bags is not None and _f_bags.bags.carry_on is True
+      and _f_bags.bags.checked_bags == 1 and _f_none.bags is None)
+_bpay = app.stamp_party({"type": "flights", "message": "Found 5 options.", "results": []},
+                        {"carry_on": True, "checked_bags": 1})
+check("a bag-inclusive payload carries the bags and tells the model prices include them",
+      _bpay["bags"]["summary"] == "1 carry-on + 1 checked bag"
+      and "INCLUDES 1 carry-on + 1 checked bag" in _bpay["message"])
+check("a bagless search stamps no bags and leaves its message clean",
+      "bags" not in app.stamp_party({"type": "flights", "message": "m", "results": []}, {})
+      and "BAG PRICING" not in app.stamp_party({"type": "flights", "message": "m", "results": []}, {})["message"])
+check("bags split the search cache (never serve a bagless price for a bag search)",
+      app._spec_key(_bag_spec) != app._spec_key({k: v for k, v in _bag_spec.items() if k not in ("carry_on", "checked_bags")}))
+check("the /api/returns spec_echo keeps the bags (tap-to-price stays bag-inclusive)",
+      app._rt_spec_echo({"carry_on": True, "checked_bags": 2}, *[[types.SimpleNamespace(name="JFK")],
+                        [types.SimpleNamespace(name="FLL")]])["checked_bags"] == 2)
+_src_bag = open(os.path.join(ROOT, "api", "index.py")).read()
+check("the tool schema exposes carry_on and checked_bags",
+      '"carry_on": {' in _src_bag and '"checked_bags": {' in _src_bag)
+check("the prompt teaches the model to price bags in when the user mentions luggage",
+      "Bags change the true price" in _src_bag)
+check("the frontend discloses that shown fares include the bags",
+      "sec.bags" in _fe_pax and "bag fees are baked in" in _fe_pax)
 
 # --------------------------------------------------------------------------
 section("Wire efficiency  — Changelog: 'the bytes the client threw away'")

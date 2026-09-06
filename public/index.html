@@ -205,6 +205,7 @@
     .recent-meta { font-size: 0.7rem; opacity: 0.65; font-variant-numeric: tabular-nums; }
     .recents-note { font-size: 0.68rem; opacity: 0.55; margin-top: 0.5rem; }
     .grid-coverage { font-size: 0.72rem; color: var(--accent-dark); opacity: 0.85; margin: 0 0 0.5rem; }
+    .bags-note { font-size: 0.72rem; color: var(--accent-dark); opacity: 0.8; margin: 0 0 0.6rem; font-variant-numeric: tabular-nums; }
     .newconv-btn {
       font-size: 0.7rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase;
       padding: 0.4rem 0.9rem; border: 1px solid var(--line); border-radius: 3px;
@@ -806,6 +807,9 @@
                   <span x-text="pcDetail(sec)"></span>
                   <span class="pc-note" x-text="pcNote(sec)"></span>
                 </div>
+
+                <div class="bags-note" x-show="sec.bags"
+                     x-text="sec.bags ? 'Fares include ' + sec.bags.summary + ' — repriced by Google so bag fees are baked in.' : ''"></div>
 
                 <div class="filter-bar" x-show="sec._expanded && sec.type !== 'dates'">
                   <select class="fselect" :value="(sec._filters || {}).sort || ''" @change="setF(sec, 'sort', $event.target.value)">

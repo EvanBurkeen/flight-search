@@ -43,6 +43,10 @@ if not os.environ.get("ANTHROPIC_API_KEY"):
             "assumptions": ["STUB PARSER (no API key): dates set ~30 days out"],
             "summary": f"{codes[0]} to {codes[1]}" + (" round trip" if "round" in q else " one way"),
         }
+        if "carry" in q or "carry-on" in q or ("bag" in q and "baggage" not in q):
+            spec["carry_on"] = True
+        if "checked" in q or "check a bag" in q:
+            spec["checked_bags"] = 1
         if "flex" in q or "weekend" in q:
             spec["flexible_dates"] = {
                 "from_date": (date.today() + timedelta(days=20)).isoformat(),

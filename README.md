@@ -440,7 +440,10 @@ Chat with stop/supersede (send during a search cancels and re-asks) · Detailed/
 views (global toggle + per-section override) · top-picks preview with "Show all N"
 and instant client-side filters (sort, departure window, duration, airline, alliance,
 stops — options derived from the data; they filter only what the server
-shipped, which is why the cut keeps nonstops/cheapest/fastest) · **price
+shipped, which is why the cut keeps nonstops/cheapest/fastest) · **bag-aware
+pricing** (say "with a carry-on" or "one checked bag" and Google reprices
+every fare to include the fee, with a section note that the shown prices are
+bag-inclusive) · **price
 context line** above a fixed-date section (where its cheapest fare sits among
 nearby dates, the cheapest nearby date, and an explicit "not price history"
 footnote) · round-trip
@@ -487,9 +490,10 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt uvicorn
 
 No `ANTHROPIC_API_KEY` locally → the Claude loop is stubbed by a pattern parser
 (`scripts/dev_server.py`); searches still hit live Google. Stub grammar: airport
-codes, "round", "flex/weekend", "compare", "multi A B C" (common English words
-that are also IATA codes — THE, FOR, AND — are ignored). The stub emits the
-same SSE events as the real loop, so streaming is fully exercisable locally.
+codes, "round", "flex/weekend", "compare", "multi A B C", "carry-on/bag" and
+"checked" (common English words that are also IATA codes — THE, FOR, AND — are
+ignored). The stub emits the same SSE events as the real loop, so streaming is
+fully exercisable locally.
 
 ## Operations
 
@@ -537,6 +541,29 @@ same SSE events as the real loop, so streaming is fully exercisable locally.
   lakes; run it, then bump the `?v=N` cache-buster on the script tag in index.html).
 
 ## Changelog
+
+**September 5, 2026 (bag-aware pricing: the cheapest fare that was not)**
+- The cheapest headline fare is usually a budget carrier that charges for a
+  bag, so ranking by it quietly lies to anyone with luggage. `search_flights`
+  now takes `carry_on` (bool) and `checked_bags` (int); set them and Google
+  reprices every fare to include the fee, which is the honest answer to "is
+  this basic economy". Verified live (FLL->BOS): $90 becomes $135 with a
+  carry-on + a checked bag, the real +$45 that used to be invisible, and a
+  bag-inclusive search can flip which carrier wins.
+- Threaded everywhere a price lives: the fares split the search cache and the
+  price-context grid cache (never serve a bagless price for a bag search),
+  ride `spec_echo` so tap-to-price returns stay bag-inclusive, and reach the
+  multi-city per-leg searches. Every result payload carries `bags` and the
+  model is told the prices include them; the card shows "Fares include 1
+  carry-on + 1 checked bag" so nobody mistakes a repriced fare for the base.
+  The prompt teaches the model to set bags from plain language and to ask once
+  on a budget-heavy route when the user has not said. The default (no bags)
+  is byte-for-byte unchanged. 8 checks added.
+- Also: `scripts/check.py` went from ~59s to ~17s. Its grid and completeness
+  sections drive the real retry ladders, whose per-attempt `breaker_wait`
+  slept up to 8s each; that pause changes timing, not logic, so it is
+  neutralized for the offline suite (`time.sleep` is left alone, since a
+  monotonic-deadline busy-wait would spin without it).
 
 **September 5, 2026 (the first search that took forever, or never returned)**
 - Evan's #1, worst on phones and the exact thing that fails when showing the

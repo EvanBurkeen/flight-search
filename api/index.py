@@ -35,7 +35,7 @@ from fli.models import (
     TimeRestrictions,
     TripType,
 )
-from fli.models.google_flights.base import PriceLimit
+from fli.models.google_flights.base import BagsFilter, PriceLimit
 from fli.search import SearchDates, SearchFlights
 from fli.search.exceptions import SearchClientError, SearchHTTPError
 
@@ -662,6 +662,15 @@ SEARCH_TOOL = {
             },
             "max_duration_minutes": {"type": ["integer", "null"]},
             "exclude_basic_economy": {"type": "boolean"},
+            "carry_on": {
+                "type": "boolean",
+                "description": "Set true when the traveler will bring a CARRY-ON bag. Google then reprices every fare to include it, so a budget carrier that charges for the carry-on stops looking artificially cheap. Infer from 'with a carry-on', 'I have a bag', 'just a roller'.",
+            },
+            "checked_bags": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Number of CHECKED bags to price in ('one checked bag' -> 1, 'we each check one' -> match the traveler count). Google reprices fares to add the checked-bag fee.",
+            },
             "assumptions": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -709,6 +718,7 @@ REQUEST_RULES = """How to handle requests:
 - Small regional airports (HVN, ISP, ORH, GNV-class fields) often have NO through-ticketed routes to each other. If a search from/to a small airport returns nothing, don't retry the same pair — immediately widen to the nearby majors in the same search (e.g. New Haven -> HVN,BDL,HPN and even LGA/JFK; Gainesville -> GNV,JAX,MCO) and tell the user the drive trade-off for each option you recommend.
 - A multi-airport search returns ONE combined pool. The result message carries per-ORIGIN and per-DESTINATION airport breakdowns ("By origin airport: BDL 49 from $141, HVN 1 from $180") computed over everything Google returned: consult them before ANY claim about a specific airport. A named airport that returns nothing is now searched ALONE automatically before the results reach you, so: if the message says VERIFIED NO SERVICE for an airport, you may say it has no service that day; if an airport is simply absent from the breakdown with no such line, say you did not get options for it and offer to look again, NEVER that it has no service. A thin session and a genuinely empty route look identical, and only the dedicated search can tell them apart.
 - When the user names a specific airport and the breakdown shows it served, LEAD with that airport's options; the cheaper neighbor is the alternative, framed as dollars saved against drive time added, never the headline over the place they actually asked for.
+- Bags change the true price. When the user mentions luggage ("with a carry-on", "we each check a bag", "just a backpack fits under the seat"), set carry_on and/or checked_bags so Google reprices every fare to include the fee. This is the honest answer to "is this basic economy": the cheapest headline fare is often a budget carrier that charges for a bag, and a bag-inclusive search can flip the ranking. When a search priced bags in, the result message says so; tell the user the prices include their bags, and if they did not mention luggage on a budget-carrier-heavy route, it is worth asking once whether they have a bag before calling the cheapest fare the best deal.
 - "arrive by / be there by X" is an ARRIVAL constraint (arrival_time), never a departure cap.
 - When the user cares about the arrival DAY ("land on Friday"), set arrival_date and pick departure_date by timezone logic. Rules of thumb, not laws: typical daytime trans-Pacific Asia -> US routings land the same local day, but late-evening departures and long westbound routings (via the Middle East or Europe) land the NEXT day; US -> Asia/Europe overnights land the next day. When candidate routings vary widely, run two searches (departing the arrival day AND the day before, both with the same arrival_date) so no valid routing is missed. When they change or relax the arrival day, immediately re-search with the new dates — do not re-serve the old results or just offer to search.
 - "via / through <hub>" questions: search with via_airports. That filter checks every itinerary Google returns; the plain result list you see is only a top-6 sample, so NEVER assert that a routing, hub, or airline "doesn't exist" from the plain list — and never say you "confirmed" or "checked directly" unless a via_airports search actually ran this conversation. If you haven't checked, say so and offer to.
@@ -1742,6 +1752,13 @@ def build_filters(spec: dict, origins: list, destinations: list, filters_cls=Fli
 
     alliances = [getattr(Alliance, a) for a in spec.get("alliances") or [] if hasattr(Alliance, a)]
     max_price = spec.get("max_price")
+    # bags stay None unless asked, so a plain search's request bytes are
+    # unchanged; set, Google reprices every fare to include the bag fee, which
+    # is the honest way to rank a Spirit fare against a JetBlue one
+    bags = None
+    if spec.get("carry_on") or spec.get("checked_bags"):
+        bags = BagsFilter(carry_on=bool(spec.get("carry_on")),
+                          checked_bags=int(spec.get("checked_bags") or 0))
 
     return filters_cls(
         trip_type=TripType.ROUND_TRIP if is_round_trip else TripType.ONE_WAY,
@@ -1758,6 +1775,7 @@ def build_filters(spec: dict, origins: list, destinations: list, filters_cls=Fli
         price_limit=PriceLimit(max_price=int(max_price)) if max_price else None,
         max_duration=spec.get("max_duration_minutes"),
         exclude_basic_economy=bool(spec.get("exclude_basic_economy")),
+        bags=bags,
         **extra,
     )
 
@@ -2034,12 +2052,47 @@ def party_of(spec: dict) -> dict:
     return {"adults": a, "children": c, "travelers": a + c}
 
 
+def bags_summary(spec: dict) -> str | None:
+    """'1 carry-on + 1 checked bag', or None when no bags were priced."""
+    parts = []
+    if spec.get("carry_on"):
+        parts.append("1 carry-on")
+    n = int(spec.get("checked_bags") or 0)
+    if n:
+        parts.append(f"{n} checked bag" + ("s" if n != 1 else ""))
+    return " + ".join(parts) or None
+
+
+def stamp_bags(payload: dict, spec: dict) -> dict:
+    """When bags were priced in, Google repriced every fare to include the
+    fee, so the numbers on screen are bag-inclusive. Say so, or the honesty
+    inverts: a $69 Spirit fare that is really $118 with a carry-on must never
+    be presented as beating a $99 JetBlue fare that already includes one. The
+    frontend note keys off `bags`; the sentence reaches the model."""
+    summary = bags_summary(spec)
+    if not summary:
+        return payload
+    payload["bags"] = {"carry_on": bool(spec.get("carry_on")),
+                       "checked_bags": int(spec.get("checked_bags") or 0),
+                       "summary": summary}
+    if payload.get("message"):
+        payload["message"] += (
+            f" BAG PRICING: every fare here INCLUDES {summary}. Google repriced to add "
+            "baggage, so a budget carrier's headline fare no longer looks artificially cheap. "
+            "Tell the user the prices include bags."
+        )
+    return payload
+
+
 def stamp_party(payload: dict, spec: dict) -> dict:
-    """Prices from a multi-passenger search are PARTY TOTALS, and every
-    surface must say so. Verified live (JFK->ORD, 1 adult vs 2 adults +
-    1 child): all nine common flights priced at 2.99-3.00x — Google returns
-    the total for the searched party, never per-person. The frontend labels
-    key off `party`; the sentence below reaches the model via the message."""
+    """Annotate a result payload with what the search was actually FOR — the
+    passenger party and any bags — onto both the payload (for the frontend
+    labels) and the model-facing message. Runs at every payload site.
+
+    Prices from a multi-passenger search are PARTY TOTALS: verified live
+    (JFK->ORD, 1 adult vs 2 adults + 1 child), all nine common flights priced
+    at 2.99-3.00x — Google returns the total for the searched party, never
+    per-person. The frontend labels key off `party`."""
     party = party_of(spec)
     payload["party"] = party
     if party["travelers"] > 1 and payload.get("message"):
@@ -2048,7 +2101,7 @@ def stamp_party(payload: dict, spec: dict) -> dict:
             + (f" + {party['children']} child(ren)" if party["children"] else "")
             + ", not per person; Book links carry the same party."
         )
-    return payload
+    return stamp_bags(payload, spec)
 
 
 def serialize_flight(result, cabin: str | None = None, ret_date: str | None = None,
@@ -2653,7 +2706,7 @@ def _rt_spec_echo(spec: dict, origins: list, destinations: list) -> dict:
     dep = spec.get("departure_date")
     return {k: spec.get(k) for k in
             ("cabin", "max_stops", "airlines_include", "airlines_exclude",
-             "alliances", "max_price", "adults", "children")
+             "alliances", "max_price", "adults", "children", "carry_on", "checked_bags")
             } | {"origins": [a.name for a in origins],
                  "destinations": [a.name for a in destinations],
                  "departure_date": dep,
@@ -3160,6 +3213,7 @@ def multi_city_fallback(spec: dict, currency: str, leg_search=None,
             "trip_type": "one_way", "departure_date": seg.get("date"),
             "cabin": spec.get("cabin"), "adults": spec.get("adults"),
             "children": spec.get("children"),
+            "carry_on": spec.get("carry_on"), "checked_bags": spec.get("checked_bags"),
             "departure_time": seg.get("departure_time"),
         }) for seg in raw_segs]
     leg_payloads: list = []
@@ -3286,6 +3340,7 @@ def search_multi_city(spec: dict, currency: str) -> dict:
         "trip_type": "one_way", "departure_date": seg.get("date"),
         "cabin": spec.get("cabin"), "adults": spec.get("adults"),
         "children": spec.get("children"),
+        "carry_on": spec.get("carry_on"), "checked_bags": spec.get("checked_bags"),
         "departure_time": seg.get("departure_time"),
     }) for seg in raw_segs]
     # RepresentativeSearch for the parallel expansion + identity inheritance.
@@ -3735,6 +3790,7 @@ def _price_ctx_key(spec: dict, origins: list, destinations: list,
         "stops": spec.get("max_stops"), "airlines": spec.get("airlines_include"),
         "alliances": spec.get("alliances"), "adults": spec.get("adults") or 1,
         "children": spec.get("children") or 0,
+        "carry_on": bool(spec.get("carry_on")), "checked_bags": spec.get("checked_bags") or 0,
     }, sort_keys=True, default=str)
 
 
