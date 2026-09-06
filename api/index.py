@@ -4227,6 +4227,49 @@ def assistant_error_reply(e: "anthropic.APIStatusError") -> dict:
             "error_detail": f"HTTP {e.status_code} {etype}".strip() + (f" req={req_id}" if req_id else "")}
 
 
+@app.get("/api/warm")
+async def warm():
+    """Wake the serverless instance and warm the slow upstream connections
+    BEFORE the user's first search, not during it.
+
+    'The first search after a while takes forever or never returns' has a
+    cold-start core: Vercel spins the Python function down when idle, so the
+    first request pays the process boot, a cold Anthropic TLS handshake, AND
+    the residential-proxy TLS handshake to Google — the last of which the
+    identity pool measures in whole seconds. In-turn warming (inside the
+    first search round) is too late to help that very turn.
+
+    The frontend pings this on page load, on compose focus, and when a
+    backgrounded tab returns, so by the time the user sends a query the
+    process is booted and at least one Google tunnel (and the Anthropic TLS
+    session) is open. It is deliberately cheap and free of API spend: it
+    opens connections, it never searches or prompts. Cross-instance warming
+    is best-effort — Vercel may route the real POST to a different instance —
+    but it guarantees a hot instance exists and, for back-to-back requests
+    from one client, usually the same one answers.
+    """
+    was_cold = _process_served == 0
+
+    def _warm_anthropic() -> None:
+        # DNS + TLS only: establish the session so the first real Claude call
+        # skips the handshake. Nothing is sent, so nothing is billed.
+        try:
+            import socket
+            import ssl
+            ctx = ssl.create_default_context()
+            with socket.create_connection(("api.anthropic.com", 443), timeout=4) as s:
+                ctx.wrap_socket(s, server_hostname="api.anthropic.com").close()
+        except Exception:
+            pass
+
+    try:
+        warm_google_connections(n=2)  # non-blocking: submits to the fli executor
+    except Exception:
+        pass
+    threading.Thread(target=_warm_anthropic, daemon=True).start()
+    return JSONResponse({"ok": True, "cold": was_cold})
+
+
 @app.post("/api/search/stream")
 async def search_stream(request: Request):
     """Same turn, delivered as it happens.
@@ -4271,6 +4314,13 @@ async def search_stream(request: Request):
     threading.Thread(target=worker, daemon=True).start()
 
     def frames():
+        # An immediate first byte: the client confirms the socket is alive
+        # the instant the response opens, even while a cold worker is still
+        # importing and booting. Without it, the first proof-of-life is the
+        # first real event or the first 15s ping, and the client's stall
+        # watchdog is left guessing during the exact window (a cold start)
+        # when 'it never loads' actually happens.
+        yield ": open\n\n"
         # Adaptive thinking streams nothing while it thinks, so a quiet 90s
         # gap is now possible mid-turn. The old single 90s get() would break
         # the stream WITHOUT a done event; the frontend then fell back to

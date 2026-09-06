@@ -1575,6 +1575,47 @@ check("a fresh start keeps the recents (memory of trips, not of the chat)",
       and "removeItem(RECENTS_KEY)" not in _fe_mem.split("newConversation() {")[1].split("rememberRecent")[0])
 
 # --------------------------------------------------------------------------
+section("Cold start and stall recovery  — Changelog: 'the first search that never returned'")
+# --------------------------------------------------------------------------
+# Evan's #1: the first search after an idle spell took forever or never came
+# back, worst on phones. Two root causes, two guards.
+#   1) Cold start: Vercel spins the function down; the first request paid the
+#      Python boot + a cold Anthropic TLS + the seconds-long residential-proxy
+#      handshake to Google. A GET /api/warm, pinged before the first search,
+#      opens those tunnels ahead of time (no API spend).
+#   2) Never returns: on mobile the SSE socket dies SILENTLY, and reader.read()
+#      hung forever because the only abort was user-stop. A client watchdog now
+#      falls back on a dead socket / gives up on an alive-but-grinding one.
+_api_src = open(os.path.join(ROOT, "api", "index.py")).read()
+_warm_routes = [r for r in app.app.routes
+                if getattr(r, "path", None) == "/api/warm"]
+check("GET /api/warm is registered (the pre-search warm endpoint)",
+      bool(_warm_routes) and "GET" in getattr(_warm_routes[0], "methods", set()))
+_warm_body = _api_src.split("async def warm(")[1].split("\n@app.")[0]
+check("warm opens Google + Anthropic tunnels but never searches or prompts",
+      "warm_google_connections(" in _warm_body and "api.anthropic.com" in _warm_body
+      and "run_assistant" not in _warm_body)
+check("the SSE stream sends an immediate first byte so a cold worker still proves life",
+      'yield ": open\\n\\n"' in _api_src)
+
+_fe_net = open(os.path.join(ROOT, "public", "index.html")).read()
+_stream_body = _fe_net.split("async streamTurn(")[1].split("_clearNetWatch() {")[0]
+check("streamTurn arms an inactivity + ceiling watchdog over the read loop",
+      "STALL_MS" in _stream_body and "CEILING_MS" in _stream_body
+      and _stream_body.count("lastByte = Date.now()") >= 2)  # init + reset per chunk
+check("the watchdog disarms the instant a result lands (the typewriter must not trip it)",
+      "this._clearNetWatch(); // full result in hand" in _fe_net)
+check("a dead-socket stall falls back on a FRESH controller, not the aborted one",
+      "if (this.controller.signal.aborted) this.controller = new AbortController();" in _fe_net)
+check("the plain-turn fallback is itself time-bounded, so it cannot hang in turn",
+      "timedOut = true" in _fe_net.split("async plainTurn(")[1].split("},")[0])
+check("a stall offers a one-tap retry of the exact query, never a dead end",
+      "suggestions: [q]" in _fe_net)
+check("the client warms the backend on load, on compose focus, and on tab return",
+      "this.warm();" in _fe_net and '@focus="warm()"' in _fe_net
+      and "visibilitychange" in _fe_net and "'/api/warm'" in _fe_net)
+
+# --------------------------------------------------------------------------
 section("README drift  — the doc must match the code it describes")
 # --------------------------------------------------------------------------
 # The pre-push hook forces a README edit per code push, but a Changelog line

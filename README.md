@@ -251,6 +251,22 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
   animation loop that gates COMPLETION (the streaming typewriter) needs a
   timer watchdog or it never finishes for a user who switched tabs. The
   watchdog in `startTyping` is load-bearing.
+- **A mobile SSE socket dies SILENTLY.** When the radio sleeps or the network
+  hands off, the connection drops with no error and no FIN, so `reader.read()`
+  never rejects and never resolves — the reply spins forever. A fetch signal
+  only aborts on user-stop, so nothing rescued it; this was the "first search
+  never returns" bug. `streamTurn` now runs an inactivity watchdog (reset on
+  any byte, including the server's `: ping`) that aborts a dead stream and
+  falls back. Two traps it hid: the fallback must use a FRESH AbortController
+  (the watchdog aborted the old one, so a reused fetch returns nothing), and
+  the watchdog must DISARM the instant `done` arrives or the local typewriter
+  drain trips it on a long reply.
+- **Cold serverless is the common first-search cost.** An idle Vercel function
+  is torn down; the first request pays the boot plus a cold Anthropic TLS and
+  the multi-second residential-proxy handshake to Google. In-turn warming is
+  too late for that turn. `GET /api/warm`, pinged on load/focus/tab-return,
+  opens the tunnels first; it must stay free of API spend (connections only,
+  no search, no prompt).
 
 ## Invariants (`scripts/check.py` enforces these)
 
@@ -305,7 +321,7 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
 | Layer | What |
 |---|---|
 | Hosting | Vercel serverless (Python), auto-deploys on push to `main` (`EvanBurkeen/flight-search`) |
-| Backend | [api/index.py](api/index.py) — FastAPI. `/api/search/stream` (SSE) is what the frontend uses (prose types first, cards land on `done`), with `/api/search` (JSON) as its automatic fallback and the prod-verification probe; `/api/returns` prices every return Google pairs with ONE outbound (no model in the loop — the board's tap-to-price, ~1-4s) |
+| Backend | [api/index.py](api/index.py) — FastAPI. `/api/search/stream` (SSE) is what the frontend uses (prose types first, cards land on `done`; sends `: open` immediately then `: ping` every 15s so the client can tell a live-but-slow turn from a dead socket), with `/api/search` (JSON) as its automatic fallback and the prod-verification probe; `/api/returns` prices every return Google pairs with ONE outbound (no model in the loop — the board's tap-to-price, ~1-4s); `GET /api/warm` opens the Google + Anthropic tunnels before the first search (no API spend), pinged by the frontend on load/focus/tab-return |
 | LLM | `claude-sonnet-5` agent loop (near-Opus on tool-driven work, 40% less per token; `ASSISTANT_MODEL` env var overrides it — set `claude-opus-4-8` in Vercel for an A/B, no code push), `max_retries=4`, effort `medium`, adaptive thinking on by default (hence `max_tokens` 8000: it caps thinking + text together); prompt caching: system+tools at 1h TTL (the only prefix that survives across turns), plus a 5m breakpoint on the conversation tail so a turn's later calls read its earlier messages at 0.1x — WITHIN-turn only, since the client replays history as bare prose and the wrap-up's `tool_choice: none` invalidates the messages tier (so that call sends no tail marker); plainly-route-shaped queries emit their first tool call via `claude-haiku-4-5` (no `output_config` — Haiku rejects effort), with an automatic loop-model redo if Haiku answers in prose instead of calling the tool |
 | Flight data | [`fli`](https://github.com/punitarani/fli) (PyPI `flights`) — reverse-engineered Google Flights |
 | Web context | Anthropic server-side `web_search` tool (max 3/turn) for event dates, venues, etc. |
@@ -521,6 +537,32 @@ same SSE events as the real loop, so streaming is fully exercisable locally.
   lakes; run it, then bump the `?v=N` cache-buster on the script tag in index.html).
 
 ## Changelog
+
+**September 5, 2026 (the first search that took forever, or never returned)**
+- Evan's #1, worst on phones and the exact thing that fails when showing the
+  tool off: the first search after an idle spell either crawled or spun
+  forever with nothing. Two independent root causes, each now guarded.
+- **Never returns (the real bug):** on mobile the SSE socket dies SILENTLY
+  when the radio sleeps or the network hands off (no error, no FIN), and
+  `reader.read()` in `streamTurn` hung indefinitely because the only abort
+  was user-stop. The fallback to `/api/search` fired on a thrown error, never
+  on a stall. Added a client watchdog: 30s of TOTAL byte silence (the stream
+  now sends `: open` immediately and `: ping` every 15s, so real silence
+  means a dead socket) aborts and falls back on a FRESH AbortController
+  (reusing the aborted one made the fallback fetch return nothing, found in
+  test); a 110s ceiling with bytes still trickling gives up with a one-tap
+  retry of the exact query instead of an endless spinner. The plain-turn
+  fallback is itself time-bounded so it cannot become a second silent hang.
+- **Takes forever (cold start):** Vercel spins the Python function down when
+  idle, so the first request paid the process boot, a cold Anthropic TLS
+  handshake, and the residential-proxy handshake to Google (seconds on its
+  own). New `GET /api/warm` opens those tunnels ahead of the search with no
+  API spend; the frontend pings it on page load, on compose focus, and when
+  a backgrounded tab returns, so the first real search lands warm. Warming
+  is best-effort across serverless instances but guarantees a hot one exists.
+- Verified in the browser against a simulated dead socket: stall detected at
+  30s, auto-recovered through the plain turn with real cards and no ghost
+  bubble; happy path and stop() unaffected. 10 checks added.
 
 **August 28, 2026 (the calendar was in the response all along)**
 - Evan put Google's own full October calendar (18 priced days, HVN area to

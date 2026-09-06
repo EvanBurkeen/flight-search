@@ -1331,6 +1331,7 @@
               rows="1"
               class="text-input"
               x-model="input"
+              @focus="warm()"
               @input="autosize()"
               @keydown.enter="onEnter($event)"
               placeholder="Tell me where you'd like to go…"
@@ -1417,6 +1418,14 @@
           try { this.recents = JSON.parse(localStorage.getItem(RECENTS_KEY) || '[]') || []; }
           catch (e) { this.recents = []; }
           this.restoreConvo();
+
+          // warm the backend before the first search: on load, and again
+          // whenever a backgrounded tab returns (the classic 'I opened it to
+          // show someone and it just spun' case is a cold instance)
+          this.warm();
+          document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible') this.warm();
+          });
         },
 
 
@@ -1805,17 +1814,31 @@
             if (err.name === 'AbortError') return; // stop() already recorded the interruption
             if (myReq !== this.reqId) return;
             this.dropStreamingMsg();
-            if (err.serverTurn) {
+            const slowMsg = 'That is taking unusually long on my end. The service may be waking from a rest; tap below and it should come right back.';
+            if (err.netTimeout) {
+              // server alive but grinding: a fresh identical request would grind
+              // too, so offer a manual retry instead of auto-re-running
+              this.messages.push({ role: 'assistant', content: slowMsg, sections: [], suggestions: [q] });
+              this.maybeNudge();
+            } else if (err.serverTurn) {
               // the turn itself failed server-side; re-running it would just
               // pay for the same failure again
-              this.messages.push({ role: 'assistant', content: `Something went wrong: ${err.message}. Try again in a moment.`, sections: [] });
+              this.messages.push({ role: 'assistant', content: `Something went wrong: ${err.message}. Try again in a moment.`, sections: [], suggestions: [q] });
               this.maybeNudge();
             } else {
+              // stream unavailable OR a dead-socket stall: a fresh request may
+              // reach a healthy instance, so try the plain turn. If the stall
+              // watchdog just aborted the controller to kill the dead stream,
+              // the fallback needs a FRESH one, or its fetch is born aborted
+              // and returns nothing (stop() keeps working: it reads whichever
+              // controller is current).
+              if (this.controller.signal.aborted) this.controller = new AbortController();
               try {
                 await this.plainTurn(q, myReq);
               } catch (err2) {
                 if (err2.name === 'AbortError' || myReq !== this.reqId) return;
-                this.messages.push({ role: 'assistant', content: `Something went wrong: ${err2.message}. Try again in a moment.`, sections: [] });
+                const msg = err2.netTimeout ? slowMsg : `Something went wrong: ${err2.message}. Try again in a moment.`;
+                this.messages.push({ role: 'assistant', content: msg, sections: [], suggestions: [q] });
                 this.maybeNudge();
               }
             }
@@ -1828,31 +1851,42 @@
           }
         },
 
-        // the pre-streaming turn, kept verbatim as the fallback path
+        // the pre-streaming turn: the fallback path, now itself bounded so it
+        // can never become a second silent hang (a plain fetch has no more
+        // timeout than the stream did)
         async plainTurn(q, myReq) {
-          const res = await fetch('/api/search', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ query: q, history: this.history.slice(0, -1), ledgers: this.ledgers }),
-            signal: this.controller.signal,
-          });
-          const data = await res.json();
-          if (data.error) throw new Error(data.error);
-          if (myReq !== this.reqId) return; // superseded by a newer request
+          let timedOut = false;
+          const to = setTimeout(() => { timedOut = true; try { this.controller.abort(); } catch (e) {} }, 95000);
+          try {
+            const res = await fetch('/api/search', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ query: q, history: this.history.slice(0, -1), ledgers: this.ledgers }),
+              signal: this.controller.signal,
+            });
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+            if (myReq !== this.reqId) return; // superseded by a newer request
 
-          this.history.push({ role: 'assistant', content: data.message });
-          this.history = this.history.slice(-12);
-          this.rememberLedger(data.ledger);
+            this.history.push({ role: 'assistant', content: data.message });
+            this.history = this.history.slice(-12);
+            this.rememberLedger(data.ledger);
 
-          (data.sections || []).forEach(sec => { sec._anchor = 'sec-' + (++this.sectionSeq); this.openBoard(sec); });
-          this.messages.push({
-            role: 'assistant',
-            content: data.message,
-            sections: data.sections || [],
-            suggestions: data.suggestions || [],
-          });
-          this.maybeNudge();
-          this.persistConvo();
+            (data.sections || []).forEach(sec => { sec._anchor = 'sec-' + (++this.sectionSeq); this.openBoard(sec); });
+            this.messages.push({
+              role: 'assistant',
+              content: data.message,
+              sections: data.sections || [],
+              suggestions: data.suggestions || [],
+            });
+            this.maybeNudge();
+            this.persistConvo();
+          } catch (err) {
+            if (timedOut) { const e = new Error('timeout'); e.netTimeout = true; throw e; }
+            throw err;
+          } finally {
+            clearTimeout(to);
+          }
         },
 
         async streamTurn(q, myReq) {
@@ -1861,59 +1895,118 @@
           this._typing = false;
           this._finalized = false;
           this._drainResolve = null;
+          this._netStall = false;
+          this._netTimeout = false;
           this.messages.push({ role: 'assistant', content: '', sections: [], suggestions: [], _streaming: true });
 
-          const res = await fetch('/api/search/stream', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ query: q, history: this.history.slice(0, -1), ledgers: this.ledgers }),
-            signal: this.controller.signal,
-          });
-          if (!res.ok || !res.body || !(res.headers.get('content-type') || '').includes('text/event-stream')) {
-            throw new Error('stream unavailable');
-          }
-          const reader = res.body.getReader();
-          const dec = new TextDecoder();
-          let acc = '';
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            if (myReq !== this.reqId) { reader.cancel().catch(() => {}); return; }
-            acc += dec.decode(value, { stream: true });
-            let idx;
-            while ((idx = acc.indexOf('\n\n')) >= 0) {
-              const frame = acc.slice(0, idx); acc = acc.slice(idx + 2);
-              let ev = 'message', data = '';
-              for (const line of frame.split('\n')) {
-                if (line.startsWith('event:')) ev = line.slice(6).trim();
-                else if (line.startsWith('data:')) data += line.slice(5).trim();
-              }
-              let body = null;
-              if (data) { try { body = JSON.parse(data); } catch { continue; } }
-              if (ev === 'text_delta') {
-                this._streamBuf += (body || '');
-                this.startTyping(myReq);
-              } else if (ev === 'text_reset') {
-                // whatever streamed was a lead-in to a search, not the answer
-                this._streamBuf = '';
-                this.liveMsg().content = '';
-              } else if (ev === 'done') {
-                this._doneData = body || {};
-              } else if (ev === 'error') {
-                const e = new Error((body && body.error) || 'server error');
-                e.serverTurn = true;
-                throw e;
-              }
-              // 'sections' frames are deliberately not rendered here: the
-              // reveal order is prose first, then cards — 'done' carries all
+          // Network watchdogs — the fix for 'it spins forever and never
+          // returns', which hits phones most. On mobile the SSE socket dies
+          // SILENTLY (radio sleep, Wi-Fi/cell handoff): no error, no FIN, so
+          // reader.read() below would hang until the OS reaps the dead socket
+          // (minutes) or never. The fetch signal only aborts on user stop, so
+          // nothing rescued it. Two independent guards, both abort the fetch:
+          //  - INACTIVITY: the server sends a byte at least every 15s (': open'
+          //    then ': ping'), so 30s of TOTAL silence means the connection is
+          //    dead. Fall back to the plain turn: a fresh request may reach a
+          //    healthy instance.
+          //  - CEILING: bytes still trickling but no result after 110s means
+          //    the server is alive but grinding; offer a retry rather than
+          //    spin, since a re-run would grind identically.
+          const STALL_MS = 30000, CEILING_MS = 110000;
+          let lastByte = Date.now();
+          const startedAt = Date.now();
+          this._clearNetWatch();
+          this._netWatch = setInterval(() => {
+            if (myReq !== this.reqId || this._doneData) { this._clearNetWatch(); return; }
+            if (Date.now() - lastByte > STALL_MS) {
+              this._netStall = true; this._clearNetWatch();
+              try { this.controller.abort(); } catch (e) {}
+            } else if (Date.now() - startedAt > CEILING_MS) {
+              this._netTimeout = true; this._clearNetWatch();
+              try { this.controller.abort(); } catch (e) {}
             }
+          }, 2500);
+
+          try {
+            const res = await fetch('/api/search/stream', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ query: q, history: this.history.slice(0, -1), ledgers: this.ledgers }),
+              signal: this.controller.signal,
+            });
+            if (!res.ok || !res.body || !(res.headers.get('content-type') || '').includes('text/event-stream')) {
+              throw new Error('stream unavailable');
+            }
+            const reader = res.body.getReader();
+            const dec = new TextDecoder();
+            let acc = '';
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              lastByte = Date.now();   // ANY chunk, ': ping' included, proves the socket is live
+              if (myReq !== this.reqId) { reader.cancel().catch(() => {}); return; }
+              acc += dec.decode(value, { stream: true });
+              let idx;
+              while ((idx = acc.indexOf('\n\n')) >= 0) {
+                const frame = acc.slice(0, idx); acc = acc.slice(idx + 2);
+                let ev = 'message', data = '';
+                for (const line of frame.split('\n')) {
+                  if (line.startsWith('event:')) ev = line.slice(6).trim();
+                  else if (line.startsWith('data:')) data += line.slice(5).trim();
+                }
+                let body = null;
+                if (data) { try { body = JSON.parse(data); } catch { continue; } }
+                if (ev === 'text_delta') {
+                  this._streamBuf += (body || '');
+                  this.startTyping(myReq);
+                } else if (ev === 'text_reset') {
+                  // whatever streamed was a lead-in to a search, not the answer
+                  this._streamBuf = '';
+                  this.liveMsg().content = '';
+                } else if (ev === 'done') {
+                  this._doneData = body || {};
+                  this._clearNetWatch(); // full result in hand; the local typewriter must not trip a watchdog
+                } else if (ev === 'error') {
+                  const e = new Error((body && body.error) || 'server error');
+                  e.serverTurn = true;
+                  throw e;
+                }
+                // 'sections' frames are deliberately not rendered here: the
+                // reveal order is prose first, then cards — 'done' carries all
+              }
+            }
+            if (!this._doneData) throw new Error('stream ended without a result');
+            this.startTyping(myReq); // covers a turn that streamed no text at all
+            await new Promise(resolve => {
+              this._drainResolve = resolve;
+              this.maybeFinishStream(myReq);
+            });
+          } catch (err) {
+            // a watchdog abort surfaces as AbortError; relabel it so the caller
+            // routes it (fallback / retry) instead of treating it as a user stop
+            if (this._netStall) { const e = new Error('connection stalled'); e.netStall = true; throw e; }
+            if (this._netTimeout) { const e = new Error('taking too long'); e.netTimeout = true; throw e; }
+            throw err;
+          } finally {
+            this._clearNetWatch();
           }
-          if (!this._doneData) throw new Error('stream ended without a result');
-          this.startTyping(myReq); // covers a turn that streamed no text at all
-          await new Promise(resolve => {
-            this._drainResolve = resolve;
-            this.maybeFinishStream(myReq);
-          });
+        },
+
+        _clearNetWatch() {
+          if (this._netWatch) { clearInterval(this._netWatch); this._netWatch = null; }
+        },
+
+        // wake the serverless instance and warm the slow Google + Anthropic
+        // connections BEFORE the first search, so 'first search after a while'
+        // is not cold. Fire-and-forget, throttled so it never floods; the
+        // server side is free of API spend. Skipped while a search is in
+        // flight (its own connections are hot).
+        warm() {
+          const now = Date.now();
+          if (this.isLoading) return;
+          if (this._lastWarm && now - this._lastWarm < 45000) return;
+          this._lastWarm = now;
+          try { fetch('/api/warm', { method: 'GET', keepalive: true }).catch(() => {}); } catch (e) {}
         },
 
         liveMsg() { return this.messages[this.messages.length - 1]; },
