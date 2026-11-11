@@ -1972,6 +1972,33 @@ check("airline logos keep the two-letter code underneath as a fallback",
       and 'onerror="this.remove()"' in _fe_ttl)
 
 # --------------------------------------------------------------------------
+section("Reply assembly & dependency drift  — Changelog: 'Hà Nội, and the reply that changed its mind'")
+# --------------------------------------------------------------------------
+# With adaptive thinking a reply can arrive as several text blocks split
+# mid-sentence; the old "\n".join broke sentences ("for $442 \n.").
+_tb = lambda t: types.SimpleNamespace(type="text", text=t)
+check("a reply split across text blocks reads as one answer",
+      app.join_text_blocks([_tb("the top pick is "), types.SimpleNamespace(type="thinking"),
+                            _tb("Asiana for $442 "), _tb(". That is also"), _tb(" the cheapest.\n\nNext.")])
+      == "the top pick is Asiana for $442. That is also the cheapest.\n\nNext.")
+check("...and words at a seam never collide",
+      app.join_text_blocks([_tb("to Hanoi"), _tb("departing 10:30am.")]) == "to Hanoi departing 10:30am.")
+check("the prompt forbids revising the answer mid-reply",
+      "never revises itself mid-answer" in app.assistant_system_prompt())
+# Nov 11: prod titled HAN "Hà Nội" though every published airportsdata
+# release says "Hanoi" — an unpinned dependency let prod run a copy nothing
+# here had verified. What the checks run is what ships.
+from importlib.metadata import version as _ver
+_reqs = {ln.split("==")[0].strip(): ln.split("==")[1].strip()
+         for ln in open(os.path.join(ROOT, "requirements.txt")) if "==" in ln and not ln.startswith("#")}
+check("data and patched-library dependencies are pinned to what the checks run",
+      {"airportsdata", "flights"} <= set(_reqs)
+      and all(_ver(k) == v for k, v in _reqs.items()),
+      ", ".join(f"{k} {v} (local {_ver(k)})" for k, v in _reqs.items()))
+check("titles use English place names",
+      app.place_name(["HAN"]) == "Hanoi" and app.place_name(["SGN"]) == "Ho Chi Minh City")
+
+# --------------------------------------------------------------------------
 section("README drift  — the doc must match the code it describes")
 # --------------------------------------------------------------------------
 # The pre-push hook forces a README edit per code push, but a Changelog line

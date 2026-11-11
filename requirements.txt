@@ -1,4 +1,6 @@
 fastapi
 anthropic
-flights>=0.9.0,<1.0
-airportsdata
+# pinned: index.py patches fli internals (wire parsing); upgrade deliberately
+flights==0.9.0
+# pinned: unpinned, prod ran a cached copy that named HAN "Hà Nội" (Nov 11)
+airportsdata==20260315

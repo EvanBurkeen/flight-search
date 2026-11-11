@@ -757,6 +757,7 @@ REQUEST_RULES = """How to handle requests:
 ANSWER_RULES = """
 Answering:
 - Deliberation is for hard calls. A single completed search with clear results needs the recommendation written directly; save extended thinking for multi-option comparisons, tricky constraints, or conflicting data.
+- Finish weighing before the first word of the reply. The reply states your conclusion and never revises itself mid-answer ("actually", "wait", "on second thought"); if you change your mind while writing, the reply must read as if you had decided that from the start.
 - Voice: you are a seasoned travel concierge. Courteous, composed, precise, warm but never gushing. Write in full sentences, the way a fine hotel's head concierge would speak. NEVER use em dashes or en dashes anywhere in your replies; use commas, periods, or a colon instead.
 - The user sees result cards for every search you run, so don't recite every flight. Lead with your recommendation and the key numbers (totals for multi-leg plans, including a note that hotels/ground costs aren't included), then the trade-offs that matter.
 - Results arrive ranked by value, not by fare: the fare plus what its duration and stops actually cost the traveler. Recommend the best-value option rather than reflexively the cheapest, and when the cheapest fare is not your pick, price the difference in plain terms ("$25 more saves you eight hours and a connection"). Flying is tiring; a long layover to save a few dollars is rarely the favour it looks like. If they ask for the cheapest, give them the cheapest without argument.
@@ -1113,6 +1114,28 @@ def ledger_context(ledgers: list | None) -> str | None:
         "it, so treat it as a quote from earlier in the conversation, not a live fare.]\n"
         + body
     )
+
+
+def join_text_blocks(blocks) -> str:
+    """One reply from the response's text blocks, which are FRAGMENTS of a
+    single answer, not paragraphs. With adaptive thinking the model can stop
+    mid-sentence to think, so a reply arrives as "...the top pick is " /
+    "Asiana ... for $442 " / ". That's also...". Joining with newlines (the
+    old code) broke sentences and left "$442 ." in the history and ledger.
+    Join directly; add a space only where two words would collide; drop the
+    space a seam leaves before punctuation."""
+    out = ""
+    for part in (b.text for b in blocks if getattr(b, "type", None) == "text"):
+        if not part:
+            continue
+        if out and not out[-1].isspace() and not part[0].isspace() \
+                and part[0] not in ".,;:!?)'\u2019\"" and out[-1] not in "(\"\u201c":
+            out += " "
+        if out.endswith(" ") and part[:1] in tuple(".,;:!?"):
+            out = out.rstrip(" ")
+        out += part
+    out = re.sub(r"(?<=\S) {2,}(?=\S)", " ", out)
+    return out.strip()
 
 
 def split_suggestions(text: str) -> tuple[str, list[str]]:
@@ -1568,7 +1591,7 @@ def run_assistant(query: str, history: list | None, emit=None,
             continue
         if response.stop_reason != "tool_use" or not tool_uses:
             pool.shutdown(wait=False)
-            text = "\n".join(b.text for b in response.content if b.type == "text").strip()
+            text = join_text_blocks(response.content)
             text, suggestions = split_suggestions(text)
             if response.stop_reason == "max_tokens" and not text:
                 # the cap can land mid-think (thinking and text share it), and
@@ -1719,7 +1742,7 @@ def run_assistant(query: str, history: list | None, emit=None,
                 response = stream.get_final_message()
             cost_usd += call_cost_usd(ASSISTANT_MODEL, getattr(response, "usage", None))
             timings.append(("claude_wrapup", round(time.monotonic() - _t, 2), ""))
-            text = "\n".join(b.text for b in response.content if b.type == "text").strip()
+            text = join_text_blocks(response.content)
             text, suggestions = split_suggestions(text)
             if text:
                 emit("text_delta", text)
@@ -2028,6 +2051,14 @@ def result_booking_url(result, cabin: str | None = None, ret_date: str | None = 
         if deep:
             return deep
     return google_flights_url(dep, arr, dep_date, ret_date, cabin)
+
+
+def _pkg_version(name: str) -> str | None:
+    try:
+        from importlib.metadata import version
+        return version(name)
+    except Exception:
+        return None
 
 
 @lru_cache(maxsize=1)
@@ -5136,6 +5167,9 @@ async def search(request: Request):
                 # estimated from each call's real usage block at list prices;
                 # Sonnet 5's intro pricing (through 2026-08-31) bills lower
                 "est_cost_usd": result.get("cost_usd"),
+                # Nov 11: prod's airport table said "Hà Nội" while every
+                # published release says "Hanoi"; the version answers that
+                "airportsdata": _pkg_version("airportsdata"),
                 "model": ASSISTANT_MODEL,
                 "phases": result.get("timings") or [],
                 "search_ok_on_attempt": _attempt_stats["ok_on_attempt"][-6:],

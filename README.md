@@ -224,6 +224,9 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
   schemas, and the tool only accepts adults + children.
 
 **Model behavior**
+- **A reply can arrive in pieces.** Adaptive thinking may pause mid-sentence,
+  splitting one answer into several text blocks; join them as fragments
+  (`join_text_blocks`), never as paragraphs.
 - **The screen never shows the model's scratch text.** Section titles were the
   model's free-text `summary`; on Nov 11 one read "verify date year context".
   Titles are now built from the search spec (`section_header`), and the
@@ -556,6 +559,11 @@ fully exercisable locally.
 
 ## Operations
 
+- **Pin what you patch or display.** Vercel can keep a cached install of an
+  unpinned package (Nov 11: an airport table that named HAN "Hà Nội", in no
+  published release). `airportsdata` and `flights` are pinned; check.py fails
+  if the pins drift from the local install. Upgrade them deliberately, then
+  re-run the checks.
 - **Google throttles datacenter IPs in waves.** Symptom: empty results/429s in prod
   while the identical search works from a residential IP (diagnose exactly that way).
   Mitigations built in: retry ladders, adaptive 12s/28s request timeouts, 58s
@@ -600,6 +608,25 @@ fully exercisable locally.
   lakes; run it, then bump the `?v=N` cache-buster on the script tag in index.html).
 
 ## Changelog
+
+**November 11, 2026 (Hà Nội, and the reply that changed its mind)**
+- Post-deploy verification of the section titles passed its own test (two
+  sections, titles built from the search, no "verify" section, 15s turn) and
+  surfaced two more problems:
+  - **Production titled HAN "Hà Nội" and SGN "Hồ Chí Minh City"** while
+    every published `airportsdata` release, old and new, says "Hanoi". The
+    route echo proved prod's airport table itself carried those names: an
+    UNPINNED dependency let Vercel keep a copy nothing here had verified.
+    `airportsdata` and `flights` (whose internals index.py patches) are now
+    pinned to the versions the checks run, a check fails if they ever differ,
+    and `debug_timings` reports the airportsdata version.
+  - **The reply stumbled** ("the best value is China Airlines... actually,
+    the top pick is Asiana", "$442 ."). With adaptive thinking a reply can
+    arrive as text blocks split mid-sentence, and `"\n".join` broke them.
+    `join_text_blocks` joins fragments as one answer (space only where words
+    would collide, none before punctuation); the prompt now says to finish
+    weighing before the first word and never revise mid-answer.
+  5 checks added.
 
 **November 11, 2026 (verify date year context, and less sterile)**
 - Evan's screenshot had a third results section titled "verify date year
