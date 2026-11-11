@@ -685,11 +685,11 @@ SEARCH_TOOL = {
             "assumptions": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Plain-English notes on anything you inferred from an ambiguous query, e.g. 'Assumed 2026 for 3/21', 'Interpreted NYC as JFK/LGA/EWR'.",
+                "description": "Plain-English notes on anything you inferred from an ambiguous query, e.g. 'Assumed next March for 3/21', 'Interpreted NYC as JFK/LGA/EWR'.",
             },
             "summary": {
                 "type": "string",
-                "description": "One-line human-readable description of the search being run.",
+                "description": "Short plain-English label for this search, e.g. 'NYC to Hanoi, Mar 4'. Never a note to yourself; the screen titles every section from the search itself.",
             },
         },
         "required": ["origins", "destinations", "trip_type"],
@@ -702,19 +702,30 @@ def assistant_system_prompt(router: bool = False) -> str:
     the right tool call fast; sending it the voice, formatting, and
     suggestion rules is pure prefill latency (measured ~4.4k tokens where
     ~2k carry its job), and its output prose is discarded anyway."""
-    today = datetime.now().strftime("%A, %B %d, %Y")
+    now = datetime.now()
+    today = now.strftime("%A, %B %d, %Y")
+    # a LIVE example of the year rule: a month/day that already passed this
+    # year. Nov 11: the schema's frozen example ("Assumed 2026 for 3/21")
+    # taught the model that March meant a past year, it sent 2026, the server
+    # rolled it, and the model burned a search "verifying" the year.
+    passed = now - timedelta(days=30)
+    year_rule = (f"Today is {today}. Dates you send are used exactly as written: always "
+                 f"give the full YYYY-MM-DD, and a month/day that has already passed this "
+                 f"year means NEXT year (today, \"{passed:%B} {passed.day}\" means "
+                 f"{passed.year + 1}-{passed:%m-%d}). Never run a search only to double-check "
+                 "a date, a year, or anything a search this turn already answered.")
     if router:
-        return ROUTER_PROMPT_HEAD.format(today=today) + REQUEST_RULES
-    return (FULL_PROMPT_HEAD.format(today=today) + REQUEST_RULES + ANSWER_RULES)
+        return ROUTER_PROMPT_HEAD.format(today=year_rule) + REQUEST_RULES
+    return (FULL_PROMPT_HEAD.format(today=year_rule) + REQUEST_RULES + ANSWER_RULES)
 
 
-ROUTER_PROMPT_HEAD = """You are the flight assistant on Evan's flight search site, backed by live Google Flights data via the search_flights tool. Today is {today}.
+ROUTER_PROMPT_HEAD = """You are the flight assistant on Evan's flight search site, backed by live Google Flights data via the search_flights tool. {today}
 
 Your job on this call is to translate the request into the right search_flights call(s) and nothing else.
 
 """
 
-FULL_PROMPT_HEAD = """You are the flight assistant on Evan's flight search site, backed by live Google Flights data via the search_flights tool. Today is {today}.
+FULL_PROMPT_HEAD = """You are the flight assistant on Evan's flight search site, backed by live Google Flights data via the search_flights tool. {today}
 
 You are a travel-savvy assistant, not a form. Converse naturally, but ground every price, time, and availability claim in a search_flights result from this conversation — never invent or recall fares.
 
@@ -1396,6 +1407,7 @@ def run_assistant(query: str, history: list | None, emit=None,
                      "content": f"{ledger_note}\n\n{query}" if ledger_note else query})
 
     sections: list[dict] = []
+    section_index: dict = {}  # spec key -> position, so a repeated search adds no section
     ledger_entries: list[dict] = []  # what this turn puts on screen, for the next one
     search_log: list[str] = []  # per-search outcome lines; feeds the wrap-up call
     searches_used = 0
@@ -1596,10 +1608,19 @@ def run_assistant(query: str, history: list | None, emit=None,
             label = (tu.input or {}).get("summary") or "search"
             try:
                 payload = futures[tu.id].result(timeout=max(1.0, batch_deadline - time.monotonic()))
-                sections.append(payload)
-                entry = ledger_entry(tu.input or {}, payload)
-                if entry:
-                    ledger_entries.append(entry)
+                # the same search twice in one turn (a re-run, a "verification")
+                # is ONE section on screen: the richer of the two
+                _skey = _spec_key(tu.input or {})
+                _prev = section_index.get(_skey)
+                if _prev is None:
+                    section_index[_skey] = len(sections)
+                    sections.append(payload)
+                    entry = ledger_entry(tu.input or {}, payload)
+                    if entry:
+                        ledger_entries.append(entry)
+                elif (len(payload.get("results") or payload.get("dates") or [])
+                      > len(sections[_prev].get("results") or sections[_prev].get("dates") or [])):
+                    sections[_prev] = payload
                 n = len(payload.get("results") or payload.get("dates") or [])
                 if n:
                     search_log.append(f"'{label}': completed, {n} options on screen")
@@ -4522,9 +4543,12 @@ def _spec_key(spec: dict) -> str:
     # None means "not specified", exactly like an absent key (every reader
     # uses spec.get); keeping it split identical searches into two upstream
     # requests — Nov 11, every multi-city leg was fetched twice because the
-    # price index's spec lacked keys the leg spec carried as None
+    # price index's spec lacked keys the leg spec carried as None.
+    # Dates are keyed AFTER rolling: "2026-03-04" (rolled to 2027) and
+    # "2027-03-04" are one search, not two.
+    rolled, _ = roll_past_dates(spec)
     return json.dumps(
-        {k: v for k, v in sorted(spec.items()) if k not in _KEY_IGNORE and v is not None},
+        {k: v for k, v in sorted(rolled.items()) if k not in _KEY_IGNORE and v is not None},
         sort_keys=True, default=str,
     )
 
@@ -4599,7 +4623,150 @@ def cached_execute_spec(spec: dict) -> dict:
         waiter.set()
 
 
+# Multi-airport metros, so a title reads "New York", not "JFK / LGA / EWR".
+# A single airport uses its own city (airportsdata); anything else, codes.
+_METROS = {
+    "New York": {"JFK", "LGA", "EWR"}, "London": {"LHR", "LGW", "STN", "LTN", "LCY", "SEN"},
+    "Paris": {"CDG", "ORY", "BVA"}, "Tokyo": {"HND", "NRT"}, "Seoul": {"ICN", "GMP"},
+    "Beijing": {"PEK", "PKX"}, "Shanghai": {"PVG", "SHA"}, "Osaka": {"KIX", "ITM", "UKB"},
+    "Chicago": {"ORD", "MDW"}, "Washington": {"IAD", "DCA", "BWI"},
+    "Bay Area": {"SFO", "OAK", "SJC"}, "Los Angeles": {"LAX", "BUR", "LGB", "SNA", "ONT"},
+    "Houston": {"IAH", "HOU"}, "Dallas": {"DFW", "DAL"}, "South Florida": {"MIA", "FLL", "PBI"},
+    "Milan": {"MXP", "LIN", "BGY"}, "Rome": {"FCO", "CIA"}, "Istanbul": {"IST", "SAW"},
+    "Bangkok": {"BKK", "DMK"}, "Moscow": {"SVO", "DME", "VKO"},
+    "São Paulo": {"GRU", "CGH", "VCP"}, "Buenos Aires": {"EZE", "AEP"},
+}
+_ALLIANCE_NAMES = {"ONEWORLD": "oneworld", "SKYTEAM": "SkyTeam", "STAR_ALLIANCE": "Star Alliance"}
+
+
+def place_name(codes) -> str:
+    cs = [str(c).strip().upper() for c in (codes or []) if c]
+    if not cs:
+        return "?"
+    if len(set(cs)) > 1:
+        for name, members in _METROS.items():
+            if set(cs) <= members:
+                return name
+    cities = []
+    for c in cs:
+        a = airport_coords().get(c)
+        cities.append(a["city"] if a and a.get("city") else c)
+    return cities[0] if len(set(cities)) == 1 else " / ".join(cs)
+
+
+def _fmt_day(ds: str | None, year: bool = True) -> str:
+    try:
+        d = datetime.strptime(ds or "", "%Y-%m-%d")
+    except ValueError:
+        return ds or ""
+    return f"{d:%a}, {d:%b} {d.day}" + (f", {d.year}" if year else "")
+
+
+def _fmt_range(a: str | None, b: str | None) -> str:
+    try:
+        da, db = datetime.strptime(a or "", "%Y-%m-%d"), datetime.strptime(b or "", "%Y-%m-%d")
+    except ValueError:
+        return " – ".join(x for x in (a, b) if x)
+    if da.year == db.year:
+        return f"{da:%b} {da.day} – {db:%b} {db.day}, {db.year}"
+    return f"{da:%b} {da.day}, {da.year} – {db:%b} {db.day}, {db.year}"
+
+
+def _fmt_hour(h) -> str:
+    h = int(h) % 24
+    return "12am" if h == 0 else "12pm" if h == 12 else f"{h}am" if h < 12 else f"{h - 12}pm"
+
+
+def section_header(spec: dict) -> dict:
+    """What the screen calls a results section, built from the search itself.
+
+    Nov 11: a section was titled "verify date year context", the model's
+    note to itself, because titles came from the free-text `summary` the
+    model writes. A title made from the spec cannot leak scratch text, always
+    states the year, and its tags name every filter that tells two searches
+    on the same route apart (the comparison prongs a summary used to carry).
+    """
+    segs = spec.get("multi_city_segments") or []
+    if segs:
+        title, prev = "", None
+        for sg in segs:
+            o, d = place_name(sg.get("origins")), place_name(sg.get("destinations"))
+            if prev is not None and o == prev:
+                title += f" → {d}"
+            else:
+                title += (", then " if title else "") + f"{o} → {d}"
+            prev = d
+        dates = sorted(sg["date"] for sg in segs if sg.get("date"))
+        when = (_fmt_range(dates[0], dates[-1]) if len(dates) > 1
+                else _fmt_day(dates[0]) if dates else "")
+        subtitle = " · ".join(x for x in (mc_route_text(segs), "Multi-city", when) if x)
+    else:
+        o, d = spec.get("origins") or [], spec.get("destinations") or []
+        title = f"{place_name(o)} to {place_name(d)}"
+        rt = spec.get("trip_type") == "round_trip"
+        flex = spec.get("flexible_dates") or {}
+        if flex.get("from_date"):
+            when = "Flexible dates, " + _fmt_range(flex["from_date"], flex.get("to_date") or flex["from_date"])
+            if rt and flex.get("trip_length_days"):
+                when += f" · {flex['trip_length_days']}-night trips"
+        elif rt and spec.get("return_date"):
+            when = _fmt_range(spec.get("departure_date"), spec.get("return_date"))
+        else:
+            when = _fmt_day(spec.get("departure_date"))
+        codes = " · ".join(str(c).upper() for c in o) + " → " + " · ".join(str(c).upper() for c in d)
+        subtitle = " · ".join(x for x in (codes, "Round trip" if rt else "One way", when) if x)
+
+    tags: list[str] = []
+    cabin = spec.get("cabin")
+    if cabin and cabin != "economy":
+        tags.append(cabin.replace("_", " ").capitalize())
+    tags += {"non_stop": ["Nonstop only"], "one_or_fewer": ["1 stop max"],
+             "two_or_fewer": ["2 stops max"]}.get(spec.get("max_stops"), [])
+    if spec.get("airlines_include"):
+        tags.append("Only " + ", ".join(spec["airlines_include"]))
+    if spec.get("airlines_exclude"):
+        tags.append("No " + ", ".join(spec["airlines_exclude"]))
+    for al in spec.get("alliances") or []:
+        tags.append(_ALLIANCE_NAMES.get(al, al))
+    if spec.get("via_airports"):
+        tags.append("Via " + ", ".join(spec["via_airports"]))
+    for key, label in (("departure_time", "Departs"), ("arrival_time", "Arrives"),
+                       ("return_time", "Return departs"), ("return_arrival_time", "Return arrives")):
+        w = spec.get(key) or {}
+        e, l = w.get("earliest"), w.get("latest")
+        if e is not None and l is not None:
+            tags.append(f"{label} {_fmt_hour(e)}–{_fmt_hour(l)}")
+        elif l is not None:
+            tags.append(f"{label} by {_fmt_hour(l)}")
+        elif e is not None:
+            tags.append(f"{label} after {_fmt_hour(e)}")
+    if spec.get("arrival_date"):
+        tags.append("Lands " + _fmt_day(spec["arrival_date"], year=False))
+    if spec.get("max_price"):
+        tags.append(f"Under ${int(spec['max_price']):,}")
+    travelers = int(spec.get("adults") or 1) + int(spec.get("children") or 0)
+    if travelers > 1:
+        tags.append(f"{travelers} travelers")
+    if spec.get("carry_on"):
+        tags.append("Carry-on")
+    if spec.get("checked_bags"):
+        n = int(spec["checked_bags"])
+        tags.append(f"{n} checked bag" + ("s" if n > 1 else ""))
+    tags += {"cheapest": ["Cheapest first"], "fastest": ["Fastest first"],
+             "departure_time": ["By departure time"]}.get(spec.get("sort"), [])
+    return {"title": title, "subtitle": subtitle, "tags": tags}
+
+
 def execute_spec(spec: dict) -> dict:
+    payload = _execute_spec(spec)
+    try:
+        payload.update(section_header(roll_past_dates(spec)[0]))
+    except Exception:
+        pass  # a title is a nicety; the search result is the product
+    return payload
+
+
+def _execute_spec(spec: dict) -> dict:
     spec, date_notes = roll_past_dates(spec)
     currency_mc = (spec.get("currency") or "USD").upper()
 

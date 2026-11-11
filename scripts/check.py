@@ -1930,6 +1930,48 @@ check("one typeface: the serif and its download are gone",
       "Fraunces" not in _fe_ds and "family=Inter:wght@400..700" in _fe_ds)
 
 # --------------------------------------------------------------------------
+section("Section titles & dates  — Changelog: 'verify date year context'")
+# --------------------------------------------------------------------------
+# Nov 11: a results section was titled "verify date year context", the
+# model's note to itself, because titles came from the free-text `summary`.
+# The model wrote it while burning a search to double-check a year that a
+# frozen schema example ("Assumed 2026 for 3/21") had taught it to doubt.
+from datetime import date as _date_t, timedelta as _td_t
+_passed = _date_t.today() - _td_t(days=30)
+_past_ds = _passed.isoformat()                                   # rolls to next year
+_next_ds = _passed.replace(year=_passed.year + 1).isoformat()
+_hdr = app.section_header(app.roll_past_dates({
+    "trip_type": "one_way", "origins": ["JFK", "LGA", "EWR"], "destinations": ["HAN"],
+    "departure_date": _past_ds, "summary": "verify date year context"})[0])
+check("section titles are built from the search, never the model's scratch summary",
+      _hdr["title"] == "New York to Hanoi" and "verify" not in json.dumps(_hdr)
+      and "JFK · LGA · EWR → HAN" in _hdr["subtitle"] and str(_passed.year + 1) in _hdr["subtitle"],
+      json.dumps(_hdr))
+check("...and filters that distinguish two searches become tags",
+      app.section_header({"trip_type": "one_way", "origins": ["JFK"], "destinations": ["LAX"],
+                          "departure_date": future(20), "max_stops": "non_stop",
+                          "cabin": "business", "arrival_time": {"latest": 14}})["tags"]
+      == ["Business", "Nonstop only", "Arrives by 2pm"])
+_fe_ttl = open(os.path.join(ROOT, "public", "index.html")).read()
+check("the screen prefers the built title over the message's first line",
+      "if (sec.title) return sec.title;" in _fe_ttl)
+check("a passed date and its rolled twin are ONE search (cache and dedupe key)",
+      app._spec_key({"origins": ["JFK"], "destinations": ["HAN"], "departure_date": _past_ds})
+      == app._spec_key({"origins": ["JFK"], "destinations": ["HAN"], "departure_date": _next_ds}))
+_src_ttl = open(os.path.join(ROOT, "api", "index.py")).read()
+check("a repeated search in one turn adds no second section",
+      "section_index.get(_skey)" in _src_ttl and "sections[_prev] = payload" in _src_ttl)
+_p_ttl = app.assistant_system_prompt()
+check("the prompt states the year rule with a LIVE example, and no frozen one",
+      f"means {_passed.year + 1}-{_passed:%m-%d}" in _p_ttl
+      and "Never run a search only to double-check" in _p_ttl
+      and not _re.search(r"Assumed 20\d\d", json.dumps(app.SEARCH_TOOL))  # no frozen year the model reads
+      and f"means {_passed.year + 1}-" in app.assistant_system_prompt(router=True))
+check("airline logos keep the two-letter code underneath as a fallback",
+      '<span x-text="f.airline_code"></span><img :src="logoUrl(f.airline_code)"' in _fe_ttl
+      and 'onerror="this.remove()"' in _fe_ttl)
+
+# --------------------------------------------------------------------------
 section("README drift  — the doc must match the code it describes")
 # --------------------------------------------------------------------------
 # The pre-push hook forces a README edit per code push, but a Changelog line

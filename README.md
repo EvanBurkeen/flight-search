@@ -224,6 +224,15 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
   schemas, and the tool only accepts adults + children.
 
 **Model behavior**
+- **The screen never shows the model's scratch text.** Section titles were the
+  model's free-text `summary`; on Nov 11 one read "verify date year context".
+  Titles are now built from the search spec (`section_header`), and the
+  summary only labels the search for the model and the logs.
+- **A frozen example in a prompt or schema ages into a wrong instruction.**
+  "Assumed 2026 for 3/21" was a fine example in July; by November it taught
+  the model that March meant a past year. Examples that involve dates are
+  computed from today (the year rule in the prompt head) or stated without a
+  year.
 - **Never make the model do calendar math.** Asked for "the latest departure
   landing Jan 3 morning", it named a flight whose arrival timestamp plainly
   read Jan 4 — it inferred "next day" from the departure instead of reading
@@ -523,7 +532,12 @@ warm stone neutrals with white surfaces, ink-coloured figures, one burnt-orange
 accent for action and selection (Book, send, chosen rows, the brand mark),
 green for good fares, amber for caution; every colour is a token redefined for
 dark mode, including the route maps; tabular numerals on all figures; the
-landing offers tappable example prompts that fill the compose box.
+landing offers tappable example prompts that fill the compose box; real
+airline logos (Google's own marks, the IATA code underneath as a fallback);
+every results section opens with a type icon, a title built from the search
+itself (place names, then codes, trip type and dates with the year) and tags
+for every filter; the concierge's replies carry the brand mark as an avatar;
+the best-value card is outlined in the accent.
 
 ## Local development
 
@@ -586,6 +600,32 @@ fully exercisable locally.
   lakes; run it, then bump the `?v=N` cache-buster on the script tag in index.html).
 
 ## Changelog
+
+**November 11, 2026 (verify date year context, and less sterile)**
+- Evan's screenshot had a third results section titled "verify date year
+  context": the model's note to itself, shown because section titles came
+  from its free-text `summary`. It had burned a search double-checking that
+  "March 4" meant 2027, because the tool schema's frozen example ("Assumed
+  2026 for 3/21") had taught it March meant a past year (hence the reply's
+  odd "since March 2026 has already passed, I've booked this against next
+  year"). Fixed as classes:
+  - Titles are built from the search (`section_header`): "New York to Hanoi"
+    over "JFK · LGA · EWR → HAN · One way · Thu, Mar 4, 2027", with tags for
+    every filter (cabin, stops, airlines, time windows, travelers, bags) so
+    comparison prongs stay distinguishable. Scratch text cannot reach the
+    screen.
+  - The cache/dedupe key rolls dates first, so "2026-03-04" (rolled) and
+    "2027-03-04" are one search, and a repeated search inside one turn adds
+    no second section (the richer result wins).
+  - The prompt head states the year rule with a LIVE example computed from
+    today and forbids searches that only double-check something; the frozen
+    schema example is gone.
+- Design, on Evan's "looks a little sterile": real airline logos on cards,
+  compact cards and board rows; a type icon tile on every section; the brand
+  mark as the concierge's avatar; the best-value card outlined in orange; a
+  warmer stone ground for more depth against white cards; on phones the
+  per-section Detail/Compact switch hides so titles keep the full width.
+  7 checks added.
 
 **November 11, 2026 (the redesign: a product, not stationery)**
 - Evan: "redesign the website, make it look prettier, not like AI slop but a
