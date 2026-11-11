@@ -1906,6 +1906,30 @@ check("the client warms the backend on load, on compose focus, and on tab return
       and "visibilitychange" in _fe_net and "'/api/warm'" in _fe_net)
 
 # --------------------------------------------------------------------------
+section("Design system  — Changelog: 'the redesign: a product, not stationery'")
+# --------------------------------------------------------------------------
+import re as _re_ds
+_fe_ds = open(os.path.join(ROOT, "public", "index.html")).read()
+_css = _fe_ds[_fe_ds.index("<style>"):_fe_ds.index("</style>")]
+_root_block = _css[_css.index(":root {"):_css.index("}", _css.index(":root {"))]
+_dark_block = _css[_css.index("html.dark {"):_css.index("}", _css.index("html.dark {"))]
+_colour_tokens = {m.group(1) for m in _re_ds.finditer(r"(--[a-z0-9-]+):\s*(#|rgba?\()", _root_block)}
+_dark_tokens = set(_re_ds.findall(r"(--[a-z0-9-]+):", _dark_block))
+check("every colour token is redefined for dark mode (no light colour leaks into dark)",
+      _colour_tokens and _colour_tokens <= _dark_tokens,
+      ", ".join(sorted(_colour_tokens - _dark_tokens)) or f"{len(_colour_tokens)} tokens")
+_map_src = _fe_ds[_fe_ds.index("mapSvg(points, returnPoints) {"):_fe_ds.index("airlineColor(code) {")]
+check("route maps take their colours from the theme, not hard-coded hex",
+      not _re_ds.search(r'(fill|stroke)="#[0-9a-fA-F]{3,6}"', _map_src) and "m-route" in _map_src
+      and ".route-map .m-land" in _css)
+check("x-show cannot collapse the one-ticket link (display lives in the stylesheet)",
+      "a.show-all { display: block;" in _css)
+check("nothing floats over the sticky board bars: the search index lives in the compose bar",
+      'class="ladder-fab"' in _fe_ds.split('class="input-row"')[1].split("</form>")[0])
+check("one typeface: the serif and its download are gone",
+      "Fraunces" not in _fe_ds and "family=Inter:wght@400..700" in _fe_ds)
+
+# --------------------------------------------------------------------------
 section("README drift  — the doc must match the code it describes")
 # --------------------------------------------------------------------------
 # The pre-push hook forces a README edit per code push, but a Changelog line

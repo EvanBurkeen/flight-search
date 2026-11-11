@@ -256,6 +256,14 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
   round-trip picker and multi-city broke this in different ways.
 
 **Frontend**
+- **`x-show` rewrites an element's `display`.** Layout that lives in an inline
+  `style="display: block"` is lost the moment Alpine shows the element (Nov 11:
+  the multi-city "price the combined ticket" link collapsed to an inline box
+  overlapping the leg board). Put display in the stylesheet.
+- **The bottom edge belongs to the compose bar and the sticky board bars.**
+  A separately floating button there will collide with one of them (the old
+  "Searches" fab sat on top of the board's Share); controls go inside the
+  compose bar instead.
 - **Alpine:** mutate the reactive proxy (`this.messages[this.messages.length-1]`),
   never the raw object you pushed, or the DOM freezes after the first render while
   the data updates invisibly.
@@ -496,7 +504,7 @@ pairings in tooltips) · per-flight atlas maps (land+lakes, graticule,
 sequential longitude unwrapping so every leg takes the short way; outbound solid,
 return dashed; layover dots with durations) · timeline layover rings · suggestion
 chips · search ladder (jump-to index of every results section: fixed rail on
-wide screens, floating 'Searches' button + overlay elsewhere) · **memory across reloads** (the
+wide screens, an index button inside the compose bar elsewhere) · **memory across reloads** (the
 conversation and its freshest cards restore on load; the landing shows
 recent-trip chips — route, date, the fare you saw and how long ago — that
 re-search live on tap; New trip clears the chat, keeps the recents) ·
@@ -510,10 +518,12 @@ canvas — trip type, route with flight-arc motif, segment rows with durations,
 date-range + price + barcode stub, flights.evanburkeen.com footer — with copy
 image / copy text incl. booking link / save / native share) · degraded round
 trips render a notice + tap-to-price board instead of a blank section ·
-concierge styling (Fraunces serif, brass fittings, boarding-pass dividers,
-greeting; August 2 broadsheet + professional passes: heavy masthead rule,
-per-section hairlines, tabular numerals on all figures, crisper shadows,
-serif reply voice, monochrome airline marks, squared control language).
+**design system** (Nov 11 redesign): one typeface (Inter, variable weights),
+warm stone neutrals with white surfaces, ink-coloured figures, one burnt-orange
+accent for action and selection (Book, send, chosen rows, the brand mark),
+green for good fares, amber for caution; every colour is a token redefined for
+dark mode, including the route maps; tabular numerals on all figures; the
+landing offers tappable example prompts that fill the compose box.
 
 ## Local development
 
@@ -576,6 +586,36 @@ fully exercisable locally.
   lakes; run it, then bump the `?v=N` cache-buster on the script tag in index.html).
 
 ## Changelog
+
+**November 11, 2026 (the redesign: a product, not stationery)**
+- Evan: "redesign the website, make it look prettier, not like AI slop but a
+  professionally completed webpage", then mid-pass: "I want a warmer color,
+  not hospital-like". The old look was the house style of generated pages
+  (beige paper texture, Fraunces italics, terracotta, brass, uppercase
+  letter-spaced labels, ✦ ornaments). Replaced wholesale with a token-driven
+  system: Inter only (Fraunces dropped, one fewer font download), warm stone
+  neutrals and white surfaces, warm-black ink, burnt orange (#c4470f, 4.9:1
+  on white) as the single action colour, green for good fares, golden amber
+  for warnings. The first pass used cool greys and cobalt; Evan's note moved
+  it warm without returning to cream.
+- Structure: a header with a drawn mark (a route arc between two points),
+  segmented view controls, an icon theme toggle; a landing with a plain
+  headline, recent trips, and tappable example prompts that FILL the compose
+  box rather than send; flight cards with an ink price hierarchy, a dotted
+  timeline, quiet semantic badges and an orange Book button; a pill compose
+  bar with an icon send button.
+- Route maps now take their colours from CSS classes, so they follow the
+  theme (they were hard-coded sepia "atlas plates" in both themes); the share
+  card PNG uses the same palette, with the ✈ emoji and serif removed.
+- Two layout bugs found while verifying, each now pinned: the multi-city
+  one-ticket link collapsed because its `display` lived in an inline style
+  that `x-show` rewrites, and the floating "Searches" button sat on top of
+  the sticky board bars (the index now opens from a button in the compose
+  bar). Also: the board bars group Book and Share on the right, and the
+  compose box no longer shows a scrollbar under a wrapped placeholder.
+- Verified locally in both themes and at phone width across every result type
+  (one-way, round-trip board, date grid, multi-city board). No behaviour
+  changed; every class name and checked string survived.
 
 **November 11, 2026 (NYC to Hanoi, Saigon to NYC: the leg that was never there)**
 Evan's multi-city NYC→Hanoi Mar 4 / Saigon→NYC Mar 20: the first attempt
