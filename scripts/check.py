@@ -311,7 +311,7 @@ p1 = result([leg("FLL", "ICN", "2026-12-28T06:35", "2026-12-29T15:30", "DL", "20
 p2 = result([leg("ICN", "HRB", "2027-01-01T12:20", "2027-01-01T13:35", "OZ", "339")], 2207, stops=0, duration=135)
 _real_run, _real_index = app.run_search, app.leg_price_index
 app.run_search = lambda *a, **k: [(p1, p2)]
-app.leg_price_index = lambda origins, dests, date_, cabin, win=None: (
+app.leg_price_index = lambda origins, dests, date_, cabin, win=None, **_k: (
     {(("DL", "201"),): 844.0} if "FLL" in list(origins) else {(("OZ", "339"),): 182.0})
 mc_out = app.search_multi_city({"multi_city_segments": [
     {"origins": ["FLL"], "destinations": ["ICN"], "date": future(140)},
@@ -379,7 +379,7 @@ check("every leg failing degrades to the joint quote, never a crash",
 # ...and the exact-signature comparison stays authoritative when it fires:
 # a floor ABOVE the matched separate total appends nothing
 app.run_search = lambda *a, **k: [(p1, p2)]
-app.leg_price_index = lambda origins, dests, date_, cabin, win=None: (
+app.leg_price_index = lambda origins, dests, date_, cabin, win=None, **_k: (
     {(("DL", "201"),): 844.0} if "FLL" in list(origins) else {(("OZ", "339"),): 182.0})
 app.cached_execute_spec = _floor_leg_payload  # sums to 1490 > 1026
 _mc_match = app.search_multi_city({"multi_city_segments": [
@@ -833,6 +833,39 @@ check("the turn's status line says WHICH kind of empty it was",
       "Google never answered (refused), NOT evidence of no service" in _src_mc2
       or "Google never answered (refused), NOT evidence of no service"
       in open(os.path.join(ROOT, "api", "index.py")).read())
+
+# Nov 11 in production: the price index searched every leg a SECOND time
+# (its spec lacked keys the leg spec carried as None, so the cache saw two
+# searches), and one probe ran 42.5s against its 12s budget while finished
+# legs waited on it. The turn took 102s.
+check("None and absent are one cache key (no silent duplicate searches)",
+      app._spec_key({"origins": ["JFK"], "adults": None, "carry_on": None})
+      == app._spec_key({"origins": ["JFK"]}))
+_idx_seen = []
+_real_ces2 = app.cached_execute_spec
+app.cached_execute_spec = lambda s: (_idx_seen.append(s), {"type": "flights", "results": []})[1]
+app.leg_price_index(["JFK"], ["HAN"], future(110), None, None, base_spec={"adults": 2, "children": 1})
+app.cached_execute_spec = _real_ces2
+_leg_twin = app._mc_leg_spec({"adults": 2, "children": 1},
+                             {"origins": ["JFK"], "destinations": ["HAN"], "date": future(110)})
+check("the price index shares the leg's own search, party included",
+      _idx_seen and app._spec_key(_idx_seen[0]) == app._spec_key(_leg_twin)
+      and _idx_seen[0]["children"] == 1)
+
+_saved_wait = app.MC_PROBE_WAIT_S
+app.MC_PROBE_WAIT_S = 0.5
+app.run_search = lambda *a, **k: (time.sleep(3), [(p1, p2)])[1]   # a probe that overruns
+app.cached_execute_spec = _mc_legs_ok
+_t_probe = time.monotonic()
+_mc_slow = app.search_multi_city(dict(_mc_segs), "USD")
+_dt_probe = time.monotonic() - _t_probe
+app.run_search, app.cached_execute_spec, app.MC_PROBE_WAIT_S = _real_run, _real_ces2, _saved_wait
+check("a probe that overruns cannot hold finished legs hostage",
+      _dt_probe < 2.0 and [lg["count"] for lg in _mc_slow.get("legs") or []] == [3, 2]
+      and "still running" in (_mc_slow.get("combined_probe") or ""),
+      f"{_dt_probe:.1f}s, probe={_mc_slow.get('combined_probe')}")
+check("...and the legs it shipped still pair into combos",
+      any(r["total_price"] == 1095 for r in _mc_slow.get("results") or []))
 
 _fe_mc = open(os.path.join(ROOT, "public", "index.html")).read()
 check("multi-city opens on a per-leg board, filtered by the same bar",

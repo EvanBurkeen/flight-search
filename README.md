@@ -640,13 +640,27 @@ moved the diagnosis twice:
   prompt rule to answer leg questions from it; the ledger records
   `leg_boards` so "the 12:00 Korean Air to Hanoi" resolves next turn; the
   success payload now reports `combined_probe` too.
+- **Post-deploy verification found the turn still took 102s** (first round:
+  both legs "still searching" at the 48s deadline; the model's retry then
+  waited 42.5s on a probe budgeted 12s while the legs sat cached). Two
+  efficiency bugs, fixed in a second push: (1) every multi-city search ran
+  each leg TWICE — the price index's spec lacked keys the leg spec carried
+  as None, and the cache key treated None and absent as different, so
+  single-flight never collapsed them (also a family bug: the index priced
+  one adult against a party-total fare). `_spec_key` now ignores None and
+  the index searches with the leg's own spec. (2) `run_search` checks its
+  budget only BETWEEN attempts, so the probe now runs on its own thread
+  while the legs are harvested, and is waited on only until the legs are
+  done or `MC_PROBE_WAIT_S` (25s) from the start, whichever is later.
+  Measured locally after: 12.1s, legs at 1.4s/3.1s, 2 upstream one-way
+  searches instead of 4.
 - **The check suite had been failing since September**, blocking every
   push: three time bombs (a 2026-09-24 departure fli now rejects; a
   speculation check hard-coding "this year" for Sept 18). Fixed with
   computed dates. Two checks updated deliberately: the fallback's combo
   COUNT pinned rank-zip (intent kept: the cheapest separate pairing leads),
   and the children check counted duplicated source lines that are now one
-  `_mc_leg_spec`. 28 checks added (291 -> 319).
+  `_mc_leg_spec`. 32 checks added (291 -> 323).
 
 **September 5, 2026 (bag-aware pricing: the cheapest fare that was not)**
 - The cheapest headline fare is usually a budget carrier that charges for a

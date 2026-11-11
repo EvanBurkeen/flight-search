@@ -3331,7 +3331,7 @@ def serialized_signature(flight: dict) -> tuple:
 
 
 def leg_price_index(origins: list, destinations: list, date_: str, cabin: str | None,
-                    dep_window: dict | None = None) -> dict:
+                    dep_window: dict | None = None, base_spec: dict | None = None) -> dict:
     """Standalone one-way price for every flight on this leg, by signature.
 
     Multi-city prices an itinerary as ONE ticket. When the carriers do not
@@ -3343,12 +3343,13 @@ def leg_price_index(origins: list, destinations: list, date_: str, cabin: str | 
     """
     # goes through the shared search cache, so a leg the user already searched
     # on its own costs nothing here
+    # the SAME spec as the leg's own search (party, bags, cabin), so the
+    # single-flight cache collapses the two into one upstream request, and a
+    # family's standalone prices are party totals like the combined fare
     try:
-        payload = cached_execute_spec({
-            "trip_type": "one_way", "departure_date": date_,
+        payload = cached_execute_spec(_mc_leg_spec(base_spec or {"cabin": cabin}, {
             "origins": list(origins), "destinations": list(destinations),
-            "cabin": cabin, "departure_time": dep_window,
-        })
+            "date": date_, "departure_time": dep_window}))
     except Exception:
         return {}
     idx: dict = {}
@@ -3399,6 +3400,7 @@ def note_mc_probe(ok: bool) -> None:
 # the whole section.
 MC_LEGS_DEADLINE_S = 48.0   # from the start of search_multi_city, all legs
 MC_LEG_RETRY_MIN_S = 10.0   # an empty leg is retried only if this much time remains
+MC_PROBE_WAIT_S = 25.0      # the combined probe is waited on until legs are done or this, whichever is later
 
 
 def _mc_leg_spec(spec: dict, seg: dict) -> dict:
@@ -3588,7 +3590,8 @@ def mc_legs_note(legs: list) -> str:
 
 def multi_city_fallback(spec: dict, currency: str, leg_search=None,
                         probe_note: str | None = None, leg_futs=None,
-                        deadline: float | None = None, started: float | None = None) -> dict:
+                        deadline: float | None = None, started: float | None = None,
+                        legs: list | None = None) -> dict:
     """When Google withholds combined multi-city pricing (BotGuard-gated
     since Aug 2026), fall back to what is still fully knowable: each leg
     searched as its own one-way — every honesty layer applies per leg —
@@ -3606,19 +3609,20 @@ def multi_city_fallback(spec: dict, currency: str, leg_search=None,
         return {"type": "multicity",
                 "message": "A multi-city trip needs at least two legs.", "results": []}
 
-    pool = None
-    if leg_futs is None:  # standalone use (and the offline checks)
-        pool = ThreadPoolExecutor(max_workers=min(4, len(raw_segs)))
-        leg_futs = [pool.submit(leg_search or cached_execute_spec, _mc_leg_spec(spec, seg))
-                    for seg in raw_segs]
-    if deadline is None:
-        deadline = time.monotonic() + MC_LEGS_DEADLINE_S
-    try:
-        legs = harvest_mc_legs(spec, raw_segs, leg_futs, deadline, leg_search=leg_search,
-                               started=started)
-    finally:
-        if pool is not None:
-            pool.shutdown(wait=False, cancel_futures=True)
+    if legs is None:  # not harvested by the caller yet
+        pool = None
+        if leg_futs is None:  # standalone use (and the offline checks)
+            pool = ThreadPoolExecutor(max_workers=min(4, len(raw_segs)))
+            leg_futs = [pool.submit(leg_search or cached_execute_spec, _mc_leg_spec(spec, seg))
+                        for seg in raw_segs]
+        if deadline is None:
+            deadline = time.monotonic() + MC_LEGS_DEADLINE_S
+        try:
+            legs = harvest_mc_legs(spec, raw_segs, leg_futs, deadline, leg_search=leg_search,
+                                   started=started)
+        finally:
+            if pool is not None:
+                pool.shutdown(wait=False, cancel_futures=True)
 
     check_url = multi_city_search_url(raw_segs, spec.get("cabin"), **spec_pax(spec))
     combos = pair_mc_legs(legs, currency)
@@ -3698,7 +3702,7 @@ def search_multi_city(spec: dict, currency: str) -> dict:
     price_pool = ThreadPoolExecutor(max_workers=min(4, max(1, len(raw_segs))))
     price_futs = [price_pool.submit(leg_price_index, seg.get("origins") or [],
                                     seg.get("destinations") or [], seg.get("date"),
-                                    spec.get("cabin"), seg.get("departure_time"))
+                                    spec.get("cabin"), seg.get("departure_time"), base_spec=spec)
                   for seg in raw_segs]
 
     # fan-out: only this many leg-1 candidates get expanded into full
@@ -3733,31 +3737,65 @@ def search_multi_city(spec: dict, currency: str) -> dict:
     # and only OBSERVED consecutive refusals (not an assumption) buy a quiet
     # period, so a genuine gate costs ~20s three times rather than forever,
     # while an un-gating recovers on its own.
-    probe_note, results = None, []
+    # The probe runs on its OWN thread, so the legs are harvested while it
+    # runs, and it is waited on only until the legs are done or
+    # MC_PROBE_WAIT_S from the start, whichever is later. Nov 11 in
+    # production: one probe ran 42.5s against its 12s budget (run_search
+    # checks the budget only BETWEEN attempts, and one attempt with its leg-2
+    # fan-out runs long) while the legs sat finished, waiting. A late probe
+    # costs the one-ticket comparison, which stays one tap away through the
+    # section's Google link; it no longer costs the user the legs.
+    def _probe():
+        _tp = time.monotonic()
+        _local.suppress_breaker = True
+        results, note = [], None
+        try:
+            results = run_search(RepresentativeSearch(), filters, sort,
+                                 top_n=fanout, budget_s=MC_PROBE_BUDGET_S) or []
+            note = (f"priced {len(results)} combinations in {time.monotonic() - _tp:.1f}s"
+                    if results else f"returned nothing in {time.monotonic() - _tp:.1f}s")
+        except SearchClientError as e:
+            note = f"{type(e).__name__} after {time.monotonic() - _tp:.1f}s"
+        finally:
+            _local.suppress_breaker = False
+        note_mc_probe(bool(results))
+        return results, note
+
+    probe_note, results, probe_fut = None, [], None
     with _mc_lock:
         quiet = _mc_probe["quiet_until"] > time.monotonic()
         strikes = _mc_probe["fails"]
     if quiet:
         probe_note = f"skipped (combined endpoint refused {strikes}x recently)"
     else:
-        _tp = time.monotonic()
-        _local.suppress_breaker = True
+        probe_pool = ThreadPoolExecutor(max_workers=1)
+        probe_fut = probe_pool.submit(_probe)
+        probe_pool.shutdown(wait=False)
+
+    # every leg, harvested while the probe runs: one shared deadline, one
+    # immediate retry of an empty leg; exception-proof (None = harvest again)
+    try:
+        legs = harvest_mc_legs(spec, raw_segs, leg_futs,
+                               deadline=mc_started + MC_LEGS_DEADLINE_S, started=mc_started)
+    except Exception:
+        legs = None
+    leg_pool.shutdown(wait=False)
+
+    if probe_fut is not None:
         try:
-            results = run_search(RepresentativeSearch(), filters, sort,
-                                 top_n=fanout, budget_s=MC_PROBE_BUDGET_S)
-            probe_note = (f"priced {len(results)} combinations in {time.monotonic() - _tp:.1f}s"
-                          if results else f"returned nothing in {time.monotonic() - _tp:.1f}s")
-        except SearchClientError as e:
-            probe_note = f"{type(e).__name__} after {time.monotonic() - _tp:.1f}s"
-        finally:
-            _local.suppress_breaker = False
-        note_mc_probe(bool(results))
+            results, probe_note = probe_fut.result(
+                timeout=max(0.5, mc_started + MC_PROBE_WAIT_S - time.monotonic()))
+        except FuturesTimeout:
+            results, probe_note = [], (f"still running at {time.monotonic() - mc_started:.0f}s; "
+                                       "shipped the legs without the one-ticket price")
+        except Exception as e:
+            results, probe_note = [], type(e).__name__
 
     if not results:
         price_pool.shutdown(wait=False, cancel_futures=True)
-        leg_pool.shutdown(wait=False)  # futures keep running; the fallback consumes them
         return multi_city_fallback(spec, currency, probe_note=probe_note, leg_futs=leg_futs,
-                                   deadline=mc_started + MC_LEGS_DEADLINE_S, started=mc_started)
+                                   legs=legs, deadline=mc_started + MC_LEGS_DEADLINE_S,
+                                   started=mc_started)
 
     # harvest the leg prices that finished while the expansion ran; anything
     # still pending gets only a short grace before we degrade to joint prices
@@ -3775,27 +3813,18 @@ def search_multi_city(spec: dict, currency: str) -> dict:
     # flights that top the standalone one-ways, so that comparison usually
     # never fires (all_matched False) and production quoted "$5,409 one
     # ticket" as best value in the same turn whose per-leg searches found
-    # $789 + $701 purchasable. The full per-leg payloads (leg_futs) already
-    # ran beside the probe; harvest them whole — they are also the per-leg
-    # board — and derive the floor from them. Exception-proof by design: any
+    # $789 + $701 purchasable. The legs harvested above are also the per-leg
+    # board; the floor comes from them. Exception-proof by design: any
     # surprise degrades to floor=None, which is exactly the old behavior.
-    floor_parts, floor_total, legs = [], None, []
+    floor_parts, floor_total = [], None
+    legs = legs or []
     try:
-        # the legs launched before the probe, so they are normally done; this
-        # is a grace (with room for one retry of an empty leg), capped by the
-        # shared multi-city deadline so the batch window is never blown
-        legs = harvest_mc_legs(
-            spec, raw_segs, leg_futs,
-            deadline=min(mc_started + MC_LEGS_DEADLINE_S, time.monotonic() + 15.0),
-            started=mc_started)
         bests = [min((r for r in leg_["results"] if isinstance(r.get("price"), (int, float))),
                      key=lambda r: r["price"], default=None) for leg_ in legs]
         if bests and all(b is not None for b in bests) and len(bests) == len(raw_segs):
             floor_parts, floor_total = bests, round(sum(b["price"] for b in bests))
     except Exception:
         floor_parts, floor_total = [], None
-    finally:
-        leg_pool.shutdown(wait=False, cancel_futures=True)
 
     itineraries = []
     for combo in results[:8]:
@@ -4490,8 +4519,12 @@ _KEY_IGNORE = {"summary", "assumptions"}
 
 
 def _spec_key(spec: dict) -> str:
+    # None means "not specified", exactly like an absent key (every reader
+    # uses spec.get); keeping it split identical searches into two upstream
+    # requests — Nov 11, every multi-city leg was fetched twice because the
+    # price index's spec lacked keys the leg spec carried as None
     return json.dumps(
-        {k: v for k, v in sorted(spec.items()) if k not in _KEY_IGNORE},
+        {k: v for k, v in sorted(spec.items()) if k not in _KEY_IGNORE and v is not None},
         sort_keys=True, default=str,
     )
 
