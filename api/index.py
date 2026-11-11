@@ -757,6 +757,7 @@ REQUEST_RULES = """How to handle requests:
 ANSWER_RULES = """
 Answering:
 - Deliberation is for hard calls. A single completed search with clear results needs the recommendation written directly; save extended thinking for multi-option comparisons, tricky constraints, or conflicting data.
+- When a search comes back empty, refused, or failed and an obvious alternative exists (each airport on its own, one-ways instead of a round trip, a nearby date), run it in the same turn. Never end a reply by offering to run a search you could have run.
 - Finish weighing before the first word of the reply. The reply states your conclusion and never revises itself mid-answer ("actually", "wait", "on second thought"); if you change your mind while writing, the reply must read as if you had decided that from the start.
 - Voice: you are a seasoned travel concierge. Courteous, composed, precise, warm but never gushing. Write in full sentences, the way a fine hotel's head concierge would speak. NEVER use em dashes or en dashes anywhere in your replies; use commas, periods, or a colon instead.
 - The user sees result cards for every search you run, so don't recite every flight. Lead with your recommendation and the key numbers (totals for multi-leg plans, including a note that hotels/ground costs aren't included), then the trade-offs that matter.
@@ -804,7 +805,8 @@ def compact_for_model(payload: dict) -> str:
             }
             for it in (payload.get("results") or [])[:5]
         ]
-        data = {"kind": "multi_city", "note": payload.get("message"), "options": rows}
+        data = {"kind": "round_trip_priced_as_two_one_ways" if payload.get("rt_fallback") else "multi_city",
+                "note": payload.get("message"), "options": rows}
         legs = payload.get("legs") or []
         if legs:
             # each leg's own option space, so the model can speak to "the
@@ -1879,7 +1881,7 @@ def google_flights_url(dep_code: str, arr_code: str, dep_date: str | None,
 
 
 def multi_city_search_url(segments: list, cabin: str | None = None,
-                          adults: int = 1, children: int = 0) -> str:
+                          adults: int = 1, children: int = 0, trip_type: int = 3) -> str:
     """The Google multi-city SEARCH page for these legs (no flights chosen).
 
     August 2: Google gated the multi-city GetShoppingResults endpoint behind
@@ -1903,7 +1905,7 @@ def multi_city_search_url(segments: list, cabin: str | None = None,
                 + _pb_msg(14, _pb_int(1, 1) + _pb_str(2, str(dst).upper())))
         body += _pb_party(adults, children) + _pb_int(9, seat) + _pb_int(14, 1)
         body += _pb_msg(16, _pb_int(1, -1))
-        body += _pb_int(19, 3)
+        body += _pb_int(19, trip_type)
         tfs = base64.urlsafe_b64encode(body).decode().rstrip("=")
         return f"https://www.google.com/travel/flights?tfs={tfs}&curr=USD"
     except Exception:
@@ -2650,7 +2652,8 @@ class RepresentativeSearch(SearchFlights):
 
 
 def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy,
-               top_n: int, budget_s: float = 35.0, max_attempt_s: float | None = None):
+               top_n: int, budget_s: float = 35.0, max_attempt_s: float | None = None,
+               refusal_exit: int | None = None):
     # Refusals come as HTTP 200 + a tiny body (parses to empty) or as raised
     # client errors. Both gates are answered the same way: retire the identity
     # (cookies + exit IP + fingerprint) so the retry is a different visitor,
@@ -2711,6 +2714,14 @@ def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy
             diag.append(f"a{i + 1} refused {wire.get('bytes', 0)}B {time.monotonic() - _ta:.0f}s")
         retire_identity()
         note_search_outcome(False)
+        # refusals arrive in BURSTS per request shape (Nov 11: the 3-airport
+        # NYC->HAN round trip refused 16/16 inside bursts while JFK->HAN
+        # alone and the one-ways were answered). When a caller has a
+        # decomposition waiting, more attempts of the same shape inside the
+        # same burst only burn the turn: hand over after `refusal_exit`.
+        if refusal_exit and len(diag) >= refusal_exit \
+                and all(" refused " in d for d in diag[-refusal_exit:]):
+            break
         time.sleep(0.4 * (i + 1) + random.uniform(0, 0.4))
     _local.search_diag = {
         "verdict": "empty" if answered_empty else ("error" if last_exc else "refused"),
@@ -2979,6 +2990,133 @@ def rescue_empty_multi_airport(spec: dict, origins: list, destinations: list, so
     return rows, note
 
 
+RT_LATE_RETRY_AT_S = 12.0   # the full round trip is retried this long after the start: bursts pass
+RT_RESCUE_END_S = 48.0      # every rescue path is done by here (the agent waits 55s per batch)
+
+
+def _rt_legs_spec(spec: dict) -> dict:
+    """A round trip as two one-way legs, in multi-city segment form."""
+    o, d = spec.get("origins") or [], spec.get("destinations") or []
+    return {**spec, "trip_type": "multi_city", "multi_city_segments": [
+        {"origins": o, "destinations": d, "date": spec.get("departure_date"),
+         "departure_time": spec.get("departure_time")},
+        {"origins": d, "destinations": o, "date": spec.get("return_date"),
+         "departure_time": spec.get("return_time")},
+    ]}
+
+
+def rescue_round_trip(spec: dict, origins: list, destinations: list, sort, filters,
+                      started: float) -> dict:
+    """A round trip Google would not answer, tried as DIFFERENT request shapes
+    in parallel, spread across the time window.
+
+    Nov 11, NYC -> Hanoi Mar 4-20: the three-airport round trip was refused
+    on every attempt across two turns (16/16, Google's ~96-byte error body),
+    and the user got nothing twice, while in the same minutes JFK -> HAN alone
+    and the one-ways were answered. Refusals come in bursts per request
+    shape, and the ladder's four attempts all land inside one burst. So:
+      * the full round trip again, RT_LATE_RETRY_AT_S after the start;
+      * each airport pair as its own round trip (multi-airport only);
+      * both directions as one-ways (each with its own airport rescue).
+    The caller prefers them in that order, and ships whatever is real.
+    """
+    deadline = started + RT_RESCUE_END_S
+    pairs = ([(o, d) for o in origins for d in destinations][:MULTI_RESCUE_MAX_PAIRS]
+             if len(origins) > 1 or len(destinations) > 1 else [])
+
+    def rt_ladder(o_list, d_list, wait_until=None):
+        if wait_until:
+            time.sleep(max(0.0, wait_until - time.monotonic()))
+        remaining = deadline - time.monotonic()
+        if remaining < 6:
+            return [], [], {"verdict": "skipped", "attempts": ["no time left"]}
+        per_attempt = min(28.0, remaining * 0.6)
+        searcher = RepresentativeSearch()
+        f = filters if o_list is None else build_filters(
+            {**spec, "origins": [a.name for a in o_list], "destinations": [a.name for a in d_list]},
+            o_list, d_list, show_all_results=True)
+        try:
+            combos = run_search(searcher, f, sort, top_n=10,
+                                budget_s=max(1.0, remaining - per_attempt), max_attempt_s=per_attempt) or []
+            verdict = search_verdict()
+        except Exception as e:
+            combos, verdict = [], getattr(e, "search_diag", None) or {"verdict": "error"}
+        return combos, list(getattr(searcher, "last_outbounds", None) or []), verdict
+
+    legs_spec = _rt_legs_spec(spec)
+    raw_segs = legs_spec["multi_city_segments"]
+    pool = ThreadPoolExecutor(max_workers=2 + len(raw_segs) + max(1, len(pairs)))
+    try:
+        late = pool.submit(rt_ladder, None, None, started + RT_LATE_RETRY_AT_S)
+        pair_futs = [(o, d, pool.submit(rt_ladder, [o], [d])) for o, d in pairs]
+        leg_futs = [pool.submit(cached_execute_spec, _mc_leg_spec(legs_spec, seg)) for seg in raw_segs]
+
+        def get(fu, until):
+            try:
+                return fu.result(timeout=max(0.1, until - time.monotonic()))
+            except Exception:
+                return [], [], {"verdict": "timed out"}
+
+        merged_c, merged_o, served, refused = [], [], [], []
+        for o, d, fu in pair_futs:
+            c, ob, v = get(fu, deadline)
+            if c or ob:
+                merged_c += c
+                merged_o += ob
+                served.append(f"{o.name}→{d.name}")
+            else:
+                refused.append(f"{o.name}→{d.name} ({v.get('verdict')})")
+        # the late full retry is the complete answer (every airport, mixed
+        # returns). With per-airport data already in hand it gets only a
+        # bounded chance to upgrade it; without, the whole window.
+        late_until = min(deadline, max(time.monotonic(), started + 30.0)) if served else deadline
+        combos, outs, late_v = get(late, late_until)
+        if combos or outs:
+            return {"combos": combos, "outbounds": outs, "legs": None,
+                    "note": " (Google refused this round trip at first; a retry moments later was answered.)"}
+        if merged_c or merged_o:
+            return {"combos": merged_c, "outbounds": merged_o, "legs": None, "note": (
+                " Google refused this as one multi-airport round trip, so each airport was "
+                f"searched as its own round trip: priced {', '.join(served)}"
+                + (f"; refused {', '.join(refused)} (NOT evidence of no service)" if refused else "")
+                + ". Returns go back to the departure airport; mixed-airport returns were not priced.")}
+        legs = harvest_mc_legs(legs_spec, raw_segs, leg_futs, deadline, started=started)
+        return {"combos": [], "outbounds": [], "legs": legs, "note": None, "late": late_v,
+                "refused_pairs": refused}
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+def round_trip_as_one_ways(spec: dict, currency: str, legs: list, started: float) -> dict:
+    """The last resort that still answers: both directions as one-way tickets,
+    on the per-leg board, with Google's own round-trip page one tap away."""
+    legs_spec = _rt_legs_spec(spec)
+    raw_segs = legs_spec["multi_city_segments"]
+    payload = multi_city_fallback(legs_spec, currency, legs=legs, started=started,
+                                  probe_note="round-trip pricing refused; priced as two one-ways")
+    payload["rt_fallback"] = True
+    payload["combined_check_url"] = multi_city_search_url(raw_segs, spec.get("cabin"),
+                                                          trip_type=1, **spec_pax(spec))
+    route = mc_route_text(raw_segs)
+    if payload.get("results"):
+        lead = (f"Google would not price {route} as a ROUND TRIP for this session (refused on "
+                "every attempt, including a retry moments later and each airport on its own). "
+                "BOTH directions were priced as one-way tickets instead and are on the user's "
+                "screen as a two-leg board; the combos are the best-value pairings and their "
+                "totals are real and bookable (two separate tickets: no protection between them, "
+                "bags per ticket). A single round-trip ticket may cost less or more: the section "
+                "links Google's round-trip page for these exact dates, so point the user there for "
+                "the bundled price and never claim round-trip pricing does not exist. These "
+                "one-way searches are ALREADY DONE: do not offer to run them.")
+    else:
+        lead = (f"Google would not price {route} as a round trip for this session, and not "
+                "both directions came back as one-ways either, despite retries and per-airport "
+                "searches. Show whatever leg did come back, give the user the Google round-trip "
+                "link in this section, and do not claim the route is unavailable.")
+    payload["message"] = lead + mc_legs_note(legs)
+    return stamp_party(payload, spec)
+
+
 def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: str) -> dict:
     fd_started = time.monotonic()
     filters = build_filters(spec, origins, destinations, show_all_results=True)
@@ -2986,6 +3124,8 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
     searcher = RepresentativeSearch()
     multi_ow = (spec.get("trip_type") != "round_trip"
                 and (len(origins) > 1 or len(destinations) > 1))
+    is_rt = spec.get("trip_type") == "round_trip"
+    multi_rt = is_rt and (len(origins) > 1 or len(destinations) > 1)
     combined_exc = None
     # expansions run genuinely in parallel now (per-thread curl handles), so
     # 10 costs about what 2 did serially; the July 25 multi-airport timeouts
@@ -2993,14 +3133,17 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
     try:
         # a healthy search succeeds in seconds; a multi-airport one-way that
         # is being refused gives up sooner so the per-pair rescue has time
+        # every round trip and multi-airport one-way has a decomposition
+        # waiting, so a refusal burst hands over after two attempts
         results = run_search(searcher, filters, sort, top_n=10,
-                             budget_s=MULTI_COMBINED_BUDGET_S if multi_ow else 35.0)
+                             budget_s=MULTI_COMBINED_BUDGET_S if (multi_ow or multi_rt) else 35.0,
+                             refusal_exit=2 if (multi_ow or is_rt) else None)
     except SearchClientError as e:
         # the ladder failed outright, but if any attempt got the outbound
         # list, the degraded path below still turns it into a usable answer
-        if spec.get("trip_type") == "round_trip" and getattr(searcher, "last_outbounds", None):
+        if is_rt and getattr(searcher, "last_outbounds", None):
             results = []
-        elif multi_ow:
+        elif multi_ow or is_rt:
             results, combined_exc = [], e
         else:
             raise
@@ -3012,6 +3155,16 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
         rescued, rescue_note = rescue_empty_multi_airport(spec, origins, destinations, sort, fd_started)
         if rescued:
             results = rescued
+        elif combined_exc is not None:
+            raise combined_exc
+    if is_rt and not results and not getattr(searcher, "last_outbounds", None):
+        rt = rescue_round_trip(spec, origins, destinations, sort, filters, fd_started)
+        if rt["combos"] or rt["outbounds"]:
+            results, combined_exc = rt["combos"], None
+            searcher.last_outbounds = rt["outbounds"]
+            rescue_note = rt["note"]
+        elif any(lg.get("results") for lg in (rt.get("legs") or [])):
+            return round_trip_as_one_ways(spec, currency, rt["legs"], fd_started)
         elif combined_exc is not None:
             raise combined_exc
 
@@ -3068,6 +3221,8 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
                 spec, origins, destinations,
                 getattr(searcher, "last_outbounds", None) or [], currency)
             if degraded:
+                if rescue_note:
+                    degraded["message"] += rescue_note
                 return degraded
         if absence_proven(combined_verdict):
             message = "No flights found for that search. Try different dates, nearby airports, or fewer filters."
@@ -3268,6 +3423,8 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
             dest_of=_dest_of_result, price_of=lambda f: f.price)
         if bd:
             message += " " + bd + " (from-prices; all still bookable via the board)"
+        if rescue_note:
+            message += rescue_note
         if arrival_note:
             message = f"{arrival_note}\n{message}"
         return stamp_party({
@@ -4792,6 +4949,8 @@ def execute_spec(spec: dict) -> dict:
     payload = _execute_spec(spec)
     try:
         payload.update(section_header(roll_past_dates(spec)[0]))
+        if payload.get("rt_fallback"):
+            payload["tags"] = ["Priced as two one-way tickets"] + payload["tags"]
     except Exception:
         pass  # a title is a nicety; the search result is the product
     return payload

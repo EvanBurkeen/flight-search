@@ -1179,9 +1179,8 @@
                      multi-city page for these exact legs -->
                 <a class="show-all" style="display: block; text-align: center; text-decoration: none;"
                    x-show="sec.type === 'multicity' && sec.combined_check_url"
-                   :href="sec.combined_check_url" target="_blank" rel="noopener noreferrer">
-                  Price the combined one-ticket itinerary on Google →
-                </a>
+                   :href="sec.combined_check_url" target="_blank" rel="noopener noreferrer"
+                   x-text="sec.rt_fallback ? 'Price this as one round-trip ticket on Google →' : 'Price the combined one-ticket itinerary on Google →'"></a>
 
                 <!-- multi-city leg board: every leg's own one-way list, chosen
                      per leg and totalled as separate tickets (each leg books

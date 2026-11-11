@@ -138,6 +138,14 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
   what a "fix" REMOVES, not just what it adds.
 
 **Google's data layer**
+- **Refusals come in bursts per REQUEST SHAPE.** Nov 11: one three-airport
+  round trip was refused 16/16 over two turns while a single-airport round
+  trip and the one-ways on the same route were answered minutes apart, and
+  repeated trials found no deterministic trigger. Retrying the same shape
+  inside a burst only burns the turn; a DIFFERENT shape (each airport alone,
+  one-ways instead of a round trip, the same request a few seconds later) is
+  the retry that works. Every round trip and multi-airport search now has
+  such a decomposition (`rescue_round_trip`, `rescue_empty_multi_airport`).
 - **Refused is not an answer.** A refusal parses to no chunk at all; Google
   saying "no flights" is a well-formed chunk with no rows. Only the second is
   evidence of absence (Nov 11: a dedicated SGN→JFK search was refused every
@@ -327,6 +335,10 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
   one deadline inside the agent's 55s batch; combos are value-ranked and keep
   the outright cheapest pairing; the route text keeps every city of an
   open-jaw trip.
+- A round trip Google refuses never ends with nothing while any shape is
+  answered: a late full retry, each airport as its own round trip, then both
+  directions as one-ways (bookable separate-ticket totals, Google's
+  round-trip page linked), all inside the agent's 55s batch.
 - "No service" is licensed only by a search Google ANSWERED with no flights.
   A refused or failed search, or probe, is reported as not verified — never
   as absence — and a multi-airport one-way that comes back with nothing is
@@ -608,6 +620,37 @@ fully exercisable locally.
   lakes; run it, then bump the `?v=N` cache-buster on the script tag in index.html).
 
 ## Changelog
+
+**November 11, 2026 (the round trip Google would not answer)**
+- Evan: "is round trip NYC-Hanoi March 4-20 cheaper?" got "Google didn't
+  answer", twice, and then an OFFER to search one-ways. "The whole value add
+  of this website is reliability." The new per-attempt verdict named it in
+  one read: the three-airport round trip was refused 16/16 across two turns
+  (Google's ~96-byte error body, 1-3s each) while the JFK->ORD control
+  passed. Bisected in prod and locally: JFK->HAN alone and the one-ways were
+  answered minutes apart; repeated trials showed no deterministic trigger
+  (sort, airport) — refusals come in BURSTS per request shape, and the
+  ladder's four attempts land inside one burst.
+- Fix, as a class: a search Google refuses is tried as DIFFERENT shapes,
+  spread across the window, and ships whatever is real.
+  - `run_search(..., refusal_exit=2)`: when a decomposition is waiting
+    (every round trip, every multi-airport one-way), two consecutive refusals
+    hand over instead of burning the turn on the same shape.
+  - `rescue_round_trip`: in parallel, the full round trip again 12s later
+    (`RT_LATE_RETRY_AT_S`), each airport pair as its own round trip, and both
+    directions as one-ways (each with its own airport rescue), all done by
+    48s (`RT_RESCUE_END_S`). Preference: full > per-airport (merged, the
+    refused pairs named, never "no service") > two one-ways.
+  - `round_trip_as_one_ways`: the last resort ships both directions on the
+    per-leg board with real, bookable separate-ticket totals, Google's
+    ROUND-TRIP page for the bundled price, a "Priced as two one-way tickets"
+    tag, and a note telling the model the one-ways are already done.
+  - Prompt: when a search fails and an obvious alternative exists, run it in
+    the same turn; never end a reply offering a search you could have run.
+- Measured live on the exact failing round trip (which got 0 before): three
+  runs, three answers: per-airport rescue 10 pairings + 24 outbounds in
+  17.2s; late retry 7 pairings in 26.0s; first try 3 pairings in 12.4s.
+  6 checks added.
 
 **November 11, 2026 (Hà Nội, and the reply that changed its mind)**
 - Post-deploy verification of the section titles passed its own test (two

@@ -425,7 +425,7 @@ check("expansion never exceeds its budget", len(_kept) == 10, f"{len(_kept)}")
 _deg_outs = [result([leg("JFK", "FLL", "2026-08-08T07:34", "2026-08-08T10:37", "B6", "1112")], 277.0),
              result([leg("EWR", "FLL", "2026-08-08T09:00", "2026-08-08T12:05", "UA", "310")], 297.0)]
 _real_run_search = app.run_search
-def _fake_run_search(search, filters, sort, top_n, budget_s=35.0):
+def _fake_run_search(search, filters, sort, top_n, budget_s=35.0, **_k):
     search.last_outbounds = _deg_outs
     return []
 app.run_search = _fake_run_search
@@ -796,7 +796,7 @@ _ewr_rows = [result([leg("SGN", "EWR", future(60) + "T10:00", future(61) + "T08:
                     900.0 + i, stops=1, duration=1500) for i in range(3)]
 
 
-def _poisoned_rs(search, filters, sort, top_n, budget_s=35.0, max_attempt_s=None):
+def _poisoned_rs(search, filters, sort, top_n, budget_s=35.0, max_attempt_s=None, **_k):
     dests = {a[0].name for a in filters.flight_segments[0].arrival_airport}
     if dests == {"EWR"}:
         app._local.search_diag = {"verdict": "ok", "attempts": ["a1 ok 3"]}
@@ -866,6 +866,78 @@ check("a probe that overruns cannot hold finished legs hostage",
       f"{_dt_probe:.1f}s, probe={_mc_slow.get('combined_probe')}")
 check("...and the legs it shipped still pair into combos",
       any(r["total_price"] == 1095 for r in _mc_slow.get("results") or []))
+
+# Nov 11, "is round trip NYC-Hanoi Mar 4-20 cheaper?": the three-airport
+# round trip was refused 16/16 across two turns (Google's ~96-byte error,
+# in BURSTS per request shape) and the user got nothing twice, while JFK->HAN
+# alone and the one-ways were answered minutes apart. A refused round trip is
+# now tried as different shapes in parallel: a late full retry, each airport
+# as its own round trip, and both directions as one-ways.
+_n_att = {"n": 0}
+
+
+def _always_refused(*a, **k):
+    _n_att["n"] += 1
+    return None
+
+
+app.run_search(types.SimpleNamespace(search=_always_refused), app.build_filters(
+    {"departure_date": future(30)}, app.resolve_airports(["JFK"])[0], app.resolve_airports(["ORD"])[0]),
+    app.SortBy.CHEAPEST, top_n=10, budget_s=30, refusal_exit=2)
+check("a refusal burst hands over to the decomposition after two attempts",
+      _n_att["n"] == 2 and app.search_verdict()["verdict"] == "refused", f"{_n_att['n']} attempts")
+
+_han_outs = [result([leg("JFK", "HAN", future(110) + "T10:30", future(111) + "T22:25", "OZ", "221")], 1180.0, stops=1, duration=1435),
+             result([leg("JFK", "HAN", future(110) + "T12:00", future(111) + "T21:45", "KE", "82")], 1212.0, stops=1, duration=1305)]
+
+
+def _rt_by_shape(search, filters, sort, top_n, budget_s=35.0, **_k):
+    origins = {a[0].name for a in filters.flight_segments[0].departure_airport}
+    if origins == {"JFK"}:          # the single-airport round trip is answered
+        search.last_outbounds = list(_han_outs)
+        app._local.search_diag = {"verdict": "ok", "attempts": ["a1 ok"]}
+        return []
+    app._local.search_diag = {"verdict": "refused", "attempts": ["a1 refused 96B 1s", "a2 refused 96B 1s"]}
+    return []
+
+
+def _ow_legs(spec):
+    out = "HAN" in spec["destinations"]
+    o, d = (spec["origins"][0], "HAN") if out else ("HAN", spec["destinations"][0])
+    day = spec["departure_date"]
+    return {"type": "flights", "message": "leg", "results": [
+        _mc_row("OZ" if out else "CI", "221" if out else "782", 442.0 if out else 690.0, 1435, 1, day, o, d)]}
+
+
+_rt_spec = {"trip_type": "round_trip", "origins": ["JFK", "EWR"], "destinations": ["HAN"],
+            "departure_date": future(110), "return_date": future(126)}
+_saved_rt = (app.run_search, app.cached_execute_spec, app.RT_LATE_RETRY_AT_S)
+app.RT_LATE_RETRY_AT_S = 0.0
+app.run_search, app.cached_execute_spec = _rt_by_shape, _ow_legs
+_o_rt, _ = app.resolve_airports(["JFK", "EWR"]); _d_rt, _ = app.resolve_airports(["HAN"])
+_rt_pair = app.search_fixed_dates(dict(_rt_spec), _o_rt, _d_rt, "USD")
+app.run_search = lambda search, *a, **k: (setattr(app._local, "search_diag",
+                                                  {"verdict": "refused", "attempts": ["a1 refused 96B 1s"]}), [])[1]
+_rt_ow = app.execute_spec(dict(_rt_spec))
+app.run_search, app.cached_execute_spec, app.RT_LATE_RETRY_AT_S = _saved_rt
+check("a refused multi-airport round trip is rescued airport by airport",
+      _rt_pair.get("type") == "itineraries" and len(_rt_pair.get("more_outbounds") or []) == 2
+      and "searched as its own round trip" in _rt_pair["message"] and "EWR→HAN" in _rt_pair["message"],
+      f"type={_rt_pair.get('type')}")
+check("when every round-trip shape is refused, both directions still come back as one-ways",
+      _rt_ow.get("type") == "multicity" and _rt_ow.get("rt_fallback") is True
+      and [lg["count"] for lg in _rt_ow.get("legs") or []] == [1, 1]
+      and (_rt_ow.get("results") or [{}])[0].get("total_price") == 1132,
+      f"type={_rt_ow.get('type')} totals={[r.get('total_price') for r in _rt_ow.get('results') or []]}")
+check("...with Google's ROUND-TRIP page one tap away and the model told not to offer the search",
+      tfs_field(_rt_ow.get("combined_check_url", "tfs=").split("&")[0], 19) == 1
+      and "ALREADY DONE: do not offer" in _rt_ow["message"]
+      and "never claim round-trip pricing does not exist" in _rt_ow["message"])
+check("...titled as the round trip it is, and says how it was priced",
+      _rt_ow.get("title") == "New York to Hanoi" and "Round trip" in _rt_ow.get("subtitle", "")
+      and _rt_ow.get("tags", [None])[0] == "Priced as two one-way tickets")
+check("the concierge runs the obvious fallback instead of offering it",
+      "Never end a reply by offering to run a search you could have run" in app.assistant_system_prompt())
 
 _fe_mc = open(os.path.join(ROOT, "public", "index.html")).read()
 check("multi-city opens on a per-leg board, filtered by the same bar",
