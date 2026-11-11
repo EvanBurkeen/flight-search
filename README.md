@@ -53,6 +53,9 @@ this file, then **"Lessons the hard way"** below before debugging anything.
   data gap (small airports, or genuinely no service).
 - **Env (Vercel only, never in git):** `ANTHROPIC_API_KEY`, `FLI_PROXY`
   (IPRoyal rotating US-residential proxy; the fix for Google throttling).
+  Trip briefings add `OWNER_KEY`, `KV_REST_API_URL` + `KV_REST_API_TOKEN`
+  (Upstash, injected by Vercel Storage), `RESEND_API_KEY`, `BRIEFING_FROM`
+  and `CRON_SECRET`; see Operations. Without them the feature is inert.
 - **Costs Evan cares about:** Anthropic per-turn (~1-2 cents on Sonnet 5;
   `debug_timings` reports the real figure per turn as `est_cost_usd`, computed
   from each call's usage block at list prices — Sonnet's intro pricing
@@ -71,8 +74,9 @@ this file, then **"Lessons the hard way"** below before debugging anything.
   NOT depend on requestAnimationFrame alone (browsers starve rAF in hidden
   tabs — a reply would never finish typing or finalize; the watchdog timer in
   `startTyping` is load-bearing).
-- **Roadmap shelf (discussed, not built):** price watches (cron + email),
-  login + saved trips, real booking via Duffel. (Search-result caching shipped
+- **Roadmap shelf (discussed, not built):** login + saved trips, real
+  booking via Duffel. (Price watches shipped Nov 11 as trip briefings: owner
+  only, cron + email, no login. Search-result caching shipped
   July 24; the calendar heatmap and streaming replies shipped July 25; the
   cross-turn results ledger — the useful slice of "trip memory" without login
   — and price context shipped July 28; reload persistence + recent-trip
@@ -375,6 +379,15 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
   cut each keep at least one option per destination airport, and search
   messages state per-airport counts and cheapest fares over the full
   pre-cut set whenever more than one destination airport is in play.
+- Trip briefings are owner-only: every `/api/watches` route but unsubscribe
+  answers 401 without the site key, and on Vercel an unset `OWNER_KEY` turns
+  the whole feature off (503) rather than open. The cron runs only with
+  `CRON_SECRET`. A check that got no fares never sends an email (the next run
+  retries), a trip whose dates have passed stops itself, a threshold
+  suppresses a briefing until a price moves by at least that much, and every
+  recipient gets their own one-click unsubscribe token (RFC 8058 headers)
+  that cannot touch anyone else's subscription. Only a POST unsubscribes;
+  a GET (what mail scanners send) shows the confirm button and changes nothing.
 
 ## Stack
 
@@ -388,6 +401,7 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
 | Coordinates | `airportsdata` (IATA → lat/lon) for route maps |
 | Frontend | Single static [public/index.html](public/index.html), Alpine.js, no build step |
 | Map data | [public/world.js](public/world.js): Natural Earth 110m land + lakes as SVG paths |
+| Trip briefings | `/api/watches` (owner-only CRUD + send now), `/api/watches/unsubscribe` (per-recipient token), `/api/watches/run` (the daily Vercel cron, `0 12 * * *` = 12:00 UTC, ±59 min on Hobby); storage is Upstash Redis over REST (a JSON file in the temp dir locally), email is Resend's HTTP API (written to a local outbox folder when no key is set) |
 
 `ANTHROPIC_API_KEY` lives only in Vercel env. Optional `FLI_PROXY` env routes all
 Google traffic through a proxy (see Operations).
@@ -552,7 +566,19 @@ airline logos (Google's own marks, the IATA code underneath as a fallback);
 every results section opens with a type icon, a title built from the search
 itself (place names, then codes, trip type and dates with the year) and tags
 for every filter; the concierge's replies carry the brand mark as an avatar;
-the best-value card is outlined in the accent.
+the best-value card is outlined in the accent · **trip briefings** (owner
+only, invisible to visitors: the footer's "Trip briefings" link takes the
+site key once per device, kept in localStorage as `fa_owner_key`; then a
+Watch button sits on every results section and a Briefings button in the
+header. Watch takes recipients as chips (you plus friends, up to 10, comma or
+Enter), a cadence of Daily / Every 3 days / Weekly, and an optional "only
+when a price moves by $X"; the first briefing goes out at once. The email
+names the best-value, cheapest, fastest and cheapest-nonstop flights with
+Book links, what changed since the last briefing, a cheaper nearby date when
+the price context found one, a trend strip once there are 3 checks, a short
+summary written by Haiku from the numbers only, and an "Open in Flight
+Assistant" link (`/?q=<the query>`, which runs the search on load). The
+Briefings panel edits recipients, sends now, pauses, resumes and stops.)
 
 ## Local development
 
@@ -568,6 +594,12 @@ codes, "round", "flex/weekend", "compare", "multi A B C", "carry-on/bag" and
 "checked" (common English words that are also IATA codes — THE, FOR, AND — are
 ignored). The stub emits the same SSE events as the real loop, so streaming is
 fully exercisable locally.
+
+Trip briefings work locally with no accounts: the site key is `dev` while
+`OWNER_KEY` is unset (never on Vercel), watches live in
+`$TMPDIR/flight_watches.json` (`WATCH_LOCAL_STORE` overrides), and emails
+are written as HTML files to `$TMPDIR/flight_outbox/` (`WATCH_OUTBOX`
+overrides) instead of being sent. Open one in a browser to review a briefing.
 
 ## Operations
 
@@ -618,8 +650,63 @@ fully exercisable locally.
   multi-city is slow (fan-out capped at `top_n=4`, `maxDuration` 300s).
 - `world.js` is generated by `scripts/build_world.py` (Natural Earth 110m land +
   lakes; run it, then bump the `?v=N` cache-buster on the script tag in index.html).
+- **Trip briefings setup (one time, Evan only; keys never go in git or chat):**
+  1. Resend (resend.com): add and verify a sending domain (DNS records at the
+     registrar; a subdomain such as `mail.evanburkeen.com` keeps it apart
+     from personal mail), create an API key, and set `RESEND_API_KEY` and
+     `BRIEFING_FROM` (e.g. `Flight Assistant <briefings@mail.evanburkeen.com>`)
+     in Vercel. Until a domain is verified, Resend's sandbox sender
+     `onboarding@resend.dev` delivers ONLY to the Resend account's own
+     address, so friends get nothing. Free tier: 3,000 emails a month, 100 a day.
+  2. Vercel project, Storage tab: add Upstash Redis (free tier is plenty).
+     It injects `KV_REST_API_URL` and `KV_REST_API_TOKEN`; the code also
+     accepts `UPSTASH_REDIS_REST_URL` / `_TOKEN`.
+  3. Set `OWNER_KEY` (a long random string, e.g. `openssl rand -hex 32`) and
+     `CRON_SECRET` (another one; Vercel sends it as `Authorization: Bearer`
+     to the cron), then redeploy.
+  4. On each device, footer "Trip briefings", paste the site key once.
+  Hobby runs the cron once a day within the scheduled hour, which is why
+  Daily is the fastest cadence; a watch is due again after its period minus
+  3 hours of slack, so cron jitter never skips a day. One cron run checks
+  due watches 3 at a time inside a 240s budget (`maxDuration` is 300s); a
+  watch that misses the budget is simply due again tomorrow.
 
 ## Changelog
+
+**November 11, 2026 (trip briefings by email)**
+- Evan: "I want a button which will allow me to get X frequency emails
+  thats a briefing like 'here's the flight or trip you asked me to look at,
+  here is the best flight, cheapest flight, here's how it's changed'", for
+  himself, with friends' emails added as recipients. Shipped as **trip
+  briefings**: Watch on any results section, Daily / Every 3 days / Weekly
+  (Vercel Hobby crons run once a day, so Daily is the floor), optional
+  "only when a price moves by $X", a short Haiku summary written from the
+  numbers.
+- Re-runs the SAME search, not a re-asked question: `execute_spec` now
+  ships `watch_spec` (the rolled spec, minus prose fields) and the watch
+  stores that, so a briefing compares like with like and never pays for a
+  model turn to search. Section titles come from `section_header`, so the
+  email and the panel name the trip exactly as the page did.
+- Owner-only without logins: a private site key (`OWNER_KEY`, sent as
+  `X-Owner-Key`, compared in constant time) gates every write; visitors see
+  no Watch button at all. On Vercel an unset key turns the feature off
+  rather than open. Friends never need the site: each recipient gets an
+  unsubscribe token of their own, honoured by the confirm button behind the
+  footer link or the mail client's one-click List-Unsubscribe. Opening the
+  link only shows the button: mail security scanners (Safe Links, Mimecast)
+  open every link in a message, and a link that acted on open would drop a
+  friend the first time a briefing reached a corporate inbox.
+- Honest by construction: a run with no fares sends nothing, the "since
+  last time" deltas compare against what was last SENT (not merely
+  checked), the nearby-date line comes from the existing price context,
+  and the fallback summary (no API key) is a plain restatement of the
+  same numbers.
+- `/?q=<query>` now runs that search on load, so the email's "Open in
+  Flight Assistant" lands on live results.
+- 19 new checks under "Trip briefings" pin the gate, the unsubscribe
+  isolation (and that merely opening the link changes nothing), the no-data
+  rule, expiry, the threshold, HTML escaping, cron auth and the frontend
+  wiring; README drift checks pin the new routes, env vars and cron schedule.
 
 **November 11, 2026 (the round trip Google would not answer)**
 - Evan: "is round trip NYC-Hanoi March 4-20 cheaper?" got "Google didn't

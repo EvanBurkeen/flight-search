@@ -4948,7 +4948,12 @@ def section_header(spec: dict) -> dict:
 def execute_spec(spec: dict) -> dict:
     payload = _execute_spec(spec)
     try:
-        payload.update(section_header(roll_past_dates(spec)[0]))
+        rolled = roll_past_dates(spec)[0]
+        # the exact search behind this section, so "Watch this trip" can
+        # re-run it on a schedule (cosmetic fields dropped)
+        payload["watch_spec"] = {k: v for k, v in rolled.items()
+                                 if k not in ("summary", "assumptions") and v is not None}
+        payload.update(section_header(rolled))
         if payload.get("rt_fallback"):
             payload["tags"] = ["Priced as two one-way tickets"] + payload["tags"]
     except Exception:
@@ -5346,3 +5351,713 @@ async def search(request: Request):
         })
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# ==========================================================================
+# Trip briefings ("watches")
+#
+# Evan, Nov 11: "a button which will allow me to get X frequency emails
+# that's a briefing: here's the trip you asked me to look at, the best
+# flight, the cheapest flight, how it's changed." Owner-only by design: a
+# private site key (OWNER_KEY) gates creating and managing watches, so the
+# site cannot be used to email strangers; Evan adds friends as recipients,
+# and every recipient gets their own one-click unsubscribe.
+#
+# Storage is Upstash Redis over its REST API (Vercel Marketplace sets
+# KV_REST_API_URL / KV_REST_API_TOKEN); outside Vercel a local JSON file
+# stands in so the whole flow runs in development. Email goes through
+# Resend's HTTP API (RESEND_API_KEY, BRIEFING_FROM); in development the
+# briefing is written to a local outbox instead. A daily Vercel cron calls
+# /api/watches/run with CRON_SECRET. No new dependencies: stdlib HTTP only.
+# ==========================================================================
+import hmac as _hmac
+import html as _html
+import tempfile as _tempfile
+import urllib.error as _urlerr
+import urllib.request as _urlreq
+
+SITE_URL = (os.environ.get("SITE_URL") or "https://flights.evanburkeen.com").rstrip("/")
+WATCH_FREQUENCIES = {1: "Daily", 3: "Every 3 days", 7: "Weekly"}
+WATCH_MAX = 25                 # watches per site
+WATCH_RECIPIENTS_MAX = 10      # people per watch
+WATCH_HISTORY_MAX = 90         # checks remembered per watch (the trend line)
+WATCH_DUE_SLACK_S = 3 * 3600   # the daily cron fires within an hour; never skip a day
+WATCH_RUN_BUDGET_S = 240.0     # one cron invocation (the function may run 300s)
+_EMAIL_RE = re.compile(r"^[^@\s,;<>]+@[^@\s,;<>]+\.[^@\s,;<>]{2,}$")
+_ON_VERCEL = bool(os.environ.get("VERCEL"))
+_LOCAL_KV_PATH = os.environ.get("WATCH_LOCAL_STORE") or os.path.join(_tempfile.gettempdir(), "flight_watches.json")
+_LOCAL_OUTBOX = os.environ.get("WATCH_OUTBOX") or os.path.join(_tempfile.gettempdir(), "flight_outbox")
+_local_kv_lock = threading.Lock()
+
+
+class WatchError(ValueError):
+    """A request the owner can fix (bad email, nothing to watch, not configured)."""
+
+
+def _kv_conf() -> tuple:
+    url = os.environ.get("KV_REST_API_URL") or os.environ.get("UPSTASH_REDIS_REST_URL")
+    tok = os.environ.get("KV_REST_API_TOKEN") or os.environ.get("UPSTASH_REDIS_REST_TOKEN")
+    return (url.rstrip("/"), tok) if url and tok else (None, None)
+
+
+def _kv(cmd: list):
+    """One Redis command. Upstash REST in production; a JSON file in dev."""
+    url, tok = _kv_conf()
+    if url:
+        req = _urlreq.Request(url, data=json.dumps(cmd).encode(), method="POST", headers={
+            "Authorization": f"Bearer {tok}", "Content-Type": "application/json"})
+        with _urlreq.urlopen(req, timeout=10) as r:
+            out = json.loads(r.read().decode())
+        if isinstance(out, dict) and out.get("error"):
+            raise RuntimeError(f"storage: {out['error']}")
+        return out.get("result") if isinstance(out, dict) else out
+    if _ON_VERCEL:
+        # an instance's /tmp is ephemeral: silently "saving" there would lose
+        # every watch on the next cold start
+        raise WatchError("Briefing storage isn't connected yet: add Upstash Redis to this "
+                         "project in Vercel (Storage tab), then redeploy.")
+    with _local_kv_lock:
+        try:
+            with open(_LOCAL_KV_PATH) as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            data = {}
+        op, key = str(cmd[0]).upper(), cmd[1]
+        res = None
+        if op == "GET":
+            res = data.get(key)
+        elif op == "SET":
+            data[key], res = cmd[2], "OK"
+        elif op == "DEL":
+            res = 1 if data.pop(key, None) is not None else 0
+        elif op in ("SADD", "SREM"):
+            members = set(data.get(key) or [])
+            (members.add if op == "SADD" else members.discard)(cmd[2])
+            data[key], res = sorted(members), 1
+        elif op == "SMEMBERS":
+            res = list(data.get(key) or [])
+        with open(_LOCAL_KV_PATH, "w") as fh:
+            json.dump(data, fh)
+        return res
+
+
+def watch_load(wid: str) -> dict | None:
+    raw = _kv(["GET", f"watch:{wid}"])
+    return json.loads(raw) if raw else None
+
+
+def watch_save(w: dict) -> None:
+    _kv(["SET", f"watch:{w['id']}", json.dumps(w, default=str)])
+    _kv(["SADD", "watches", w["id"]])
+
+
+def watch_delete(wid: str) -> None:
+    _kv(["DEL", f"watch:{wid}"])
+    _kv(["SREM", "watches", wid])
+
+
+def watch_all() -> list[dict]:
+    return [w for w in (watch_load(i) for i in (_kv(["SMEMBERS", "watches"]) or [])) if w]
+
+
+def owner_ok(request) -> bool:
+    """The private site key. In local development with no OWNER_KEY set,
+    the key "dev" is accepted; on Vercel an unset key disables watches."""
+    key = os.environ.get("OWNER_KEY") or ("" if _ON_VERCEL else "dev")
+    given = request.headers.get("x-owner-key") or ""
+    return bool(key) and _hmac.compare_digest(given.encode(), key.encode())
+
+
+def _clean_recipients(emails, existing: list | None = None) -> list[dict]:
+    """Validated, deduplicated recipients; an address already on the watch
+    keeps its unsubscribe token (and its unsubscribed state)."""
+    keep = {r["email"]: r for r in (existing or [])}
+    out, seen = [], set()
+    for raw in emails or []:
+        e = str(raw).strip().lower()
+        if not e or e in seen:
+            continue
+        if not _EMAIL_RE.match(e):
+            raise WatchError(f"That doesn't look like an email address: {raw}")
+        seen.add(e)
+        out.append(keep.get(e) or {"email": e, "token": secrets.token_urlsafe(16), "active": True})
+    if not out:
+        raise WatchError("Add at least one email address.")
+    if len(out) > WATCH_RECIPIENTS_MAX:
+        raise WatchError(f"Up to {WATCH_RECIPIENTS_MAX} people per briefing.")
+    return out
+
+
+def _spec_dates(spec: dict) -> list[str]:
+    ds = [spec.get("departure_date"), spec.get("return_date")]
+    ds += [(spec.get("flexible_dates") or {}).get(k) for k in ("from_date", "to_date")]
+    ds += [sg.get("date") for sg in spec.get("multi_city_segments") or []]
+    return sorted(d for d in ds if d)
+
+
+def watch_create(spec: dict, query: str, recipients, frequency_days: int,
+                 threshold=None) -> dict:
+    spec = {k: v for k, v in roll_past_dates(dict(spec or {}))[0].items()
+            if k not in ("summary", "assumptions") and v is not None}
+    if not (spec.get("origins") and spec.get("destinations")) and not spec.get("multi_city_segments"):
+        raise WatchError("Nothing to watch: this result has no repeatable search behind it.")
+    if not _spec_dates(spec):
+        raise WatchError("Nothing to watch: this search has no travel dates.")
+    if int(frequency_days or 0) not in WATCH_FREQUENCIES:
+        raise WatchError("Pick daily, every 3 days, or weekly.")
+    if threshold not in (None, "", 0):
+        threshold = float(threshold)
+        if not 1 <= threshold <= 10000:
+            raise WatchError("The price-change threshold should be between $1 and $10,000.")
+    else:
+        threshold = None
+    if len(_kv(["SMEMBERS", "watches"]) or []) >= WATCH_MAX:
+        raise WatchError(f"You already have {WATCH_MAX} watches; stop one first.")
+    hdr = section_header(spec)
+    w = {
+        "id": secrets.token_urlsafe(9), "created": time.time(), "active": True,
+        "spec": spec, "query": (query or "").strip()[:300] or f"{hdr['title']}, {hdr['subtitle']}",
+        "title": hdr["title"], "subtitle": hdr["subtitle"], "tags": hdr["tags"],
+        "frequency_days": int(frequency_days), "threshold": threshold,
+        "recipients": _clean_recipients(recipients), "next_due": 0.0,
+        "history": [], "last_sent_snapshot": None, "last_sent": None, "last_error": None,
+    }
+    watch_save(w)
+    return w
+
+
+# ---- what a briefing knows: a snapshot of one check -----------------------
+def _trip_parts(kind: str, row: dict) -> list[tuple[str, dict]]:
+    if kind == "itineraries":
+        return [("Out", row.get("outbound") or {}), ("Back", row.get("return") or {})]
+    if kind == "multicity":
+        return [(f"Leg {i + 1}", p) for i, p in enumerate(row.get("parts") or [])]
+    return [("", row)]
+
+
+def _row_price(kind: str, row: dict):
+    p = row.get("total_price") if kind in ("itineraries", "multicity") else row.get("price")
+    return p if isinstance(p, (int, float)) else None
+
+
+def _part_line(tag: str, f: dict) -> str:
+    legs = f.get("legs") or []
+    if not legs:
+        return tag
+    a, b = legs[0], legs[-1]
+    dep, arr = a.get("departure") or "", b.get("arrival") or ""
+    plus = _plus_days(dep, arr)
+    when = _fmt_day(dep[:10], year=False) if dep else ""
+    t = f"{dep[11:16]}→{arr[11:16]}" + (f" +{plus}" if plus else "")
+    stops = f.get("stops")
+    via = "/".join(lo.get("airport") for lo in f.get("layovers") or [] if lo.get("airport"))
+    stop_txt = "Nonstop" if stops == 0 else f"{stops} stop{'s' if (stops or 0) > 1 else ''}" + (f" via {via}" if via else "")
+    dur = f.get("duration")
+    dur_txt = f"{dur // 60}h {dur % 60:02d}m" if isinstance(dur, int) else ""
+    bits = [x for x in (when, t, f"{a.get('from')}–{b.get('to')}", f.get("airline"), dur_txt, stop_txt) if x]
+    return (f"{tag}: " if tag else "") + " · ".join(bits)
+
+
+def _pick(kind: str, row: dict) -> dict:
+    parts = _trip_parts(kind, row)
+    per_leg = kind == "multicity" and (row.get("book_per_leg") or row.get("price_basis") == "separate tickets")
+    books = ([(f"Book leg {i + 1}", p.get("booking_url")) for i, (_t, p) in enumerate(parts) if p.get("booking_url")]
+             if per_leg else [("Book on Google Flights", row.get("booking_url") or (parts[0][1] or {}).get("booking_url"))])
+    first = parts[0][1] or {}
+    total_min = sum((p.get("duration") or 0) for _t, p in parts)
+    return {
+        "airline": " + ".join(dict.fromkeys(p.get("airline") for _t, p in parts if p.get("airline"))),
+        "code": first.get("airline_code"),
+        "price": _row_price(kind, row),
+        "lines": [_part_line(t, p) for t, p in parts],
+        "minutes": total_min or None,
+        "stops": max((p.get("stops") or 0) for _t, p in parts),
+        "book": [(lbl, url) for lbl, url in books if url],
+        "sig": json.dumps([[(lg.get("airline_code"), lg.get("flight_number"), (lg.get("departure") or "")[:16])
+                            for lg in (p.get("legs") or [])] for _t, p in parts]),
+        "basis": row.get("price_basis"),
+    }
+
+
+def briefing_snapshot(payload: dict) -> dict | None:
+    """The numbers a briefing compares, from one search payload."""
+    kind = payload.get("type")
+    if kind == "dates":
+        ds = [d for d in payload.get("dates") or [] if isinstance(d.get("price"), (int, float))]
+        if not ds:
+            return None
+        cheap = min(ds, key=lambda d: d["price"])
+        return {"kind": "dates", "best": cheap["price"], "cheapest": cheap["price"], "n": len(ds),
+                "cheapest_date": cheap["date"], "return_date": cheap.get("return_date"),
+                "dates": sorted(ds, key=lambda d: d["price"])[:6], "picks": {}, "nonstop": None}
+    rows = [r for r in payload.get("results") or [] if _row_price(kind, r) is not None]
+    if not rows:
+        return None
+    picks = {"best": _pick(kind, rows[0])}  # results ship value-ranked
+    picks["cheapest"] = _pick(kind, min(rows, key=lambda r: _row_price(kind, r)))
+    fast_row = min(rows, key=lambda r: sum((p.get("duration") or 10 ** 6) for _t, p in _trip_parts(kind, r)))
+    picks["fastest"] = _pick(kind, fast_row)
+    nonstop = [p for p in (_pick(kind, r) for r in rows) if p["stops"] == 0]
+    ctx = payload.get("price_context") or {}
+    return {
+        "kind": kind, "n": len(payload.get("results") or []),
+        "best": picks["best"]["price"], "cheapest": picks["cheapest"]["price"],
+        "nonstop": min((p["price"] for p in nonstop), default=None),
+        "picks": picks,
+        "nearby": ({"date": ctx["cheapest_nearby"].get("date"), "price": ctx["cheapest_nearby"].get("price")}
+                   if (ctx.get("cheapest_nearby") or {}).get("date") else None),
+        "more_from": min((m.get("from_total") for m in payload.get("more_outbounds") or []
+                          if isinstance(m.get("from_total"), (int, float))), default=None),
+    }
+
+
+def _money(x) -> str:
+    return f"${x:,.0f}" if isinstance(x, (int, float)) else "n/a"
+
+
+def briefing_changes(prev: dict | None, cur: dict) -> list[str]:
+    """Plain sentences: what moved since the last briefing that was sent."""
+    if not prev:
+        return ["First briefing: these prices are your baseline. Future briefings show what changed."]
+    out = []
+    for key, label in (("best", "Best value"), ("cheapest", "Cheapest")):
+        a, b = prev.get(key), cur.get(key)
+        if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+            d = round(b - a)
+            out.append(f"{label} {'down' if d < 0 else 'up'} {_money(abs(d))} to {_money(b)} (was {_money(a)})"
+                       if d else f"{label} unchanged at {_money(b)}")
+    pa, pb = prev.get("nonstop"), cur.get("nonstop")
+    if pa is None and pb is not None:
+        out.append(f"A nonstop appeared at {_money(pb)}")
+    elif pa is not None and pb is None:
+        out.append("The nonstop option is no longer showing")
+    elif pa is not None and pb is not None and round(pb - pa):
+        out.append(f"Cheapest nonstop {'down' if pb < pa else 'up'} {_money(abs(pb - pa))} to {_money(pb)}")
+    bp, bc = (prev.get("picks") or {}).get("best"), (cur.get("picks") or {}).get("best")
+    if bp and bc and bp.get("sig") != bc.get("sig") and bc.get("airline"):
+        out.append(f"New best value: {bc['airline']} at {_money(bc['price'])}")
+    return out
+
+
+def briefing_moved(prev: dict | None, cur: dict, threshold) -> bool:
+    if not prev or not threshold:
+        return True
+    return any(isinstance(prev.get(k), (int, float)) and isinstance(cur.get(k), (int, float))
+               and abs(cur[k] - prev[k]) >= threshold for k in ("best", "cheapest"))
+
+
+def _no_dashes(text: str) -> str:
+    return re.sub(r"\s*[—–]\s*", ", ", text or "").strip()
+
+
+def briefing_summary(w: dict, cur: dict, changes: list[str]) -> str:
+    """Two or three sentences in the concierge voice, from the numbers only.
+    Falls back to a plain sentence when the model is unavailable."""
+    best = (cur.get("picks") or {}).get("best") or {}
+    cheap = (cur.get("picks") or {}).get("cheapest") or {}
+    moved = [c for c in changes if not c.startswith("First") and "unchanged" not in c]
+    lead = ("Here is your baseline for this trip." if changes and changes[0].startswith("First")
+            else f"{moved[0]}." if moved else "No price changes since the last briefing.")
+    if best.get("airline"):
+        hours = f", {best['minutes'] // 60}h {best['minutes'] % 60:02d}m" if best.get("minutes") else ""
+        kind = "nonstop" if best.get("stops") == 0 else f"{best.get('stops')} stop"
+        body = f" Best value is {best['airline']} at {_money(best.get('price'))} ({kind}{hours})."
+        if cheap.get("sig") and cheap.get("sig") != best.get("sig"):
+            body += f" The cheapest fare is {_money(cheap.get('price'))} on {cheap.get('airline')}."
+    else:
+        body = f" The cheapest date is {_fmt_day(cur.get('cheapest_date'))} at {_money(cur.get('cheapest'))}."
+    fallback = lead + body
+    if not os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY") == "offline-checks":
+        return _no_dashes(fallback)
+    facts = {
+        "trip": f"{w['title']} ({w['subtitle']})",
+        "changes_since_last_briefing": changes,
+        "best_value": {k: best.get(k) for k in ("airline", "price", "lines")} if best else None,
+        "cheapest": {k: (cur.get("picks") or {}).get("cheapest", {}).get(k) for k in ("airline", "price", "lines")},
+        "cheapest_nonstop": cur.get("nonstop"),
+        "cheapest_nearby_date": cur.get("nearby"),
+        "options_found": cur.get("n"),
+    }
+    try:
+        client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"], max_retries=2)
+        resp = client.messages.create(
+            model=ROUTER_MODEL, max_tokens=220,
+            system=("You write the opening of a flight briefing email for a traveler who asked to "
+                    "keep an eye on this trip. Two or three short sentences, warm and precise, like "
+                    "a hotel concierge. Lead with what changed, then the flight worth booking and "
+                    "why. Use only the facts given; never predict where prices will go. No "
+                    "greeting, no sign-off, no lists, and never use em dashes or en dashes."),
+            messages=[{"role": "user", "content": json.dumps(facts, default=str)}],
+        )
+        text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
+        return _no_dashes(text) or _no_dashes(fallback)
+    except Exception:
+        return _no_dashes(fallback)
+
+
+# ---- the email --------------------------------------------------------------
+_E = {"bg": "#f3eee7", "card": "#ffffff", "ink": "#1f1b17", "ink2": "#57514a", "ink3": "#8a837a",
+      "line": "#e6dfd5", "accent": "#c4470f", "soft": "#fdf0e7", "good": "#1d7a4c"}
+
+
+def _esc(x) -> str:
+    return _html.escape(str(x if x is not None else ""))
+
+
+def _trend_html(history: list[dict]) -> str:
+    pts = [h for h in history[-14:] if isinstance(h.get("best"), (int, float))]
+    if len(pts) < 3:  # two points are a comparison, already in "What changed"
+        return ""
+    lo, hi = min(h["best"] for h in pts), max(h["best"] for h in pts)
+    span = (hi - lo) or 1
+    cells = "".join(
+        f'<td valign="bottom" style="padding:0 2px;"><div style="width:14px;height:{8 + round((h["best"] - lo) / span * 40)}px;'
+        f'background:{_E["accent"] if i == len(pts) - 1 else _E["line"]};border-radius:3px 3px 0 0;"></div></td>'
+        for i, h in enumerate(pts))
+    first = datetime.fromtimestamp(pts[0]["t"])
+    return (f'<tr><td style="padding:18px 24px 0;"><div style="font-size:13px;font-weight:600;color:{_E["ink2"]};margin-bottom:8px;">'
+            f'Best value over your last {len(pts)} checks</div><table role="presentation" cellpadding="0" cellspacing="0"><tr>{cells}</tr></table>'
+            f'<div style="font-size:12px;color:{_E["ink3"]};margin-top:6px;">{_money(lo)} low · {_money(hi)} high · since {first:%b} {first.day}</div></td></tr>')
+
+
+def _pick_html(label: str, p: dict) -> str:
+    logo = (f'<img src="https://www.gstatic.com/flights/airline_logos/70px/{_esc(p["code"])}.png" width="28" height="28" '
+            f'alt="" style="vertical-align:middle;border-radius:6px;margin-right:8px;">' if p.get("code") else "")
+    lines = "".join(f'<div style="font-size:13px;color:{_E["ink2"]};margin-top:3px;">{_esc(l)}</div>' for l in p["lines"])
+    books = "".join(
+        f'<a href="{_esc(u)}" style="display:inline-block;margin:10px 8px 0 0;padding:9px 14px;background:{_E["accent"]};'
+        f'color:#ffffff;text-decoration:none;border-radius:8px;font-size:13px;font-weight:600;">{_esc(lbl)}</a>'
+        for lbl, u in p.get("book") or [])
+    basis = (f'<div style="font-size:12px;color:{_E["ink3"]};margin-top:4px;">Separate tickets: no protection between legs</div>'
+             if p.get("basis") == "separate tickets" else "")
+    return (f'<tr><td style="padding:12px 24px 0;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+            f'style="border:1px solid {_E["line"]};border-radius:12px;"><tr><td style="padding:14px 16px;">'
+            f'<div style="font-size:12px;font-weight:700;color:{_E["accent"]};letter-spacing:.02em;">{_esc(label)}</div>'
+            f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:6px;"><tr>'
+            f'<td style="font-size:15px;font-weight:600;color:{_E["ink"]};">{logo}{_esc(p.get("airline"))}</td>'
+            f'<td align="right" style="font-size:20px;font-weight:700;color:{_E["ink"]};white-space:nowrap;">{_money(p.get("price"))}</td>'
+            f'</tr></table>{lines}{basis}{books}</td></tr></table></td></tr>')
+
+
+def briefing_email(w: dict, cur: dict, changes: list[str], summary: str, recipient: dict) -> tuple[str, str, str]:
+    """(subject, html, text) for one recipient: each gets their own unsubscribe."""
+    unsub = f"{SITE_URL}/api/watches/unsubscribe?w={quote(w['id'])}&t={quote(recipient['token'])}"
+    open_url = f"{SITE_URL}/?q={quote(w['query'])}"
+    moved = next((c for c in changes if c.startswith("Best value ") and "unchanged" not in c), None)
+    subject = f"{w['title']}: {_money(cur.get('best'))} best value" + (
+        f" ({'down' if ' down ' in moved else 'up'} {moved.split(' to ')[0].split(' ')[-1]})" if moved else "")
+    picks = cur.get("picks") or {}
+    shown, blocks, text_picks = set(), [], []
+    labels = {"best": "Best value", "cheapest": "Cheapest", "fastest": "Fastest"}
+    for key in ("best", "cheapest", "fastest"):
+        p = picks.get(key)
+        if not p or p["sig"] in shown:
+            continue
+        same = [labels[k] for k in ("best", "cheapest", "fastest") if picks.get(k) and picks[k]["sig"] == p["sig"]]
+        label = " · ".join(same)
+        shown.add(p["sig"])
+        blocks.append(_pick_html(label, p))
+        text_picks.append(f"{label}: {p.get('airline')} {_money(p.get('price'))}\n  " + "\n  ".join(p["lines"])
+                          + "".join(f"\n  {lbl}: {u}" for lbl, u in p.get("book") or []))
+    if cur.get("kind") == "dates":
+        rows = "".join(f'<div style="font-size:14px;color:{_E["ink"]};margin-top:4px;">{_esc(_fmt_day(d["date"]))}'
+                       + (f' → {_esc(_fmt_day(d["return_date"]))}' if d.get("return_date") else "")
+                       + f' <b>{_money(d["price"])}</b></div>' for d in cur.get("dates") or [])
+        blocks.append(f'<tr><td style="padding:12px 24px 0;"><div style="font-size:12px;font-weight:700;color:{_E["accent"]};">Cheapest dates</div>{rows}</td></tr>')
+        text_picks.append("Cheapest dates:\n  " + "\n  ".join(
+            f"{_fmt_day(d['date'])} {_money(d['price'])}" for d in cur.get("dates") or []))
+    nearby = cur.get("nearby")
+    extra = []
+    if nearby:
+        extra.append(f"Cheapest nearby date: {_fmt_day(nearby['date'])} at {_money(nearby['price'])} (a comparison across dates, not price history).")
+    if cur.get("nonstop") is not None:
+        extra.append(f"Cheapest nonstop: {_money(cur['nonstop'])}.")
+    elif cur.get("kind") != "dates":
+        extra.append("No nonstop options on this search.")
+    who = f"{WATCH_FREQUENCIES.get(w['frequency_days'], 'Regular')} briefing set up by Evan with Flight Assistant."
+    change_html = "".join(f'<li style="margin:3px 0;">{_esc(c)}</li>' for c in changes)
+    html_doc = (
+        f'<!doctype html><html><body style="margin:0;padding:0;background:{_E["bg"]};">'
+        f'<div style="display:none;max-height:0;overflow:hidden;">{_esc(summary)}</div>'
+        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:{_E["bg"]};"><tr><td align="center" style="padding:24px 12px;">'
+        f'<table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:{_E["card"]};'
+        f'border-radius:16px;font-family:Inter,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:{_E["ink"]};">'
+        f'<tr><td style="padding:22px 24px 0;"><div style="font-size:13px;font-weight:700;color:{_E["accent"]};">Flight Assistant · Trip briefing</div>'
+        f'<div style="font-size:22px;font-weight:700;letter-spacing:-0.02em;margin-top:6px;">{_esc(w["title"])}</div>'
+        f'<div style="font-size:13px;color:{_E["ink3"]};margin-top:3px;">{_esc(w["subtitle"])}</div></td></tr>'
+        f'<tr><td style="padding:14px 24px 0;font-size:15px;line-height:1.6;color:{_E["ink"]};">{_esc(summary)}</td></tr>'
+        f'<tr><td style="padding:12px 24px 0;"><div style="background:{_E["soft"]};border-radius:10px;padding:10px 14px;">'
+        f'<div style="font-size:12px;font-weight:700;color:{_E["accent"]};">What changed</div>'
+        f'<ul style="margin:6px 0 0;padding-left:18px;font-size:14px;color:{_E["ink"]};">{change_html}</ul></div></td></tr>'
+        + "".join(blocks) + _trend_html(w.get("history") or []) +
+        (f'<tr><td style="padding:14px 24px 0;font-size:13px;color:{_E["ink2"]};">{" ".join(_esc(e) for e in extra)}</td></tr>' if extra else "")
+        + f'<tr><td style="padding:18px 24px 22px;"><a href="{_esc(open_url)}" style="color:{_E["accent"]};font-size:14px;font-weight:600;text-decoration:none;">Open this search in Flight Assistant →</a>'
+        f'<div style="font-size:12px;color:{_E["ink3"]};margin-top:14px;line-height:1.5;">Prices are live Google Flights fares at the time of this check and change often; '
+        f'the Book links open each flight on Google. {_esc(who)} <a href="{_esc(unsub)}" style="color:{_E["ink3"]};">Unsubscribe</a></div>'
+        f'</td></tr></table></td></tr></table></body></html>')
+    text = "\n\n".join([
+        f"{w['title']}\n{w['subtitle']}", summary,
+        "What changed:\n- " + "\n- ".join(changes),
+        "\n\n".join(text_picks), " ".join(extra),
+        f"Open this search: {open_url}",
+        f"Prices are live Google Flights fares at the time of this check and change often. {who}\nUnsubscribe: {unsub}",
+    ])
+    return subject, html_doc, text
+
+
+def send_email(to: str, subject: str, html_doc: str, text: str, unsubscribe_url: str) -> str:
+    """Resend in production; a local outbox file in development."""
+    key = os.environ.get("RESEND_API_KEY")
+    if not key:
+        if _ON_VERCEL:
+            raise WatchError("Email isn't connected yet: add RESEND_API_KEY (and BRIEFING_FROM) in Vercel.")
+        os.makedirs(_LOCAL_OUTBOX, exist_ok=True)
+        path = os.path.join(_LOCAL_OUTBOX, f"{int(time.time() * 1000)}-{re.sub(r'[^a-z0-9]+', '_', to)}.html")
+        with open(path, "w") as fh:
+            fh.write(f"<!-- To: {to} | Subject: {subject} | List-Unsubscribe: <{unsubscribe_url}> -->\n{html_doc}")
+        return f"outbox:{path}"
+    body = {"from": os.environ.get("BRIEFING_FROM") or "Flight Assistant <onboarding@resend.dev>",
+            "to": [to], "subject": subject, "html": html_doc, "text": text,
+            "headers": {"List-Unsubscribe": f"<{unsubscribe_url}>",
+                        "List-Unsubscribe-Post": "List-Unsubscribe=One-Click"}}
+    req = _urlreq.Request("https://api.resend.com/emails", data=json.dumps(body).encode(), method="POST",
+                          headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+    try:
+        with _urlreq.urlopen(req, timeout=15) as r:
+            return json.loads(r.read().decode()).get("id") or "sent"
+    except _urlerr.HTTPError as e:
+        raise WatchError(f"Resend refused the email ({e.code}): {e.read().decode()[:200]}")
+
+
+def run_watch(w: dict, force: bool = False) -> dict:
+    """One check: search, snapshot, decide, email every active recipient."""
+    today = date.today().isoformat()
+    if _spec_dates(w["spec"])[-1] < today:
+        w["active"] = False
+        watch_save(w)
+        return {"id": w["id"], "status": "expired"}
+    try:
+        payload = cached_execute_spec(dict(w["spec"]))
+    except Exception as e:
+        payload = {"type": "error", "message": str(e)}
+    cur = briefing_snapshot(payload)
+    now = time.time()
+    if not cur:
+        # no fresh data is never sent as a briefing: the next run retries
+        w["last_error"] = f"{datetime.now():%b %d %H:%M}: no fares came back ({str(payload.get('message') or '')[:120]})"
+        watch_save(w)
+        return {"id": w["id"], "status": "no_data"}
+    w["last_error"] = None
+    w["history"] = (w.get("history") or []) + [
+        {"t": now, "best": cur["best"], "cheapest": cur["cheapest"], "nonstop": cur.get("nonstop")}]
+    w["history"] = w["history"][-WATCH_HISTORY_MAX:]
+    prev = w.get("last_sent_snapshot")
+    w["next_due"] = now + w["frequency_days"] * 86400 - WATCH_DUE_SLACK_S
+    if not force and not briefing_moved(prev, cur, w.get("threshold")):
+        watch_save(w)
+        return {"id": w["id"], "status": "below_threshold"}
+    changes = briefing_changes(prev, cur)
+    summary = briefing_summary(w, cur, changes)
+    sent, failed = [], []
+    for r in w["recipients"]:
+        if not r.get("active"):
+            continue
+        subject, html_doc, text = briefing_email(w, cur, changes, summary, r)
+        unsub = f"{SITE_URL}/api/watches/unsubscribe?w={quote(w['id'])}&t={quote(r['token'])}"
+        try:
+            send_email(r["email"], subject, html_doc, text, unsub)
+            sent.append(r["email"])
+        except Exception as e:
+            failed.append(f"{r['email']}: {str(e)[:160]}")
+    if sent:
+        w["last_sent_snapshot"], w["last_sent"] = cur, now
+    if failed:
+        w["last_error"] = "; ".join(failed)[:400]
+    watch_save(w)
+    return {"id": w["id"], "status": "sent" if sent else "send_failed", "sent": sent, "failed": failed}
+
+
+def run_due_watches(budget_s: float = WATCH_RUN_BUDGET_S) -> list[dict]:
+    started, now = time.monotonic(), time.time()
+    due = [w for w in watch_all() if w.get("active") and (w.get("next_due") or 0) <= now]
+    out = []
+    pool = ThreadPoolExecutor(max_workers=3)
+    try:
+        futs = [pool.submit(run_watch, w) for w in due]
+        for w, fu in zip(due, futs):
+            try:
+                out.append(fu.result(timeout=max(1.0, budget_s - (time.monotonic() - started))))
+            except Exception as e:
+                out.append({"id": w["id"], "status": "error", "error": str(e)[:200]})
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    return out
+
+
+def watch_public(w: dict) -> dict:
+    """What the owner's panel shows (no tokens)."""
+    last = (w.get("history") or [{}])[-1]
+    return {k: w.get(k) for k in ("id", "title", "subtitle", "tags", "query", "frequency_days",
+                                  "threshold", "active", "last_sent", "last_error", "next_due")} | {
+        "recipients": [{"email": r["email"], "active": r.get("active", True)} for r in w.get("recipients") or []],
+        "last_best": last.get("best"), "last_cheapest": last.get("cheapest"),
+        "checks": len(w.get("history") or []),
+    }
+
+
+def _watch_json(body: dict, status: int = 200):
+    return JSONResponse(body, status_code=status)
+
+
+def _owner_denied(request):
+    """None when the site key checks out; otherwise the response to send."""
+    if _ON_VERCEL and not os.environ.get("OWNER_KEY"):
+        return _watch_json({"error": "Briefings aren't set up yet: add OWNER_KEY in Vercel "
+                                     "(plus storage and email), then redeploy."}, 503)
+    if not owner_ok(request):
+        return _watch_json({"error": "That site key isn't right."}, 401)
+    return None
+
+
+@app.get("/api/watches")
+async def list_watches(request: Request):
+    from starlette.concurrency import run_in_threadpool
+    if (denied := _owner_denied(request)) is not None:
+        return denied
+    try:
+        ws = await run_in_threadpool(watch_all)
+        return _watch_json({"watches": [watch_public(w) for w in sorted(ws, key=lambda w: -(w.get("created") or 0))]})
+    except WatchError as e:
+        return _watch_json({"error": str(e)}, 400)
+
+
+@app.post("/api/watches")
+async def create_watch(request: Request):
+    from starlette.concurrency import run_in_threadpool
+    if (denied := _owner_denied(request)) is not None:
+        return denied
+    body = await request.json()
+
+    def work():
+        w = watch_create(body.get("spec") or {}, body.get("query") or "", body.get("recipients") or [],
+                         body.get("frequency_days") or 1, body.get("threshold"))
+        first = run_watch(w, force=True)  # the first briefing goes out now: proof it works
+        return w, first
+    try:
+        w, first = await run_in_threadpool(work)
+        return _watch_json({"watch": watch_public(watch_load(w["id"]) or w), "first": first})
+    except WatchError as e:
+        return _watch_json({"error": str(e)}, 400)
+
+
+@app.post("/api/watches/{wid}/update")
+async def update_watch(wid: str, request: Request):
+    from starlette.concurrency import run_in_threadpool
+    if (denied := _owner_denied(request)) is not None:
+        return denied
+    body = await request.json()
+
+    def work():
+        w = watch_load(wid)
+        if not w:
+            raise WatchError("That watch no longer exists.")
+        if "recipients" in body:
+            w["recipients"] = _clean_recipients(body["recipients"], w.get("recipients"))
+        if "frequency_days" in body:
+            if int(body["frequency_days"]) not in WATCH_FREQUENCIES:
+                raise WatchError("Pick daily, every 3 days, or weekly.")
+            w["frequency_days"] = int(body["frequency_days"])
+        if "active" in body:
+            w["active"] = bool(body["active"])
+        watch_save(w)
+        return w
+    try:
+        return _watch_json({"watch": watch_public(await run_in_threadpool(work))})
+    except WatchError as e:
+        return _watch_json({"error": str(e)}, 400)
+
+
+@app.post("/api/watches/{wid}/send")
+async def send_watch_now(wid: str, request: Request):
+    from starlette.concurrency import run_in_threadpool
+    if (denied := _owner_denied(request)) is not None:
+        return denied
+    try:
+        w = await run_in_threadpool(watch_load, wid)
+        if not w:
+            return _watch_json({"error": "That watch no longer exists."}, 404)
+        result = await run_in_threadpool(run_watch, w, True)
+        return _watch_json({"result": result, "watch": watch_public(watch_load(wid) or w)})
+    except WatchError as e:
+        return _watch_json({"error": str(e)}, 400)
+
+
+@app.post("/api/watches/{wid}/delete")
+async def delete_watch(wid: str, request: Request):
+    from starlette.concurrency import run_in_threadpool
+    if (denied := _owner_denied(request)) is not None:
+        return denied
+    try:
+        await run_in_threadpool(watch_delete, wid)
+        return _watch_json({"ok": True})
+    except WatchError as e:
+        return _watch_json({"error": str(e)}, 400)
+
+
+@app.api_route("/api/watches/unsubscribe", methods=["GET", "POST"])
+async def unsubscribe_watch(request: Request):
+    """One recipient off one watch. No key needed: the token is the
+    recipient's own. Only POST unsubscribes, from the confirm button or a
+    mail client's one-click (RFC 8058). GET just shows that button, because
+    mail security scanners (Safe Links, Mimecast, Proofpoint) open every
+    link in a message, and a GET that acted would quietly drop a friend the
+    first time a briefing reached a corporate inbox."""
+    from starlette.concurrency import run_in_threadpool
+    from starlette.responses import HTMLResponse
+    wid, tok = request.query_params.get("w") or "", request.query_params.get("t") or ""
+    acting = request.method == "POST"
+
+    def work():
+        w = watch_load(wid) if wid else None
+        hit = next((r for r in (w or {}).get("recipients") or []
+                    if tok and _hmac.compare_digest(r.get("token", ""), tok)), None)
+        if hit and acting and hit.get("active", True):
+            hit["active"] = False
+            watch_save(w)
+        return w, hit
+    try:
+        w, hit = await run_in_threadpool(work)
+    except WatchError:
+        w, hit = None, None
+    form = ""
+    if not hit:
+        msg = "That unsubscribe link isn't valid anymore."
+    elif acting or not hit.get("active", True):
+        msg = f"You won't get the {_esc(w['title'])} briefing anymore."
+    else:
+        msg = f"Stop sending you the {_esc(w['title'])} briefing?"
+        form = (f'<form method="post" action="/api/watches/unsubscribe?w={_esc(quote(wid))}&amp;t={_esc(quote(tok))}"'
+                f' style="margin:18px 0 0;"><button type="submit" style="font:600 15px Inter,-apple-system,sans-serif;'
+                f'background:{_E["accent"]};color:#fff;border:0;border-radius:10px;padding:11px 18px;cursor:pointer;">'
+                f'Unsubscribe</button></form>')
+    return HTMLResponse(
+        f'<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">'
+        f'<meta name="robots" content="noindex">'
+        f'<body style="margin:0;background:{_E["bg"]};font-family:Inter,-apple-system,sans-serif;color:{_E["ink"]};">'
+        f'<div style="max-width:480px;margin:15vh auto;background:#fff;border-radius:16px;padding:28px;">'
+        f'<div style="font-size:13px;font-weight:700;color:{_E["accent"]};">Flight Assistant</div>'
+        f'<p style="font-size:17px;line-height:1.5;margin:10px 0 0;">{msg}</p>{form}</div></body>')
+
+
+@app.get("/api/watches/run")
+async def run_watches_cron(request: Request):
+    """The daily Vercel cron. Vercel sends Authorization: Bearer CRON_SECRET."""
+    from starlette.concurrency import run_in_threadpool
+    secret = os.environ.get("CRON_SECRET") or ""
+    auth = request.headers.get("authorization") or ""
+    if not secret or not _hmac.compare_digest(auth.encode(), f"Bearer {secret}".encode()):
+        return _watch_json({"error": "unauthorized"}, 401)
+    try:
+        return _watch_json({"ran": await run_in_threadpool(run_due_watches)})
+    except WatchError as e:
+        return _watch_json({"error": str(e)}, 400)

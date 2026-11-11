@@ -2071,6 +2071,115 @@ check("titles use English place names",
       app.place_name(["HAN"]) == "Hanoi" and app.place_name(["SGN"]) == "Ho Chi Minh City")
 
 # --------------------------------------------------------------------------
+section("Trip briefings  — Changelog: 'trip briefings by email'")
+# --------------------------------------------------------------------------
+# Evan, Nov 11: a Watch button that emails a briefing on a schedule (best,
+# cheapest, fastest, what changed) to him and friends he adds. Owner-only:
+# the site can never be used to email strangers. Runs fully offline here:
+# a local JSON store, a local outbox, a stubbed search.
+import tempfile as _tf_b, glob as _glob_b
+from starlette.testclient import TestClient as _TC
+_bdir = _tf_b.mkdtemp()
+app._LOCAL_KV_PATH = os.path.join(_bdir, "store.json")
+app._LOCAL_OUTBOX = os.path.join(_bdir, "outbox")
+_bprice = {"v": 470.0}
+
+
+def _brief_payload(spec):
+    d = spec["departure_date"]
+    return {"type": "flights", "message": "m", "results": [
+        app.serialize_flight(result([leg("JFK", "LAX", d + "T08:00", d + "T11:24", "<b>B6</b>", "15")], _bprice["v"], stops=0, duration=384)),
+        app.serialize_flight(result([leg("JFK", "LAX", d + "T06:00", d + "T13:00", "AA", "1")], 300.0, stops=1, duration=600))]}
+
+
+_real_ces_b = app.cached_execute_spec
+app.cached_execute_spec = _brief_payload
+_cl = _TC(app.app)
+_bspec = {"trip_type": "one_way", "origins": ["JFK"], "destinations": ["LAX"], "departure_date": future(40)}
+_r = _cl.post("/api/watches", json={"spec": _bspec, "recipients": ["a@x.com"], "frequency_days": 1})
+check("only the site key can create a briefing (the site never emails strangers)", _r.status_code == 401)
+app._ON_VERCEL, _ok_env = True, os.environ.pop("OWNER_KEY", None)
+_r503 = _cl.get("/api/watches", headers={"X-Owner-Key": "dev"})
+app._ON_VERCEL = False
+check("...and on Vercel with no OWNER_KEY it says it isn't set up, not 'wrong key'",
+      _r503.status_code == 503 and "set up" in _r503.json()["error"])
+_r = _cl.post("/api/watches", headers={"X-Owner-Key": "dev"}, json={
+    "spec": _bspec, "query": "JFK to LAX", "recipients": ["Evan@X.com", "evan@x.com", "friend@x.com"],
+    "frequency_days": 1, "threshold": 20})
+_bw = _r.json()["watch"]
+_mails = sorted(_glob_b.glob(os.path.join(app._LOCAL_OUTBOX, "*.html")))
+check("creating a watch sends the first briefing to every recipient, deduplicated",
+      _r.status_code == 200 and [x["email"] for x in _bw["recipients"]] == ["evan@x.com", "friend@x.com"]
+      and len(_mails) == 2, f"{len(_mails)} emails")
+_m0 = open(_mails[0]).read()
+_tokens = {_re.search(r"[?&]t=([\w-]+)", open(m).read()).group(1) for m in _mails}
+check("...each with its own unsubscribe link and a one-click List-Unsubscribe",
+      len(_tokens) == 2 and "List-Unsubscribe: <https://flights.evanburkeen.com/api/watches/unsubscribe?w=" in _m0
+      and "Unsubscribe</a>" in _m0)
+check("...naming best value, cheapest and fastest, with real Book links",
+      "Best value" in _m0 and "Cheapest" in _m0 and "Book on Google Flights" in _m0
+      and "google.com/travel/flights?tfs=" in _m0)
+check("...and escaping every value it prints", "<b>B6</b>" not in _m0 and "&lt;b&gt;B6&lt;/b&gt;" in _m0)
+_bwatch = app.watch_load(_bw["id"])
+_bprice["v"] = 460.0
+check("a move smaller than the owner's threshold sends nothing",
+      app.run_watch(app.watch_load(_bw["id"]))["status"] == "below_threshold"
+      and len(_glob_b.glob(os.path.join(app._LOCAL_OUTBOX, "*.html"))) == 2)
+_bprice["v"] = 432.0
+_res = app.run_watch(app.watch_load(_bw["id"]))
+_cur = app.briefing_snapshot(_brief_payload(_bspec))
+_subj = app.briefing_email(app.watch_load(_bw["id"]), _cur,
+                           app.briefing_changes({"best": 470.0, "cheapest": 300.0, "nonstop": 470.0}, _cur),
+                           "s", app.watch_load(_bw["id"])["recipients"][0])[0]
+check("a real move is sent, and the subject says what moved",
+      _res["status"] == "sent" and "(down $38)" in _subj, _subj)
+check("the written summary never uses dashes, even without the model",
+      "\u2014" not in app.briefing_summary(app.watch_load(_bw["id"]), _cur, ["Best value down $38 to $432 (was $470)"])
+      and "No price changes" in app.briefing_summary({"title": "t", "subtitle": "s"}, _cur, ["Best value unchanged at $432"]))
+_tok = app.watch_load(_bw["id"])["recipients"][1]["token"]
+# Mail security scanners (Safe Links, Mimecast) GET every link in a message:
+# an unsubscribe that acted on GET dropped a friend the moment a briefing
+# reached a corporate inbox. GET only shows the button.
+_u = _cl.get(f"/api/watches/unsubscribe?w={_bw['id']}&t={_tok}")
+check("opening the unsubscribe link (as a mail scanner does) changes nothing",
+      _u.status_code == 200 and 'method="post"' in _u.text
+      and [r["active"] for r in app.watch_load(_bw["id"])["recipients"]] == [True, True])
+_u = _cl.post(f"/api/watches/unsubscribe?w={_bw['id']}&t={_tok}",
+              content="List-Unsubscribe=One-Click",
+              headers={"Content-Type": "application/x-www-form-urlencoded"})
+check("a one-click POST removes that one person and nobody else",
+      _u.status_code == 200 and "anymore" in _u.text
+      and [r["active"] for r in app.watch_load(_bw["id"])["recipients"]] == [True, False])
+check("...and a forged token does nothing",
+      "isn't valid" in _cl.post(f"/api/watches/unsubscribe?w={_bw['id']}&t=nope").text
+      and [r["active"] for r in app.watch_load(_bw["id"])["recipients"]] == [True, False])
+check("the daily cron refuses calls without its secret", _cl.get("/api/watches/run").status_code == 401)
+os.environ["CRON_SECRET"] = "s3cret"
+_w2 = app.watch_load(_bw["id"]); _w2["next_due"] = 0; app.watch_save(_w2)
+_cron = _cl.get("/api/watches/run", headers={"Authorization": "Bearer s3cret"}).json()
+os.environ.pop("CRON_SECRET", None)
+check("...and with it, runs every due watch", [x["id"] for x in _cron.get("ran", [])] == [_bw["id"]])
+app.cached_execute_spec = lambda spec: {"type": "flights", "message": "refused", "results": []}
+_nd = app.run_watch(app.watch_load(_bw["id"]), force=True)
+check("a check with no fresh fares never sends a briefing", _nd["status"] == "no_data"
+      and "no fares came back" in (app.watch_load(_bw["id"])["last_error"] or ""))
+_w3 = app.watch_load(_bw["id"]); _w3["spec"]["departure_date"] = "2020-01-01"; app.watch_save(_w3)
+check("a trip whose date has passed stops itself", app.run_watch(app.watch_load(_bw["id"]))["status"] == "expired"
+      and app.watch_load(_bw["id"])["active"] is False)
+app.cached_execute_spec = _real_ces_b
+if _ok_env is not None:
+    os.environ["OWNER_KEY"] = _ok_env
+_fe_b = open(os.path.join(ROOT, "public", "index.html")).read()
+check("Watch buttons appear only on a device that holds the site key",
+      "return !!this.ownerKey && !!sec.watch_spec" in _fe_b and "openBriefings()" in _fe_b
+      and "Trip briefings</button>" in _fe_b)
+check("the email's 'Open this search' link runs the search", "get('q')" in _fe_b and "this.search(q)" in _fe_b)
+_vj = json.load(open(os.path.join(ROOT, "vercel.json")))
+check("a daily cron drives the briefings (Hobby allows once a day)",
+      any(c["path"] == "/api/watches/run" and c["schedule"].split()[2:] == ["*", "*", "*"]
+          and c["schedule"].split()[1].isdigit() for c in _vj.get("crons", [])))
+
+# --------------------------------------------------------------------------
 section("README drift  — the doc must match the code it describes")
 # --------------------------------------------------------------------------
 # The pre-push hook forces a README edit per code push, but a Changelog line
@@ -2136,6 +2245,20 @@ check("README states the party-total pricing invariant",
       "party total" in _readme.lower())
 check("README pins the separate-ticket floor invariant",
       "separate-ticket floor" in _readme)
+# Trip briefings: the routes, every env var the code reads for them, and the
+# cron schedule are facts a reader acts on during setup.
+for _ep in ("/api/watches", "/api/watches/unsubscribe", "/api/watches/run"):
+    check(f"README documents {_ep}", _ep in _src and _ep in _readme)
+for _env in ("OWNER_KEY", "CRON_SECRET", "RESEND_API_KEY", "BRIEFING_FROM",
+             "KV_REST_API_URL", "KV_REST_API_TOKEN"):
+    check(f"README names the briefing env var {_env}",
+          f'"{_env}"' in _src and _env in _readme)
+_vc = json.load(open(os.path.join(ROOT, "vercel.json")))
+_cron = [c["schedule"] for c in _vc.get("crons", []) if c.get("path") == "/api/watches/run"]
+check("README states the briefing cron's schedule",
+      bool(_cron) and _cron[0] in _readme, f"vercel.json says {_cron}")
+check("README states the cadences the code offers",
+      all(label in _readme for label in ("Daily", "Every 3 days", "Weekly")))
 
 # --------------------------------------------------------------------------
 section("Process guards")

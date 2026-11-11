@@ -592,6 +592,61 @@
     .mc-note { font-size: 0.75rem; color: var(--ink-3); margin-top: 0.2rem; max-width: 36rem; line-height: 1.5; }
     .mc-books { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
 
+    /* ---- trip briefings ---- */
+    .sec-actions { display: flex; align-items: center; gap: 0.5rem; flex: none; }
+    .watch-btn {
+      display: inline-flex; align-items: center; gap: 0.35rem; height: 30px; padding: 0 0.7rem;
+      border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--panel);
+      color: var(--ink-2); font-size: 0.8125rem; font-weight: 550; cursor: pointer;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    .watch-btn svg { width: 15px; height: 15px; }
+    .watch-btn:hover { border-color: var(--accent); color: var(--accent-ink); }
+    .form-panel { max-width: 34rem; }
+    .form-sub { font-size: 0.8125rem; color: var(--ink-3); margin-top: 0.15rem; }
+    .form-lede { font-size: 0.875rem; color: var(--ink-2); line-height: 1.55; margin-bottom: 0.9rem; }
+    .field-label { display: block; font-size: 0.8125rem; font-weight: 600; margin: 0.9rem 0 0.4rem; }
+    .field-optional { font-weight: 450; color: var(--ink-3); }
+    .field-help { font-size: 0.75rem; color: var(--ink-3); margin-top: 0.35rem; }
+    .rcpt-box {
+      display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; cursor: text;
+      border: 1px solid var(--line-strong); border-radius: var(--r); padding: 0.4rem; background: var(--panel);
+    }
+    .rcpt-box:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+    .rcpt-box.small { margin-top: 0.6rem; border-color: var(--line); }
+    .rcpt-chip {
+      display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.8125rem;
+      padding: 0.2rem 0.3rem 0.2rem 0.6rem; border-radius: 999px; background: var(--panel-2); color: var(--ink);
+    }
+    .rcpt-chip.off { opacity: 0.55; text-decoration: line-through; }
+    .rcpt-chip button { border: none; background: none; cursor: pointer; color: var(--ink-3); font-size: 0.7rem; padding: 0.1rem 0.3rem; border-radius: 999px; }
+    .rcpt-chip button:hover { background: var(--line); color: var(--ink); }
+    .rcpt-input { flex: 1; min-width: 10rem; border: none; outline: none; background: transparent; color: var(--ink); font-size: 0.875rem; padding: 0.25rem; }
+    .seg { display: inline-flex; }
+    .money-input {
+      display: inline-flex; align-items: center; gap: 0.3rem; border: 1px solid var(--line-strong);
+      border-radius: var(--r-sm); padding: 0 0.6rem; background: var(--panel); color: var(--ink-3);
+    }
+    .money-input input { border: none; outline: none; background: transparent; color: var(--ink); width: 7rem; height: 34px; font-size: 0.875rem; }
+    .text-field {
+      width: 100%; height: 38px; border: 1px solid var(--line-strong); border-radius: var(--r-sm);
+      padding: 0 0.7rem; background: var(--panel); color: var(--ink); font-size: 0.875rem;
+    }
+    .text-field:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+    .form-error { font-size: 0.8125rem; color: var(--warn); margin-top: 0.7rem; }
+    .form-actions { display: flex; align-items: center; gap: 0.25rem; margin-top: 1.1rem; }
+    .form-actions .card-action { margin-top: 0; }
+    .card-action:disabled { opacity: 0.6; cursor: default; }
+    .brief-item { border: 1px solid var(--line); border-radius: var(--r); padding: 0.85rem 0.95rem; margin-top: 0.6rem; }
+    .brief-item.paused { opacity: 0.7; }
+    .brief-top { display: flex; justify-content: space-between; gap: 0.75rem; align-items: flex-start; }
+    .brief-title { font-weight: 650; font-size: 0.9375rem; letter-spacing: -0.01em; }
+    .brief-price { font-weight: 700; font-size: 1.0625rem; font-variant-numeric: tabular-nums; }
+    .brief-meta { font-size: 0.75rem; color: var(--ink-3); margin-top: 0.35rem; }
+    .brief-actions { display: flex; flex-wrap: wrap; gap: 0.25rem; margin-top: 0.5rem; }
+    .brief-actions .share-quiet { margin-left: 0; padding: 0 0.6rem; height: 30px; }
+    .share-quiet.danger:hover { color: var(--warn); }
+
     /* ---- share overlay ---- */
     .share-overlay {
       position: fixed; inset: 0; z-index: 40; display: flex;
@@ -704,12 +759,16 @@
     }
     .footer a { color: var(--ink-2); text-decoration: none; font-weight: 550; }
     .footer a:hover { color: var(--ink); }
+    .footer-link { background: none; border: none; padding: 0; cursor: pointer; color: var(--ink-3); font-size: inherit; }
+    .footer-link:hover { color: var(--ink); }
 
     @media (max-width: 640px) {
       .container { padding: 0 1rem 9rem; }
       .header { margin-bottom: 1.5rem; }
       .brand-name { display: none; }
       .section-head .mini-toggle { display: none; }  /* the header's toggle covers it; titles get the width */
+      .watch-btn span { display: none; }
+      .watch-btn { padding: 0 0.55rem; }
       .flight-card { padding: 1rem; }
       .stub-divider { margin-left: -1rem; margin-right: -1rem; }
       .route { gap: 0.6rem; }
@@ -736,6 +795,7 @@
         <span class="brand-name">Flight Assistant</span>
       </div>
       <div class="header-tools">
+        <button class="newconv-btn" x-show="ownerKey" @click="openBriefings()">Briefings</button>
         <button class="newconv-btn" x-show="hasSearched" @click="newConversation()"
                 title="Start fresh. Your recent trips are kept.">New trip</button>
         <button class="theme-btn" @click="cycleTheme()" :title="themeTitle()" aria-label="Color theme">
@@ -821,9 +881,13 @@
                       <div class="section-sub" x-show="sec.subtitle" x-text="sec.subtitle"></div>
                     </div>
                   </div>
-                  <div class="mini-toggle" x-show="sec.results && sec.results.length && !(sec.type === 'itineraries' && sec._expanded)">
-                    <button :class="sectionView(sec) === 'detailed' ? 'active' : ''" @click="sec._view = 'detailed'">Detail</button>
-                    <button :class="sectionView(sec) === 'compact' ? 'active' : ''" @click="sec._view = 'compact'">Compact</button>
+                  <div class="sec-actions">
+                    <button class="watch-btn" x-show="canWatch(sec)" @click="openWatch(sec, i)"
+                            title="Email briefings about this trip"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6.5a4 4 0 0 1 8 0c0 3.2 1.3 4.5 1.3 4.5H2.7S4 9.7 4 6.5z"/><path d="M6.6 13.2a1.5 1.5 0 0 0 2.8 0"/></svg><span>Watch</span></button>
+                    <div class="mini-toggle" x-show="sec.results && sec.results.length && !(sec.type === 'itineraries' && sec._expanded)">
+                      <button :class="sectionView(sec) === 'detailed' ? 'active' : ''" @click="sec._view = 'detailed'">Detail</button>
+                      <button :class="sectionView(sec) === 'compact' ? 'active' : ''" @click="sec._view = 'compact'">Compact</button>
+                    </div>
                   </div>
                 </div>
                 <div class="sec-tags" x-show="(sec.tags || []).length">
@@ -1398,6 +1462,113 @@
       <div x-ref="bottom"></div>
     </div>
 
+<!-- watch dialog: a trip, who gets the briefing, how often -->
+    <div class="share-overlay" style="display: none" x-show="watch.open"
+         @click.self="watch.open = false" @keydown.escape.window="watch.open = false">
+      <div class="share-panel form-panel" role="dialog" aria-label="Watch this trip">
+        <div class="share-head">
+          <div>
+            <div class="share-title">Watch this trip</div>
+            <div class="form-sub" x-text="watch.title + (watch.subtitle ? ' · ' + watch.subtitle : '')"></div>
+          </div>
+          <button class="share-close" @click="watch.open = false" aria-label="Close">✕</button>
+        </div>
+        <template x-if="!watch.done">
+          <div>
+            <p class="form-lede">A briefing email with the best-value, cheapest and fastest flights for this exact search, and what changed since the last one.</p>
+            <label class="field-label">Send it to</label>
+            <div class="rcpt-box" @click="$refs.rcpt && $refs.rcpt.focus()">
+              <template x-for="(e, ei) in watch.recipients" :key="e">
+                <span class="rcpt-chip"><span x-text="e"></span><button type="button" @click.stop="removeRecipient(e)" :aria-label="'Remove ' + e">✕</button></span>
+              </template>
+              <input x-ref="rcpt" class="rcpt-input" type="email" placeholder="Add an email, press Enter"
+                     x-model="watch.input" @keydown.enter.prevent="addRecipient()" @keydown.comma.prevent="addRecipient()"
+                     @blur="addRecipient()">
+            </div>
+            <div class="field-help">Add yourself and anyone traveling with you. Everyone gets their own unsubscribe link.</div>
+            <label class="field-label">How often</label>
+            <div class="view-toggle seg">
+              <template x-for="opt in [[1, 'Daily'], [3, 'Every 3 days'], [7, 'Weekly']]" :key="opt[0]">
+                <button type="button" :class="watch.freq === opt[0] ? 'active' : ''" @click="watch.freq = opt[0]" x-text="opt[1]"></button>
+              </template>
+            </div>
+            <label class="field-label">Only email when a price moves by at least <span class="field-optional">(optional)</span></label>
+            <div class="money-input"><span>$</span><input type="number" min="1" step="1" placeholder="Every time" x-model="watch.threshold"></div>
+            <template x-if="!ownerKey">
+              <div>
+                <label class="field-label">Site key</label>
+                <input class="text-field" type="password" autocomplete="off" placeholder="Your private site key" x-model="watch.key">
+                <div class="field-help">The OWNER_KEY set for this site. Saved on this device only.</div>
+              </div>
+            </template>
+            <div class="form-error" x-show="watch.err" x-text="watch.err"></div>
+            <div class="form-actions">
+              <button class="card-action" :disabled="watch.busy" @click="startWatch()"
+                      x-text="watch.busy ? 'Sending the first briefing…' : 'Start briefings'"></button>
+              <button class="share-quiet" @click="watch.open = false">Cancel</button>
+            </div>
+          </div>
+        </template>
+        <template x-if="watch.done">
+          <div>
+            <p class="form-lede" x-text="watch.done"></p>
+            <div class="form-actions"><button class="card-action" @click="watch.open = false">Done</button>
+              <button class="share-quiet" @click="watch.open = false; openBriefings()">Manage briefings</button></div>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <!-- briefings panel: every watch, with send now / pause / recipients / stop -->
+    <div class="share-overlay" style="display: none" x-show="briefings.open"
+         @click.self="briefings.open = false" @keydown.escape.window="briefings.open = false">
+      <div class="share-panel form-panel" role="dialog" aria-label="Your trip briefings">
+        <div class="share-head">
+          <div class="share-title">Trip briefings</div>
+          <button class="share-close" @click="briefings.open = false" aria-label="Close">✕</button>
+        </div>
+        <template x-if="!ownerKey">
+          <div>
+            <p class="form-lede">Trip briefings email you, and anyone you add, a regular update on a search: the best-value, cheapest and fastest flights, and what changed. Enter your site key to manage them on this device.</p>
+            <input class="text-field" type="password" autocomplete="off" placeholder="Your private site key"
+                   x-model="briefings.key" @keydown.enter="openBriefings(briefings.key)">
+            <div class="form-error" x-show="briefings.err" x-text="briefings.err"></div>
+            <div class="form-actions"><button class="card-action" @click="openBriefings(briefings.key)" :disabled="!briefings.key">Unlock</button></div>
+          </div>
+        </template>
+        <div class="form-error" x-show="ownerKey && briefings.err" x-text="briefings.err"></div>
+        <div class="rt-empty" x-show="ownerKey && !briefings.busy && !briefings.list.length && !briefings.err">No briefings yet. Tap Watch on any search result to start one.</div>
+        <div class="rt-empty" x-show="briefings.busy"><span class="loading-dot rt-dot"></span> Loading…</div>
+        <template x-for="w in briefings.list" :key="w.id">
+          <div class="brief-item" :class="w.active ? '' : 'paused'">
+            <div class="brief-top">
+              <div>
+                <div class="brief-title" x-text="w.title"></div>
+                <div class="form-sub" x-text="w.subtitle"></div>
+              </div>
+              <div class="brief-price" x-show="w.last_best != null" x-text="formatPrice(w.last_best, 'USD')"></div>
+            </div>
+            <div class="brief-meta" x-text="briefingMeta(w)"></div>
+            <div class="form-error" x-show="w.last_error" x-text="w.last_error"></div>
+            <div class="rcpt-box small">
+              <template x-for="r in (w._edit || w.recipients.map(x => x.email))" :key="r">
+                <span class="rcpt-chip" :class="(w.recipients.find(x => x.email === r) || {active: true}).active ? '' : 'off'"
+                      :title="(w.recipients.find(x => x.email === r) || {active: true}).active ? '' : 'Unsubscribed'">
+                  <span x-text="r"></span><button type="button" @click="editRecipients(w, 'remove', r)" :aria-label="'Remove ' + r">✕</button></span>
+              </template>
+              <input class="rcpt-input" type="email" placeholder="Add email" @keydown.enter.prevent="editRecipients(w, 'add', $event.target.value); $event.target.value = ''">
+            </div>
+            <div class="brief-actions">
+              <button class="share-quiet" x-show="w._edit" @click="briefingAction(w, 'recipients')">Save recipients</button>
+              <button class="share-quiet" @click="briefingAction(w, 'send')" :disabled="w._busy" x-text="w._busy === 'send' ? 'Sending…' : 'Send now'"></button>
+              <button class="share-quiet" @click="briefingAction(w, w.active ? 'pause' : 'resume')" x-text="w.active ? 'Pause' : 'Resume'"></button>
+              <button class="share-quiet danger" @click="briefingAction(w, 'delete')">Stop</button>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+
 <!-- share overlay: the rendered boarding pass + copy/save/share actions -->
     <div class="share-overlay" style="display: none" x-show="share.open"
          @click.self="closeShare()" @keydown.escape.window="closeShare()">
@@ -1451,6 +1622,7 @@
     <footer class="footer">
       <span>Built by <a href="https://evanburkeen.com">Evan Burkeen</a></span>
       <span class="colophon">Powered by Claude and Google Flights</span>
+      <button class="footer-link" @click="openBriefings()">Trip briefings</button>
     </footer>
 
     <nav class="ladder" :class="ladderOpen ? 'overlay' : ''" x-show="ladder().length > 1" aria-label="Search results index">
@@ -1493,6 +1665,10 @@
         barRaised: false,
         loadingText: 'Thinking…',
         share: { open: false, imgUrl: null, blob: null, text: '', toast: '', canNative: false },
+        ownerKey: (() => { try { return localStorage.getItem('fa_owner_key') || ''; } catch (e) { return ''; } })(),
+        watch: { open: false, spec: null, query: '', title: '', subtitle: '', recipients: [], input: '',
+                 freq: 1, threshold: '', key: '', busy: false, err: '', done: '' },
+        briefings: { open: false, list: [], busy: false, err: '', key: '' },
         loadingTimer: null,
         controller: null,
         reqId: 0,
@@ -1525,6 +1701,13 @@
           try { this.recents = JSON.parse(localStorage.getItem(RECENTS_KEY) || '[]') || []; }
           catch (e) { this.recents = []; }
           this.restoreConvo();
+          try {
+            const q = new URLSearchParams(location.search).get('q');
+            if (q) {
+              history.replaceState(null, '', location.pathname);
+              this.$nextTick(() => this.search(q));
+            }
+          } catch (e) { /* a malformed URL just opens the page */ }
 
           // warm the backend before the first search: on load, and again
           // whenever a backgrounded tab returns (the classic 'I opened it to
@@ -2716,6 +2899,123 @@
             .replace(/\u0001/g, '\n\n')
             .replace(/\u0002/g, '\n');
           return flowed.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+        },
+
+        // ---- trip briefings: watch a search, email it on a schedule ----
+        canWatch(sec) {
+          return !!this.ownerKey && !!sec.watch_spec && !!((sec.results || []).length || (sec.dates || []).length
+            || (sec.more_outbounds || []).length || this.mcHasLegs(sec));
+        },
+        openWatch(sec, i) {
+          const prev = this.messages[i - 1];
+          let saved = [];
+          try { saved = JSON.parse(localStorage.getItem('fa_watch_recipients') || '[]') || []; } catch (e) { }
+          this.watch = { open: true, spec: sec.watch_spec, title: sec.title || this.sectionLabel(sec),
+                         subtitle: sec.subtitle || '', query: (prev && prev.role === 'user') ? prev.content : '',
+                         recipients: saved, input: '', freq: 1, threshold: '', key: '', busy: false, err: '', done: '' };
+          this.$nextTick(() => this.$refs.rcpt && this.$refs.rcpt.focus());
+        },
+        addRecipient() {
+          const parts = (this.watch.input || '').split(/[\s,;]+/).map(x => x.trim().toLowerCase()).filter(Boolean);
+          for (const e of parts) {
+            if (!/^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/.test(e)) { this.watch.err = "That doesn't look like an email: " + e; return; }
+            if (!this.watch.recipients.includes(e)) this.watch.recipients.push(e);
+          }
+          this.watch.input = ''; this.watch.err = '';
+        },
+        removeRecipient(e) { this.watch.recipients = this.watch.recipients.filter(x => x !== e); },
+        async _ownerFetch(url, body, key) {
+          const res = await fetch(url, {
+            method: body === undefined ? 'GET' : 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Owner-Key': key || this.ownerKey },
+            body: body === undefined ? undefined : JSON.stringify(body),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (res.status === 401) {
+            this.ownerKey = '';
+            try { localStorage.removeItem('fa_owner_key'); } catch (e) { }
+          }
+          if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+          return data;
+        },
+        async startWatch() {
+          this.addRecipient();
+          if (this.watch.err) return;
+          if (!this.watch.recipients.length) { this.watch.err = 'Add at least one email address.'; return; }
+          const key = this.ownerKey || (this.watch.key || '').trim();
+          if (!key) { this.watch.err = 'Enter your site key.'; return; }
+          this.watch.busy = true; this.watch.err = '';
+          try {
+            const data = await this._ownerFetch('/api/watches', {
+              spec: this.watch.spec, query: this.watch.query, recipients: this.watch.recipients,
+              frequency_days: this.watch.freq, threshold: this.watch.threshold || null }, key);
+            this.ownerKey = key;
+            try {
+              localStorage.setItem('fa_owner_key', key);
+              localStorage.setItem('fa_watch_recipients', JSON.stringify(this.watch.recipients));
+            } catch (e) { }
+            const sent = (data.first || {}).sent || [];
+            const every = { 1: 'every day', 3: 'every 3 days', 7: 'every week' }[this.watch.freq];
+            this.watch.done = sent.length
+              ? `Watching. The first briefing just went to ${sent.length === 1 ? sent[0] : sent.length + ' people'}; the next arrives ${every}.`
+              : `Watching. The first check found no fares to send yet; it will try again ${every}.`;
+          } catch (e) {
+            this.watch.err = e.message;
+          } finally {
+            this.watch.busy = false;
+          }
+        },
+        async openBriefings(key) {
+          const k = key || this.ownerKey;
+          this.briefings = { open: true, list: [], busy: !!k, err: '', key: '' };
+          if (!k) return;  // the panel asks for the key first
+          try {
+            this.briefings.list = (await this._ownerFetch('/api/watches', undefined, k)).watches || [];
+            if (!this.ownerKey) {
+              this.ownerKey = k;
+              try { localStorage.setItem('fa_owner_key', k); } catch (e) { }
+            }
+          } catch (e) {
+            this.briefings.err = e.message;
+          } finally {
+            this.briefings.busy = false;
+          }
+        },
+        briefingMeta(w) {
+          const every = { 1: 'Daily', 3: 'Every 3 days', 7: 'Weekly' }[w.frequency_days] || 'Scheduled';
+          const live = (w.recipients || []).filter(r => r.active).length;
+          const bits = [w.active ? every : 'Paused', live + (live === 1 ? ' recipient' : ' recipients'),
+                        w.checks + (w.checks === 1 ? ' check' : ' checks')];
+          if (w.threshold) bits.push('emails on moves of $' + Math.round(w.threshold) + '+');
+          if (w.last_sent) bits.push('last sent ' + this.agoText(w.last_sent * 1000));
+          return bits.join(' · ');
+        },
+        editRecipients(w, op, email) {
+          const cur = w._edit || (w.recipients || []).map(r => r.email);
+          const e = (email || '').trim().toLowerCase();
+          if (op === 'add' && e && !cur.includes(e)) w._edit = [...cur, e];
+          if (op === 'remove') w._edit = cur.filter(x => x !== e);
+        },
+        async briefingAction(w, action) {
+          w._busy = action;
+          try {
+            if (action === 'delete') {
+              if (!confirm('Stop "' + w.title + '" for everyone on it?')) return;
+              await this._ownerFetch('/api/watches/' + w.id + '/delete', {});
+              this.briefings.list = this.briefings.list.filter(x => x.id !== w.id);
+              return;
+            }
+            const data = action === 'send'
+              ? await this._ownerFetch('/api/watches/' + w.id + '/send', {})
+              : await this._ownerFetch('/api/watches/' + w.id + '/update',
+                  action === 'recipients' ? { recipients: w._edit } : { active: action === 'resume' });
+            const i = this.briefings.list.findIndex(x => x.id === w.id);
+            if (i >= 0) this.briefings.list[i] = data.watch;
+          } catch (e) {
+            w.last_error = e.message;
+          } finally {
+            w._busy = false;
+          }
         },
 
         // examples fill the box rather than sending: a starting point to edit
