@@ -389,6 +389,10 @@ app.run_search, app.leg_price_index, app.cached_execute_spec = _real_run, _real_
 check("when the same-flights comparison fires below the floor, it wins alone",
       _mc_match["results"][0]["total_price"] == 1026
       and sum(1 for r in _mc_match["results"] if r["price_basis"] == "separate tickets") == 1)
+check("...and that separate-ticket quote books leg by leg, never at the joint fare",
+      _mc_match["results"][0].get("book_per_leg") is True
+      and _mc_match["results"][0].get("booking_url") is None
+      and all(p.get("booking_url") for p in _mc_match["results"][0]["parts"]))
 
 # --------------------------------------------------------------------------
 section("Round-trip expansion breadth  — Changelog: 'the board, and representative expansion'")
@@ -578,18 +582,35 @@ check("...and an airport that DID return rows is never re-probed",
       app.airports_with_no_rows(_d_hb, _bdl_only, app._dest_of_result) == [])
 
 _hvn_row = [result([leg("HVN", "FLL", "2026-09-24T08:50", "2026-09-24T11:58", "Avelo", "101")], 180.0)]
-_spec_hb = {"origins": ["HVN", "BDL"], "destinations": ["FLL"], "departure_date": "2026-09-24"}
+_spec_hb = {"origins": ["HVN", "BDL"], "destinations": ["FLL"], "departure_date": future(20)}
 _found = app.probe_missing_airports(_spec_hb, _o_hb, _d_hb, _bdl_only, None,
                                     searcher_cls=lambda: types.SimpleNamespace(
                                         search=lambda *a, **k: _hvn_row))
 check("the dedicated probe recovers service the combined search missed",
       len(_found[0]) == 1 and _found[1] is None)
+# a well-formed Google answer with zero rows (what the wire records when a
+# chunk parses but carries no flights) is the only evidence of absence
+_answered_empty = lambda *a, **k: (setattr(app._local, "last_wire",
+                                           {"parsed": True, "bytes": 65, "rows": 0}), [])[1]
 _empty = app.probe_missing_airports(_spec_hb, _o_hb, _d_hb, _bdl_only, None,
-                                    searcher_cls=lambda: types.SimpleNamespace(
-                                        search=lambda *a, **k: []))
+                                    searcher_cls=lambda: types.SimpleNamespace(search=_answered_empty))
 check("only a dedicated search that ALSO came back empty licenses 'no service'",
       _empty[0] == [] and "VERIFIED NO SERVICE" in (_empty[1] or "")
       and "HVN (New Haven, US)" in _empty[1])
+# Nov 11: a dedicated SGN->JFK search in production was REFUSED on every
+# attempt while the route has 100+ flights. Refused is not an answer.
+_refused = app.probe_missing_airports(_spec_hb, _o_hb, _d_hb, _bdl_only, None,
+                                      searcher_cls=lambda: types.SimpleNamespace(
+                                          search=lambda *a, **k: None))
+check("a probe Google REFUSED never licenses 'no service'",
+      _refused[0] == [] and "VERIFIED NO SERVICE" not in (_refused[1] or "")
+      and "NOT VERIFIED" in (_refused[1] or "") and "NOT evidence of no service" in _refused[1])
+_failed = app.probe_missing_airports(_spec_hb, _o_hb, _d_hb, _bdl_only, None,
+                                     searcher_cls=lambda: types.SimpleNamespace(
+                                         search=lambda *a, **k: (_ for _ in ()).throw(
+                                             app.SearchClientError("timed out"))))
+check("...nor does a probe that never reached Google",
+      "VERIFIED NO SERVICE" not in (_failed[1] or "") and "NOT VERIFIED" in (_failed[1] or ""))
 check("a single-airport search never probes itself",
       app.probe_missing_airports({"origins": ["HVN"], "destinations": ["FLL"]},
                                  *app.resolve_airports(["HVN"])[:1], _d_hb, [], None) == ([], None)
@@ -626,7 +647,7 @@ _fb = app.multi_city_fallback({"multi_city_segments": [
     {"origins": ["HKG"], "destinations": ["JFK"], "date": "2027-01-15"},
 ]}, "USD", leg_search=_fake_leg)
 check("the fallback pairs per-leg one-ways into separate-ticket combos",
-      len(_fb["results"]) == 3
+      len(_fb["results"]) >= 3
       and _fb["results"][0]["total_price"] == 1239.0
       and _fb["results"][0]["price_basis"] == "separate tickets")
 check("...warns about the separate-ticket trade explicitly",
@@ -640,6 +661,192 @@ _fb_empty = app.multi_city_fallback({"multi_city_segments": [
 ]}, "USD", leg_search=lambda s: {"type": "flights", "results": []})
 check("legs that fail on their own still hand the user the Google link",
       _fb_empty["results"] == [] and "combined_check_url" in _fb_empty)
+# Nov 11, NYC -> Hanoi Mar 4 / Saigon -> NYC Mar 20: the first attempt
+# shipped NOTHING but a Google link because one leg came back empty, and
+# the retry's nine combos used TWO of the 120 NYC -> Hanoi flights Google
+# had. Every leg is its own one-way search; those now ship whole as a
+# per-leg board, a failed leg no longer erases the legs that worked, an
+# empty leg is retried once, and every leg shares ONE deadline that fits
+# the agent's 55s batch window (the old code waited 50s per leg, in turn).
+def _mc_row(code, num, price, dur, stops, d, frm, to):
+    return {"airline": code, "airline_code": code, "price": price, "currency": "USD",
+            "duration": dur, "stops": stops, "warnings": [], "highlights": [],
+            "booking_url": f"https://www.google.com/travel/flights?tfs={code}{num}",
+            "legs": [{"from": frm, "to": to, "departure": d + "T10:00:00", "arrival": d + "T23:00:00",
+                      "airline_code": code, "flight_number": num}]}
+
+
+_mc_segs = {"multi_city_segments": [
+    {"origins": ["JFK", "LGA", "EWR"], "destinations": ["HAN"], "date": future(110)},
+    {"origins": ["SGN"], "destinations": ["JFK", "LGA", "EWR"], "date": future(126)}]}
+_d1, _d2 = _mc_segs["multi_city_segments"][0]["date"], _mc_segs["multi_city_segments"][1]["date"]
+
+
+def _mc_legs_ok(spec):
+    if "HAN" in spec["destinations"]:  # value-best is NOT the cheapest here
+        return {"type": "flights", "message": "leg one note", "results": [
+            _mc_row("CX", "841", 500.0, 1300, 1, _d1, "JFK", "HAN"),
+            _mc_row("OZ", "221", 442.0, 1435, 1, _d1, "JFK", "HAN"),
+            _mc_row("KE", "82", 470.0, 1500, 1, _d1, "JFK", "HAN")]}
+    return {"type": "flights", "message": "leg two note", "results": [
+        _mc_row("EK", "393", 653.0, 1565, 1, _d2, "SGN", "JFK"),
+        _mc_row("CI", "782", 700.0, 1300, 1, _d2, "SGN", "JFK")]}
+
+
+_mcl = app.multi_city_fallback(dict(_mc_segs), "USD", leg_search=_mc_legs_ok)
+check("every leg ships whole for per-leg choice",
+      [lg["count"] for lg in _mcl.get("legs") or []] == [3, 2]
+      and all(lg["status"] == "ok" for lg in _mcl["legs"]))
+_tots = [r["total_price"] for r in _mcl["results"]]
+check("combos are value-ranked, never rank-zipped, and keep the cheapest pairing",
+      1095 in _tots and _tots != [1153, 1170] and _mcl["results"][0]["price_basis"] == "separate tickets",
+      f"totals={_tots}")
+check("separate-ticket combos book per leg, never on Google's one-ticket page",
+      all(r.get("book_per_leg") and r.get("booking_url") is None for r in _mcl["results"])
+      and all(p.get("booking_url") for r in _mcl["results"] for p in r["parts"]))
+check("an open-jaw trip keeps every city in the model's view of the route",
+      app.mc_route_text(_mc_segs["multi_city_segments"]) == "JFK/LGA/EWR → HAN, then SGN → JFK/LGA/EWR"
+      and app.mc_route_text([{"origins": ["ATL"], "destinations": ["PEK"]},
+                             {"origins": ["PEK"], "destinations": ["HKG"]}]) == "ATL → PEK → HKG"
+      and "SGN" in _mcl["message"])
+
+# a failed leg must not erase the one that worked
+_calls = {"n": 0}
+
+
+def _leg1_dead(spec):
+    if "HAN" in spec["destinations"]:
+        _calls["n"] += 1
+        raise RuntimeError("proxy cut the response short")
+    return _mc_legs_ok(spec)
+
+
+_mcp = app.multi_city_fallback(dict(_mc_segs), "USD", leg_search=_leg1_dead)
+_l1, _l2 = (_mcp.get("legs") or [{}, {}])[:2]
+check("a leg that fails is retried once before anyone is told it is missing",
+      _calls["n"] == 2, f"leg-1 attempts={_calls['n']}")
+check("...and the legs that worked still ship (partial truth, never a bare link)",
+      _l2.get("count") == 2 and _l1.get("status") == "missing" and _mcp["results"] == []
+      and "combined_check_url" in _mcp)
+check("...with the missing leg named for the model, and its cause recorded",
+      "LEG 1" in _mcp["message"] and "NOT evidence of no service" in _mcp["message"]
+      and "proxy cut the response short" in (_l1.get("detail") or ""))
+
+# a retry that succeeds rescues the whole trip
+_flaky = {"n": 0}
+
+
+def _leg1_flaky(spec):
+    if "HAN" in spec["destinations"]:
+        _flaky["n"] += 1
+        if _flaky["n"] == 1:
+            return {"type": "flights", "results": []}  # a thin slice, not absence
+    return _mc_legs_ok(spec)
+
+
+_mcr = app.multi_city_fallback(dict(_mc_segs), "USD", leg_search=_leg1_flaky)
+check("a retried leg that comes back rescues the full trip",
+      _mcr["legs"][0]["count"] == 3 and "on retry" in _mcr["legs"][0]["detail"] and _mcr["results"])
+
+# one shared deadline: a hung leg cannot hold the turn past the batch window
+_t_hang = time.monotonic()
+_mch = app.multi_city_fallback(dict(_mc_segs), "USD",
+                               leg_search=lambda s: (time.sleep(3), _mc_legs_ok(s))[1]
+                               if "HAN" in s["destinations"] else _mc_legs_ok(s),
+                               deadline=time.monotonic() + 0.6)
+check("legs share ONE deadline, so a hung leg cannot blow the batch window",
+      time.monotonic() - _t_hang < 2.0 and _mch["legs"][1]["count"] == 2
+      and "time ran out" in _mch["legs"][0]["detail"],
+      f"{time.monotonic() - _t_hang:.1f}s")
+check("...and that deadline fits inside the agent's 55s search batch",
+      app.MC_LEGS_DEADLINE_S < 55 and "batch_deadline = time.monotonic() + 55" in _src_mc2)
+
+# the model and the ledger see the legs, not just the paired combos
+_cm = json.loads(app.compact_for_model(_mcl))
+check("the model sees each leg's own option space",
+      [lo["flights_found"] for lo in _cm.get("legs_overview") or []] == [3, 2]
+      and len(_cm["legs_overview"][0]["best_options"]) == 3)
+_led = app.ledger_entry(dict(_mc_segs), _mcp)
+check("a legs-only result still lands in the ledger (follow-ups resolve from it)",
+      _led is not None and _led["leg_boards"][0]["flights"] == 2
+      and _led["route"] == "JFK/LGA/EWR-HAN then SGN-JFK/LGA/EWR")
+
+# the success path ships the legs too, books its floor per leg, and reports its probe
+check("the success payload ships the legs and says what the probe did",
+      [lg["count"] for lg in _mcf.get("legs") or []] == [1, 1] and "combined_probe" in _mcf)
+check("...and its separate-ticket floor books leg by leg",
+      _top.get("book_per_leg") is True and _top.get("booking_url") is None)
+
+# the ladder's verdict: answered-empty vs refused vs error, per attempt
+_v_ans = app.run_search(types.SimpleNamespace(search=_answered_empty), app.build_filters(
+    {"departure_date": future(30)}, *app.resolve_airports(["JFK"])[:1], app.resolve_airports(["ORD"])[0]),
+    app.SortBy.CHEAPEST, top_n=10, budget_s=0.1)
+check("the ladder records that Google ANSWERED with no flights",
+      _v_ans == [] and app.search_verdict()["verdict"] == "empty")
+_v_ref = app.run_search(types.SimpleNamespace(search=lambda *a, **k: None), app.build_filters(
+    {"departure_date": future(30)}, *app.resolve_airports(["JFK"])[:1], app.resolve_airports(["ORD"])[0]),
+    app.SortBy.CHEAPEST, top_n=10, budget_s=0.1)
+check("...and that a refusal is a refusal, not an answer",
+      _v_ref == [] and app.search_verdict()["verdict"] == "refused"
+      and app.search_verdict()["attempts"][0].startswith("a1 refused"))
+
+# one pair Google refuses must not take its neighbors down (prod, Nov 11:
+# SGN -> JFK/LGA/EWR empty every time, SGN -> EWR alone 55 flights)
+_ewr_rows = [result([leg("SGN", "EWR", future(60) + "T10:00", future(61) + "T08:00", "BR", str(390 + i))],
+                    900.0 + i, stops=1, duration=1500) for i in range(3)]
+
+
+def _poisoned_rs(search, filters, sort, top_n, budget_s=35.0, max_attempt_s=None):
+    dests = {a[0].name for a in filters.flight_segments[0].arrival_airport}
+    if dests == {"EWR"}:
+        app._local.search_diag = {"verdict": "ok", "attempts": ["a1 ok 3"]}
+        return list(_ewr_rows)
+    app._local.search_diag = {"verdict": "refused", "attempts": ["a1 refused 80B 9s"]}
+    return []
+
+
+app.run_search = _poisoned_rs
+_o_sg, _ = app.resolve_airports(["SGN"])
+_d_ny, _ = app.resolve_airports(["JFK", "LGA", "EWR"])
+_resc = app.search_fixed_dates({"trip_type": "one_way", "departure_date": future(60),
+                                "origins": ["SGN"], "destinations": ["JFK", "LGA", "EWR"]},
+                               _o_sg, _d_ny, "USD")
+app.run_search = lambda *a, **k: (setattr(app._local, "search_diag",
+                                          {"verdict": "refused", "attempts": ["a1 refused 80B"]}), [])[1]
+_o_jfk, _ = app.resolve_airports(["JFK"])
+_alone = app.search_fixed_dates({"trip_type": "one_way", "departure_date": future(60),
+                                 "origins": ["SGN"], "destinations": ["JFK"]}, _o_sg, _o_jfk, "USD")
+app.run_search = _real_run
+check("a refused multi-airport search is rescued airport by airport",
+      len(_resc.get("results") or []) == 3 and "searched ALONE" in _resc["message"],
+      f"{len(_resc.get('results') or [])} results")
+check("...and the pair Google refused is named, never called 'no service'",
+      "SGN→JFK" in _resc["message"] and "NOT evidence of no service" in _resc["message"]
+      and "VERIFIED NO SERVICE" not in _resc["message"])
+check("a search Google never answered says so instead of 'No flights found'",
+      _alone["results"] == [] and "No flights found" not in _alone["message"]
+      and "NOT evidence that no flights exist" in _alone["message"]
+      and _alone["search_diag"]["verdict"] == "refused")
+check("multi-airport one-ways leave the rescue room inside the 55s batch",
+      app.MULTI_COMBINED_BUDGET_S + 8 <= app.SEARCH_END_S < 55)
+check("the turn's status line says WHICH kind of empty it was",
+      "Google never answered (refused), NOT evidence of no service" in _src_mc2
+      or "Google never answered (refused), NOT evidence of no service"
+      in open(os.path.join(ROOT, "api", "index.py")).read())
+
+_fe_mc = open(os.path.join(ROOT, "public", "index.html")).read()
+check("multi-city opens on a per-leg board, filtered by the same bar",
+      "mcBoardOpen(sec)" in _fe_mc and "mcLegRows(sec, leg)" in _fe_mc
+      and "if (this.mcHasLegs(sec)) sec._expanded = true;" in _fe_mc
+      and "_applyFilters({ type: 'flights' }, leg.results" in _fe_mc)
+check("...books each leg on its own link, and offers to re-search a missing leg",
+      "'Book leg ' + (k + 1)" in _fe_mc and "mcAskLeg(leg)" in _fe_mc
+      and "mcPerLeg(it)" in _fe_mc)
+check("...and a section whose legs came back is never hidden",
+      "|| this.mcHasLegs(s));" in _fe_mc)
+check("the prompt answers leg questions from the legs and names a missing leg",
+      "legs_overview" in app.assistant_system_prompt()
+      and "name exactly which leg is missing" in app.assistant_system_prompt())
 _fe_mc = open(os.path.join(ROOT, "public", "index.html")).read()
 check("the card offers 'price the combined ticket on Google'",
       "Price the combined one-ticket itinerary on Google" in _fe_mc)
@@ -1207,10 +1414,13 @@ section("Latency overlaps  — Changelog: 'the sequential turn'")
 # The Aug 2 profile was router -> search -> synthesis, strictly sequential.
 # These pin the overlaps that fixed it — and the guardrails that keep each
 # one quality-free.
+_sep18 = f"{datetime.now().year}-09-18"
+if _sep18 < datetime.now().strftime("%Y-%m-%d"):  # passed: the nearest FUTURE Sept 18
+    _sep18 = f"{datetime.now().year + 1}-09-18"
 check("speculation fires only on the unmistakable shape",
       app.speculative_spec("jfk to ord sept 18") == {
           "origins": ["JFK"], "destinations": ["ORD"],
-          "trip_type": "one_way", "departure_date": f"{datetime.now().year}-09-18"})
+          "trip_type": "one_way", "departure_date": _sep18})
 check("...and carries an explicit cheapest/fastest ask into the spec key",
       app.speculative_spec("jfk to ord sept 18 cheapest").get("sort") == "cheapest")
 check("no date, no speculation (a dateless spec would only cache a clarify)",
@@ -1363,8 +1573,11 @@ check("payloads carry the party and tell the model prices are party totals",
 check("a solo search keeps its message untouched",
       app.stamp_party({"type": "flights", "message": "m", "results": []}, {})["message"] == "m")
 _src_pax = open(os.path.join(ROOT, "api", "index.py")).read()
+_leg_sp = app._mc_leg_spec({"adults": 2, "children": 2, "cabin": "business"},
+                           {"origins": ["JFK"], "destinations": ["HAN"], "date": future(90)})
 check("the multi-city leg sub-specs stop dropping children",
-      _src_pax.count('"children": spec.get("children"),') >= 2)
+      _leg_sp["children"] == 2 and _leg_sp["adults"] == 2 and _leg_sp["cabin"] == "business"
+      and _src_pax.count("_mc_leg_spec(spec, seg)") >= 2)
 check("the price-context cache key splits on children",
       '"children": spec.get("children") or 0,' in _src_pax)
 check("the /api/returns spec_echo keeps the party (tap-to-price books it too)",
@@ -1686,7 +1899,7 @@ for _ep in ("/api/returns", "/api/search/stream"):
     check(f"README documents {_ep}", _ep in _src and _ep in _readme)
 check("README and code agree on the Haiku first-call router",
       ("claude-haiku-4-5" in _src) == ("claude-haiku-4-5" in _readme))
-_n = _re.search(r"run_search\(searcher, filters, sort, top_n=(\d+)\)", _src)
+_n = _re.search(r"run_search\(searcher, filters, sort, top_n=(\d+)[,)]", _src)
 check("README's round-trip group count matches top_n",
       bool(_n) and f"~{_n.group(1)} round-trip OUTBOUND groups" in _readme,
       f"code expands top_n={_n.group(1) if _n else '?'}")

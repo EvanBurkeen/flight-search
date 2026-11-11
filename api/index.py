@@ -8,8 +8,9 @@ import time
 
 _PROCESS_START = time.monotonic()
 _process_served = 0  # 0 while this process has not yet answered a request
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
+from concurrent.futures import wait as futures_wait
 from datetime import date, datetime, timedelta
 from functools import lru_cache
 from urllib.parse import quote
@@ -379,6 +380,16 @@ def _extract_route_airlines(inner) -> dict | None:
 
 def _parse_merged_wrb_payload(body):
     inner = merge_wrb_chunks(list(_iter_wrb_chunks(body)))
+    # What this response WAS, for the ladder's verdict: a refusal parses to
+    # no chunk at all (inner None); Google genuinely saying "no flights" is a
+    # well-formed chunk with no rows. Only the second is evidence of absence.
+    try:
+        _local.last_wire = {
+            "bytes": len(body or ""), "parsed": inner is not None,
+            "rows": (len(_chunk_rows(inner, 2)) + len(_chunk_rows(inner, 3))) if inner is not None else 0,
+        }
+    except Exception:
+        _local.last_wire = None
     # stash the route's carrier manifest for the caller (thread-local: the
     # main search parses on its own calling thread; expansion threads keep
     # their own copies and never clobber it)
@@ -726,7 +737,7 @@ REQUEST_RULES = """How to handle requests:
 - A follow-up that ADDS a hard constraint (an airline or alliance, nonstop only, a cabin, a specific airport) is a new search, not a reading-comprehension question: run the constrained search immediately in that same turn instead of describing the ledger's thin slice and asking permission to look properly. Describe-then-ask is only right when the constraint is ambiguous.
 - Comparisons: run one search per option (at most 4 per turn). A self-arranged overnight stopover = one search per leg with the correct date on each. Give each search a summary naming the option ("Option A: Thursday nonstop").
 - Empty first results on busy routes are usually transient: retry the SAME search once before broadening. Once a search succeeds, stop; don't also run overlapping broader variants of a question that's already answered. (Empty searches are hidden from the user's page, so never reference "the empty section above.")
-- Multi-city trips (A -> B, B -> C, C -> A, or open-jaw): use trip_type multi_city with multi_city_segments. Google currently withholds combined one-ticket pricing from automated sessions, so the result usually contains each leg priced as its own one-way, paired as separate tickets, plus a direct link to Google's multi-city page for the exact legs. Present the separate-ticket total honestly, warn about bags and missed-connection protection between separate tickets, and ALWAYS point at the link for the one-ticket price ("the combined ticket, sometimes cheaper when one carrier flies every leg, prices in one tap there"). Never claim the through-ticket does not exist, and never present the separate-ticket sum as the only price.
+- Multi-city trips (A -> B, B -> C, C -> A, or open-jaw): use trip_type multi_city with multi_city_segments. Google currently withholds combined one-ticket pricing from automated sessions, so the result usually contains each leg priced as its own one-way, paired as separate tickets, plus a direct link to Google's multi-city page for the exact legs. Present the separate-ticket total honestly, warn about bags and missed-connection protection between separate tickets, and ALWAYS point at the link for the one-ticket price ("the combined ticket, sometimes cheaper when one carrier flies every leg, prices in one tap there"). Never claim the through-ticket does not exist, and never present the separate-ticket sum as the only price. Multi-city results also carry legs_overview: every leg searched as its own one-way, which the user browses on a per-leg board and combines freely as separate tickets. When they ask about one leg ("what else goes to Hanoi?"), answer from that leg's options and counts, not from the paired combos. If a leg's status is not ok, name exactly which leg is missing and offer to search that leg on its own right away; never call the trip or the leg unavailable.
 - Make reasonable assumptions and state them briefly instead of interrogating the user. City-level vagueness is yours to resolve (airports, date windows, cabin). But ask ONE brief question before searching when the request is genuinely unresolvable: the origin is missing entirely, or the destination is a whole region or continent ("Europe", "Asia", "somewhere warm"). Offer to choose for them in the same breath, e.g. "Anywhere in Europe in particular? If you're open, I'm happy to compare a few favorites like London, Paris, and Lisbon." Never stack multiple questions, and never ask when a sensible assumption exists.
 - Airport precision matters: each result's route field states its true endpoints (e.g. FLL-EWR). Quote airports exactly from that field. Never name an airport the data does not show; EWR is not JFK.
 - IATA codes are assertions from memory, and memory misfiles them (PEI is Pereira, Colombia, not Beijing). Every result opens with "Route as searched" naming each airport's real city and country: READ it before writing a word of prose. If any airport there is not in the place the user asked for, say so plainly, ignore its flights entirely, and re-search without it in the same turn. Reliable expansions: NYC -> JFK/LGA/EWR, London -> LHR/LGW/STN, Tokyo -> HND/NRT, Beijing -> PEK/PKX, Shanghai -> PVG/SHA, Seoul -> ICN/GMP.
@@ -781,8 +792,20 @@ def compact_for_model(payload: dict) -> str:
             }
             for it in (payload.get("results") or [])[:5]
         ]
-        return json.dumps(_with_price_ctx(
-            {"kind": "multi_city", "note": payload.get("message"), "options": rows}, payload))
+        data = {"kind": "multi_city", "note": payload.get("message"), "options": rows}
+        legs = payload.get("legs") or []
+        if legs:
+            # each leg's own option space, so the model can speak to "the
+            # NYC -> Hanoi flights" instead of the two that made the combos
+            data["legs_overview"] = [{
+                "leg": lg.get("n"), "route": lg.get("label"), "date": lg.get("date"),
+                "status": lg.get("status"),
+                **({"detail": lg.get("detail")} if lg.get("status") != "ok" else {}),
+                "flights_found": lg.get("count"), "cheapest": lg.get("cheapest"),
+                "best_options": [_leg_summary(f) for f in (lg.get("results") or [])[:3]],
+                "leg_note": (lg.get("message") or "")[:600],
+            } for lg in legs]
+        return json.dumps(_with_price_ctx(data, payload))
     if kind == "itineraries":
         rows = [
             {
@@ -951,7 +974,8 @@ def ledger_entry(spec: dict, payload: dict) -> dict | None:
         return entry
     if kind == "multicity":
         rows = payload.get("results") or []
-        if not rows:
+        legs = [lg for lg in (payload.get("legs") or []) if lg.get("results")]
+        if not rows and not legs:
             return None
         entry["kind"] = "multi_city"
         entry["options"] = [
@@ -960,6 +984,13 @@ def ledger_entry(spec: dict, payload: dict) -> dict | None:
              "legs": [_ledger_flight(p) for p in it.get("parts") or []]}
             for i, it in enumerate(rows[:LEDGER_OPTIONS])
         ]
+        if legs:
+            # the per-leg board is on screen too: "the 12:00 Korean Air to
+            # Hanoi" must resolve from the record, not a re-search
+            entry["leg_boards"] = [
+                {"leg": lg.get("n"), "route": lg.get("label"), "flights": lg.get("count"),
+                 "top": [_ledger_flight(f, j + 1) for j, f in enumerate(lg["results"][:3])]}
+                for lg in legs]
         return entry
     if kind == "itineraries":
         rows = payload.get("results") or []
@@ -1001,7 +1032,7 @@ def _turn_ledger(entries: list) -> dict | None:
     return {"entries": entries[-LEDGER_ENTRIES:]} if entries else None
 
 
-_LEDGER_FIELDS = ("search", "route", "depart", "return", "cabin", "kind",
+_LEDGER_FIELDS = ("search", "route", "depart", "return", "cabin", "kind", "leg_boards",
                   "options", "cheapest_dates", "unpriced_outbounds", "not_listed")
 
 
@@ -1570,8 +1601,17 @@ def run_assistant(query: str, history: list | None, emit=None,
                 if entry:
                     ledger_entries.append(entry)
                 n = len(payload.get("results") or payload.get("dates") or [])
-                search_log.append(f"'{label}': completed, {n} options on screen"
-                                  if n else f"'{label}': came back EMPTY (transient hiccup or no service)")
+                if n:
+                    search_log.append(f"'{label}': completed, {n} options on screen")
+                else:
+                    _sd = payload.get("search_diag") or {}
+                    _why = {"empty": "Google answered: no flights",
+                            "refused": "Google never answered (refused), NOT evidence of no service",
+                            "error": "could not reach Google"}.get(_sd.get("verdict"),
+                                                                   "transient hiccup or no service")
+                    search_log.append(f"'{label}': came back EMPTY ({_why}"
+                                      + (f"; {' '.join(_sd.get('attempts') or [])}" if _sd.get("attempts") else "")
+                                      + ")")
                 tool_results_by_id[tu.id] = {
                     "type": "tool_result", "tool_use_id": tu.id,
                     "content": compact_for_model(payload),
@@ -1591,8 +1631,11 @@ def run_assistant(query: str, history: list | None, emit=None,
                     "type": "tool_result", "tool_use_id": tu.id,
                     "content": detail, "is_error": True,
                 }
-            except SearchClientError:
-                search_log.append(f"'{label}': FAILED (couldn't reach Google)")
+            except SearchClientError as e:
+                _sd = getattr(e, "search_diag", None) or {}
+                search_log.append(f"'{label}': FAILED (couldn't reach Google"
+                                  + (f"; {' '.join(_sd.get('attempts') or [])}" if _sd.get("attempts") else "")
+                                  + ")")
                 tool_results_by_id[tu.id] = {
                     "type": "tool_result", "tool_use_id": tu.id,
                     "content": "Couldn't reach Google Flights for this search.", "is_error": True,
@@ -2555,7 +2598,7 @@ class RepresentativeSearch(SearchFlights):
 
 
 def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy,
-               top_n: int, budget_s: float = 35.0):
+               top_n: int, budget_s: float = 35.0, max_attempt_s: float | None = None):
     # Refusals come as HTTP 200 + a tiny body (parses to empty) or as raised
     # client errors. Both gates are answered the same way: retire the identity
     # (cookies + exit IP + fingerprint) so the retry is a different visitor,
@@ -2570,6 +2613,15 @@ def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy
     started = time.monotonic()
     last_exc = None
     _local.route_airlines = None  # each search reads only its own manifest
+    # Per-attempt record and a verdict, read by whoever asked (thread-local):
+    # "empty" means Google ANSWERED with no flights at least once, the only
+    # outcome that is evidence of absence. "refused"/"error" mean we never
+    # got an answer: Nov 11, a dedicated SGN->JFK search in production came
+    # back empty on every attempt while the route has 100+ flights, and the
+    # airport probe had been calling exactly that "VERIFIED NO SERVICE".
+    diag: list = []
+    answered_empty = False
+    _local.search_diag = None
     for i, attempt_sort in enumerate((sort, sort, SortBy.CHEAPEST, SortBy.CHEAPEST)):
         if i > 0 and time.monotonic() - started > budget_s:
             break  # out of time: surface what we have rather than dig the hole deeper
@@ -2578,12 +2630,17 @@ def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy
         # attempt 1 fails fast into a fresh identity; retries get room for
         # Google's slow progressive streams to actually finish downloading
         _local.fli_timeout = 12.0 if i == 0 else 28.0
+        if max_attempt_s:  # a bounded caller (a rescue) caps every attempt
+            _local.fli_timeout = min(_local.fli_timeout, max_attempt_s)
         search._attempt = i  # expansion patience scales with the attempt too
         attempt = filters.model_copy(update={"sort_by": attempt_sort})
+        _local.last_wire = None
+        _ta = time.monotonic()
         try:
             results = search.search(attempt, top_n=top_n, currency="USD")
         except SearchClientError as e:
             last_exc = e
+            diag.append(f"a{i + 1} {type(e).__name__} {time.monotonic() - _ta:.0f}s")
             retire_identity()
             note_search_outcome(False)
             time.sleep(0.5 + 0.4 * i + random.uniform(0, 0.4))
@@ -2591,13 +2648,38 @@ def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy
         if results:
             note_search_outcome(True)
             _attempt_stats["ok_on_attempt"].append(i + 1)
+            diag.append(f"a{i + 1} ok {len(results)}")
+            _local.search_diag = {"verdict": "ok", "attempts": diag}
             return results
+        wire = getattr(_local, "last_wire", None) or {}
+        if wire.get("parsed"):
+            answered_empty = True
+            diag.append(f"a{i + 1} answered-empty {wire.get('bytes', 0)}B")
+        else:
+            diag.append(f"a{i + 1} refused {wire.get('bytes', 0)}B {time.monotonic() - _ta:.0f}s")
         retire_identity()
         note_search_outcome(False)
         time.sleep(0.4 * (i + 1) + random.uniform(0, 0.4))
-    if last_exc:
+    _local.search_diag = {
+        "verdict": "empty" if answered_empty else ("error" if last_exc else "refused"),
+        "attempts": diag,
+    }
+    if last_exc and not answered_empty:
+        try:
+            last_exc.search_diag = _local.search_diag
+        except Exception:
+            pass
         raise last_exc
     return []
+
+
+def search_verdict() -> dict:
+    """The verdict of the last run_search on THIS thread."""
+    return getattr(_local, "search_diag", None) or {"verdict": "refused", "attempts": []}
+
+
+def absence_proven(verdict: dict | None) -> bool:
+    return bool(verdict) and verdict.get("verdict") == "empty"
 
 
 AIRPORT_PROBE_BUDGET_S = 12.0
@@ -2634,7 +2716,7 @@ def probe_missing_airports(spec: dict, origins: list, destinations: list,
     if not results or isinstance(results[0], tuple):
         return [], None   # round trips disclose instead; tuples need pairing
     searcher_cls = searcher_cls or SearchFlights
-    extra, still_empty = [], []
+    extra, still_empty, withheld = [], [], []
     todo = ([("origin", a) for a in
              airports_with_no_rows(origins, results, _orig_of_result)]
             + [("destination", a) for a in
@@ -2651,22 +2733,34 @@ def probe_missing_airports(spec: dict, origins: list, destinations: list,
             rows = run_search(searcher_cls(),
                               build_filters(one, o2, d2, show_all_results=True),
                               sort, top_n=10, budget_s=AIRPORT_PROBE_BUDGET_S) or []
-        except Exception:
-            rows = []
+            verdict = search_verdict()
+        except Exception as e:
+            rows, verdict = [], getattr(e, "search_diag", None) or {"verdict": "error"}
         rows = [r for r in rows if not isinstance(r, tuple)]
         if rows:
             have = {flight_signature(r) for r in results}
             extra += [r for r in rows if flight_signature(r) not in have]
             print(f"[airport-probe] {code} alone returned {len(rows)} rows "
                   f"(combined search had none)")
-        else:
+        elif absence_proven(verdict):
             still_empty.append(code)
-            print(f"[airport-probe] {code} alone also returned nothing")
+            print(f"[airport-probe] {code} alone: Google answered with no flights")
+        else:
+            withheld.append(code)
+            print(f"[airport-probe] {code} alone: no answer ({verdict.get('verdict')}: "
+                  f"{verdict.get('attempts')})")
     note = None
     if still_empty:
         note = (" VERIFIED NO SERVICE: " + ", ".join(airport_place(c) for c in still_empty)
-                + " returned nothing even when searched ALONE for this date, so it is "
-                  "honest to say that airport has no service on this route today.")
+                + " returned nothing even when searched ALONE for this date, and Google "
+                  "ANSWERED that search (it was not refused), so it is honest to say that "
+                  "airport has no service on this route today.")
+    if withheld:
+        note = (note or "") + (
+            " NOT VERIFIED: " + ", ".join(airport_place(c) for c in withheld)
+            + " was searched ALONE and Google did not answer this session at all (refused or "
+              "failed). That is NOT evidence of no service: say you could not get options "
+              "from that airport just now, and offer to try it again.")
     return extra, note
 
 
@@ -2764,23 +2858,110 @@ def from_priced_only_payload(spec: dict, origins: list, destinations: list,
     }, spec)
 
 
+MULTI_RESCUE_MAX_PAIRS = 6
+MULTI_COMBINED_BUDGET_S = 20.0  # a multi-airport one-way's own ladder, leaving room to rescue it
+SEARCH_END_S = 50.0             # a search must be done by here (the agent waits 55s per batch)
+
+
+def rescue_empty_multi_airport(spec: dict, origins: list, destinations: list, sort,
+                               started: float) -> tuple[list, str | None]:
+    """A multi-airport one-way that came back with NOTHING, re-run per pair.
+
+    Nov 11, production: SGN -> JFK/LGA/EWR came back empty on every attempt
+    while SGN -> EWR alone returned 55 flights in the same window. One pair
+    Google would not answer (SGN -> JFK, refused even alone) took its
+    neighbors down with it, exactly the class of the Aug 8 HVN date grid:
+    a combined request collapses to its worst member. Each pair is asked on
+    its own (parallel, bounded by the time left), whatever returns is
+    merged, and every pair is reported honestly: answered-with-nothing is
+    absence, refused is NOT.
+    """
+    remaining = started + SEARCH_END_S - time.monotonic()
+    if remaining < 8.0:
+        return [], None
+    per_attempt = min(10.0, remaining / 2)
+    budget = max(1.0, remaining - per_attempt)  # worst case ends near `remaining`
+    pairs = [(o, d) for o in origins for d in destinations][:MULTI_RESCUE_MAX_PAIRS]
+
+    def one(pair):
+        o, d = pair
+        sub = {**spec, "origins": [o.name], "destinations": [d.name]}
+        try:
+            rows = run_search(SearchFlights(), build_filters(sub, [o], [d], show_all_results=True),
+                              sort, top_n=10, budget_s=budget, max_attempt_s=per_attempt) or []
+            return pair, [r for r in rows if not isinstance(r, tuple)], search_verdict()
+        except Exception as e:
+            return pair, [], getattr(e, "search_diag", None) or {"verdict": "error"}
+
+    pool = ThreadPoolExecutor(max_workers=min(4, max(1, len(pairs))))
+    try:
+        outs = list(pool.map(one, pairs, timeout=remaining + 2))
+    except Exception:
+        outs = []
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    rows, seen, served, absent, withheld = [], set(), [], [], []
+    for (o, d), got, verdict in outs:
+        tag = f"{o.name}→{d.name}"
+        if got:
+            served.append(f"{tag} {len(got)}")
+            for r in got:
+                sig = (flight_signature(r), r.legs[0].departure_datetime if r.legs else None)
+                if sig not in seen:
+                    seen.add(sig)
+                    rows.append(r)
+        elif absence_proven(verdict):
+            absent.append(tag)
+        else:
+            withheld.append(tag)
+    print(f"[multi-rescue] served={served} answered-empty={absent} withheld={withheld}")
+    note = (" The combined multi-airport search came back with nothing, so each airport pair "
+            "was searched ALONE: " + (", ".join(served) + " flights" if served else "none returned flights")
+            + ".")
+    if absent:
+        note += f" Google answered NO FLIGHTS for {', '.join(absent)}."
+    if withheld:
+        note += (f" Google did not answer this session at all for {', '.join(withheld)} (refused "
+                 "even alone): that is NOT evidence of no service; say you could not get those "
+                 "options just now and offer to try again.")
+    return rows, note
+
+
 def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: str) -> dict:
+    fd_started = time.monotonic()
     filters = build_filters(spec, origins, destinations, show_all_results=True)
     sort = SORT_MAP.get(spec.get("sort"), SortBy.CHEAPEST)
     searcher = RepresentativeSearch()
+    multi_ow = (spec.get("trip_type") != "round_trip"
+                and (len(origins) > 1 or len(destinations) > 1))
+    combined_exc = None
     # expansions run genuinely in parallel now (per-thread curl handles), so
     # 10 costs about what 2 did serially; the July 25 multi-airport timeouts
     # were the serialized fan-out, not the count
     try:
-        results = run_search(searcher, filters, sort, top_n=10)
-    except SearchClientError:
+        # a healthy search succeeds in seconds; a multi-airport one-way that
+        # is being refused gives up sooner so the per-pair rescue has time
+        results = run_search(searcher, filters, sort, top_n=10,
+                             budget_s=MULTI_COMBINED_BUDGET_S if multi_ow else 35.0)
+    except SearchClientError as e:
         # the ladder failed outright, but if any attempt got the outbound
         # list, the degraded path below still turns it into a usable answer
         if spec.get("trip_type") == "round_trip" and getattr(searcher, "last_outbounds", None):
             results = []
+        elif multi_ow:
+            results, combined_exc = [], e
         else:
             raise
+    combined_verdict = getattr(combined_exc, "search_diag", None) or search_verdict()
     route_manifest = getattr(_local, "route_airlines", None)
+
+    rescue_note = None
+    if multi_ow and not results:
+        rescued, rescue_note = rescue_empty_multi_airport(spec, origins, destinations, sort, fd_started)
+        if rescued:
+            results = rescued
+        elif combined_exc is not None:
+            raise combined_exc
 
     # THE SUPPLEMENTAL PROBE (one-way only; round trips disclose below):
     # when the response's own carrier manifest names airlines this session
@@ -2790,8 +2971,9 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
     # A named airport with zero rows is the one case a cut cannot explain
     # and rescue cannot repair: go and look at it alone before anyone says
     # "no service".
-    airport_note = None
-    if results and not isinstance(results[0], tuple) and spec.get("trip_type") != "round_trip":
+    airport_note = rescue_note
+    if (results and not rescue_note and not isinstance(results[0], tuple)
+            and spec.get("trip_type") != "round_trip"):
         _extra_ap, airport_note = probe_missing_airports(
             spec, origins, destinations, results, sort)
         if _extra_ap:
@@ -2835,10 +3017,21 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
                 getattr(searcher, "last_outbounds", None) or [], currency)
             if degraded:
                 return degraded
+        if absence_proven(combined_verdict):
+            message = "No flights found for that search. Try different dates, nearby airports, or fewer filters."
+        else:
+            # never answered is not "no flights": the Nov 11 SGN->JFK search
+            # came back like this every time while the route had 100+ flights
+            message = ("Google did not answer this search for this session (refused on every "
+                       "attempt, each as a fresh visitor). That is NOT evidence that no flights "
+                       "exist: tell the user plainly you could not get these results just now, "
+                       "and offer to try again or try nearby airports.")
         return {
             "type": "flights",
-            "message": "No flights found for that search. Try different dates, nearby airports, or fewer filters.",
+            "message": message + (rescue_note or ""),
             "results": [],
+            # what each attempt actually got, so the next diagnosis is free
+            "search_diag": combined_verdict,
         }
 
     via = {c.strip().upper() for c in spec.get("via_airports") or []}
@@ -3191,14 +3384,223 @@ def note_mc_probe(ok: bool) -> None:
             _mc_probe["quiet_until"] = time.monotonic() + MC_PROBE_QUIET_S
 
 
+# Every multi-city search is, underneath, one one-way search per leg. Those
+# leg searches carry the whole option space (Nov 11: NYC -> Hanoi alone was
+# 120 flights from all three NYC airports), while the combined endpoint only
+# expands a handful of leg-1 candidates, so the pre-paired combos showed TWO
+# NYC -> Hanoi flights out of 120. The legs now ship whole, as a per-leg
+# board — separate tickets are independent purchases, so choosing per leg is
+# the honest model, exactly as choosing per direction is for round trips.
+#
+# Timing: the agent loop waits 55s for a search batch (batch_deadline), so
+# every leg is harvested against ONE shared deadline measured from the start
+# of the multi-city search. The old fallback waited 50s per leg, in sequence:
+# two slow legs could hold the turn 100s, and blowing the batch window lost
+# the whole section.
+MC_LEGS_DEADLINE_S = 48.0   # from the start of search_multi_city, all legs
+MC_LEG_RETRY_MIN_S = 10.0   # an empty leg is retried only if this much time remains
+
+
+def _mc_leg_spec(spec: dict, seg: dict) -> dict:
+    """One leg of a multi-city trip as its own one-way search spec."""
+    return {
+        "origins": seg.get("origins") or [], "destinations": seg.get("destinations") or [],
+        "trip_type": "one_way", "departure_date": seg.get("date"),
+        "cabin": spec.get("cabin"), "adults": spec.get("adults"),
+        "children": spec.get("children"),
+        "carry_on": spec.get("carry_on"), "checked_bags": spec.get("checked_bags"),
+        "departure_time": seg.get("departure_time"),
+    }
+
+
+def _mc_seg_label(seg: dict) -> str:
+    return f"{'/'.join(seg.get('origins') or ['?'])} → {'/'.join(seg.get('destinations') or ['?'])}"
+
+
+def mc_route_text(raw_segs: list) -> str:
+    """The trip's real shape: 'A → B → C' when legs chain, 'A → B, then C → D'
+    when they do not. The old text joined leg-1's origin to every leg's
+    destination, so the open-jaw NYC -> Hanoi, Saigon -> NYC read
+    'JFK → HAN → JFK': Saigon erased from the model's view of the trip."""
+    out = ""
+    prev_dst = None
+    for seg in raw_segs:
+        o = "/".join(seg.get("origins") or ["?"])
+        d = "/".join(seg.get("destinations") or ["?"])
+        if prev_dst is not None and o == prev_dst:
+            out += f" → {d}"
+        else:
+            out += (", then " if out else "") + f"{o} → {d}"
+        prev_dst = d
+    return out
+
+
+def harvest_mc_legs(spec: dict, raw_segs: list, leg_futs: list, deadline: float,
+                    leg_search=None, started: float | None = None) -> list[dict]:
+    """Every leg's own one-way result set, against ONE shared deadline.
+
+    A leg that comes back empty or errors is retried once, immediately, as a
+    fresh search (the cache never stores an empty payload, and the single-
+    flight slot is released on failure), provided MC_LEG_RETRY_MIN_S remain.
+    A thin slice reads as absence unless someone goes and looks — the same
+    lesson as probe_missing_airports. Each leg reports what happened to it,
+    so the next diagnosis reads the answer instead of guessing.
+    """
+    leg_search = leg_search or cached_execute_spec
+    started = started if started is not None else time.monotonic()
+    n = len(raw_segs)
+    payloads: list = [None] * n
+    notes: list = [""] * n
+    retried = [False] * n
+    pending = {fu: i for i, fu in enumerate(leg_futs)}
+    retry_pool = None
+    try:
+        while pending:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            done, _ = futures_wait(list(pending), timeout=remaining, return_when=FIRST_COMPLETED)
+            if not done:
+                break
+            for fu in done:
+                i = pending.pop(fu)
+                at = f"{time.monotonic() - started:.1f}s"
+                try:
+                    p, err = fu.result(), None
+                except Exception as e:  # SearchClientError and friends
+                    _sd = getattr(e, "search_diag", None) or {}
+                    p, err = None, (f"{type(e).__name__}: {str(e)[:100]}"
+                                    + (f" [{' '.join(_sd.get('attempts') or [])}]" if _sd else ""))
+                rows = (p.get("results") or []) if isinstance(p, dict) else []
+                if rows:
+                    payloads[i] = p
+                    notes[i] = (notes[i] + "; " if notes[i] else "") + f"{len(rows)} flights at {at}" \
+                        + (" (on retry)" if retried[i] else "")
+                    continue
+                if isinstance(p, dict) and p.get("type") == "clarify":
+                    payloads[i] = p  # bad airports: deterministic, retrying cannot help
+                    notes[i] = "could not search: " + str(p.get("message") or "")[:120]
+                    continue
+                _pd = (p or {}).get("search_diag") or {} if isinstance(p, dict) else {}
+                why = err or (f"{_pd.get('verdict', 'no flights returned')} "
+                              f"[{' '.join(_pd.get('attempts') or [])}]"
+                              if isinstance(p, dict) else "no payload")
+                notes[i] = (notes[i] + "; " if notes[i] else "") + f"{why} at {at}" \
+                    + (" (on retry)" if retried[i] else "")
+                if not retried[i] and deadline - time.monotonic() >= MC_LEG_RETRY_MIN_S:
+                    retried[i] = True
+                    retry_pool = retry_pool or ThreadPoolExecutor(max_workers=min(4, max(1, n)))
+                    pending[retry_pool.submit(leg_search, _mc_leg_spec(spec, raw_segs[i]))] = i
+        for fu, i in pending.items():
+            notes[i] = (notes[i] + "; " if notes[i] else "") + "still searching when time ran out"
+    finally:
+        if retry_pool is not None:
+            retry_pool.shutdown(wait=False, cancel_futures=True)
+
+    legs = []
+    for i, seg in enumerate(raw_segs):
+        p = payloads[i] if isinstance(payloads[i], dict) else {}
+        rows = p.get("results") or []
+        priced = [r["price"] for r in rows if isinstance(r.get("price"), (int, float))]
+        legs.append({
+            "n": i + 1,
+            "label": _mc_seg_label(seg),
+            "date": seg.get("date"),
+            "status": "ok" if rows else "missing",
+            "detail": notes[i] or "no result",
+            "count": len(rows),
+            "cheapest": min(priced) if priced else None,
+            "results": rows,
+            # the leg's own honesty layers (per-airport breakdown, carrier
+            # and manifest notes) travel with it, for the model
+            "message": p.get("message") or "",
+        })
+    return legs
+
+
+def pair_mc_legs(legs: list, currency: str) -> list[dict]:
+    """Separate-ticket combos from the legs, ranked by VALUE, never by rank-zip.
+
+    The old fallback paired leg-1 rank k with leg-2 rank k: the combos came
+    out unsorted and could omit the cheapest pairing entirely (measured
+    Nov 11: $1,095 was purchasable, the list opened at $1,163). Separate
+    tickets are independent purchases, so a combo's cost is the sum of its
+    legs' effective costs: take each leg's best few, score the product, keep
+    the best six — and always the outright cheapest pairing.
+    """
+    if not legs or any(not leg_.get("results") for leg_ in legs):
+        return []
+    per_leg = {2: 5, 3: 3}.get(len(legs), 2)
+    pools, scores = [], []
+    for leg_ in legs:
+        priced = [r for r in leg_["results"] if isinstance(r.get("price"), (int, float))]
+        if not priced:
+            return []  # an unpriced leg has no purchasable total
+        fastest = min((r.get("duration") or 0 for r in priced if r.get("duration")), default=None)
+        cost = {id(r): trip_cost(r["price"], r.get("duration"), r.get("stops") or 0,
+                                 r.get("warnings"), fastest) for r in priced}
+        by_value = sorted(priced, key=lambda r: cost[id(r)])
+        cheapest = min(priced, key=lambda r: r["price"])
+        pool = by_value[:per_leg]
+        if cheapest not in pool:
+            pool.append(cheapest)
+        pools.append(pool)
+        scores.append(cost)
+    from itertools import product
+    cands = []
+    for parts in product(*pools):
+        total = round(sum(p["price"] for p in parts))
+        value = sum(scores[k][id(p)] for k, p in enumerate(parts))
+        cands.append((value, total, list(parts)))
+    cands.sort(key=lambda c: (c[0], c[1]))
+    keep = cands[:6]
+    cheapest_combo = min(cands, key=lambda c: c[1])
+    if cheapest_combo not in keep:
+        keep[-1] = cheapest_combo
+    return [{
+        "total_price": total, "currency": currency, "price_basis": "separate tickets",
+        "separate_price": total, "combined_price": None,
+        "parts": parts,
+        "warnings": ["Booked as separate tickets: no through-checked bags or "
+                     "missed-connection protection between legs"],
+        # no single URL can book separate tickets: each part carries its own
+        # exact one-way deep link (with the party), and the card books per leg
+        "booking_url": None,
+        "book_per_leg": True,
+    } for _value, total, parts in keep]
+
+
+def mc_legs_note(legs: list) -> str:
+    """What the model must know about the legs, in one sentence per fact."""
+    ok = [leg_ for leg_ in legs if leg_["status"] == "ok"]
+    out = (" Every leg was ALSO searched as its own one-way, and the user can choose each leg "
+           "on a per-leg board (legs_overview has counts and the best options per leg): "
+           + "; ".join(f"leg {leg_['n']} {leg_['label']} {leg_['count']} flights"
+                       + (f" from ${leg_['cheapest']:.0f}" if leg_['cheapest'] else "")
+                       for leg_ in ok) + ".") if ok else ""
+    for leg_ in legs:
+        if leg_["status"] != "ok":
+            out += (f" LEG {leg_['n']} ({leg_['label']}) DID NOT COME BACK this time "
+                    f"({leg_['detail']}). That is NOT evidence of no service: say which leg is "
+                    "missing, and offer to search that leg on its own right away.")
+    return out
+
+
 def multi_city_fallback(spec: dict, currency: str, leg_search=None,
-                        probe_note: str | None = None, leg_futs=None) -> dict:
+                        probe_note: str | None = None, leg_futs=None,
+                        deadline: float | None = None, started: float | None = None) -> dict:
     """When Google withholds combined multi-city pricing (BotGuard-gated
     since Aug 2026), fall back to what is still fully knowable: each leg
     searched as its own one-way — every honesty layer applies per leg —
-    paired by rank into separate-ticket combos, with Google's own
-    multi-city page linked for the one-ticket price. The truth we can get,
-    plus a tap to the truth we cannot."""
+    shipped whole for per-leg choice, plus value-ranked separate-ticket
+    combos, with Google's own multi-city page linked for the one-ticket
+    price. The truth we can get, plus a tap to the truth we cannot.
+
+    A leg that fails no longer erases the legs that worked: Nov 11, the
+    user's first NYC -> Hanoi / Saigon -> NYC attempt shipped NOTHING but a
+    link because one leg came back empty, discarding the other leg's full
+    result set. Partial truth ships, the missing leg is named, and it was
+    already retried once before anyone is told it is missing."""
     raw_segs = (spec.get("multi_city_segments") or [])[:5]
     if len(raw_segs) < 2:
         return {"type": "multicity",
@@ -3207,71 +3609,49 @@ def multi_city_fallback(spec: dict, currency: str, leg_search=None,
     pool = None
     if leg_futs is None:  # standalone use (and the offline checks)
         pool = ThreadPoolExecutor(max_workers=min(4, len(raw_segs)))
-        leg_search = leg_search or cached_execute_spec
-        leg_futs = [pool.submit(leg_search, {
-            "origins": seg.get("origins") or [], "destinations": seg.get("destinations") or [],
-            "trip_type": "one_way", "departure_date": seg.get("date"),
-            "cabin": spec.get("cabin"), "adults": spec.get("adults"),
-            "children": spec.get("children"),
-            "carry_on": spec.get("carry_on"), "checked_bags": spec.get("checked_bags"),
-            "departure_time": seg.get("departure_time"),
-        }) for seg in raw_segs]
-    leg_payloads: list = []
-    for fu in leg_futs:
-        try:
-            leg_payloads.append(fu.result(timeout=50))
-        except Exception:
-            leg_payloads.append(None)
-    if pool is not None:
-        pool.shutdown(wait=False, cancel_futures=True)
+        leg_futs = [pool.submit(leg_search or cached_execute_spec, _mc_leg_spec(spec, seg))
+                    for seg in raw_segs]
+    if deadline is None:
+        deadline = time.monotonic() + MC_LEGS_DEADLINE_S
+    try:
+        legs = harvest_mc_legs(spec, raw_segs, leg_futs, deadline, leg_search=leg_search,
+                               started=started)
+    finally:
+        if pool is not None:
+            pool.shutdown(wait=False, cancel_futures=True)
 
-    leg_results = [(p.get("results") or []) if isinstance(p, dict) else [] for p in leg_payloads]
     check_url = multi_city_search_url(raw_segs, spec.get("cabin"), **spec_pax(spec))
-    if not all(leg_results):
-        empty = [i + 1 for i, r in enumerate(leg_results) if not r]
-        return {
-            "type": "multicity",
-            "message": (f"Google is not returning combined multi-city pricing to this session, and "
-                        f"leg {', '.join(map(str, empty))} came back empty on its own too. Tell the "
-                        "user plainly and give them the direct link to price the whole trip on "
-                        "Google (it is in this section), and offer to retry shortly."),
-            "results": [],
-            "combined_check_url": check_url,
-            "combined_probe": probe_note,
-        }
-
-    priced = [[f for f in legs if f.get("price") is not None] or legs for legs in leg_results]
-    combos = []
-    for rank in range(min(5, min(len(x) for x in priced))):
-        parts = [legs[rank] for legs in priced]
-        prices = [p.get("price") for p in parts]
-        total = sum(p for p in prices if p is not None) if all(p is not None for p in prices) else None
-        combos.append({
-            "total_price": total, "currency": currency, "price_basis": "separate tickets",
-            "separate_price": total, "combined_price": None,
-            "parts": parts,
-            "warnings": ["Booked as separate tickets: no through-checked bags or "
-                          "missed-connection protection between legs"],
-            "booking_url": check_url,
-        })
+    combos = pair_mc_legs(legs, currency)
+    route = mc_route_text(raw_segs)
+    if combos:
+        message = (
+            f"Multi-city {route}. Google now withholds combined one-ticket multi-city pricing "
+            "from automated sessions, so each leg was searched as its own one-way instead "
+            "(fully priced below), and the combos are the best-value separate-ticket "
+            "pairings. IMPORTANT: a through-ticketed single itinerary may exist at a "
+            "different price, sometimes cheaper, especially when one carrier serves every "
+            "leg. The section carries a direct link to Google's own multi-city page for "
+            "these exact legs and dates: tell the user the one-ticket price is one tap away "
+            "there, and never claim the combined ticket does not exist.")
+    else:
+        message = (
+            f"Multi-city {route}. Google is not returning combined multi-city pricing to "
+            "this session, and not every leg came back on its own, so no complete trip can "
+            "be priced yet. Whatever legs DID come back are on the user's screen to browse. "
+            "Give them the direct link to price the whole trip on Google (it is in this "
+            "section), and never claim the trip or any leg is unavailable.")
     return stamp_party({
         "type": "multicity",
-        "message": (
-            "Google now withholds combined one-ticket multi-city pricing from automated "
-            "sessions, so each leg was searched as its own one-way instead (fully priced "
-            "below) and paired by rank as separate tickets. IMPORTANT: a through-ticketed "
-            "single itinerary may exist at a different price, sometimes cheaper, especially "
-            "when one carrier serves every leg. The section carries a direct link to "
-            "Google's own multi-city page for these exact legs and dates: tell the user "
-            "the one-ticket price is one tap away there, and never claim the combined "
-            "ticket does not exist."),
+        "message": message + mc_legs_note(legs),
         "results": combos,
+        "legs": legs,
         "combined_check_url": check_url,
         "combined_probe": probe_note,
     }, spec)
 
 
 def search_multi_city(spec: dict, currency: str) -> dict:
+    mc_started = time.monotonic()  # every leg deadline is measured from here
     resolved = []
     invalid: list[str] = []
     for seg in (spec.get("multi_city_segments") or [])[:5]:
@@ -3335,14 +3715,7 @@ def search_multi_city(spec: dict, currency: str) -> dict:
     # it. Sequenced, the two cost 117s in production; overlapped, the turn
     # costs whichever is slower.
     leg_pool = ThreadPoolExecutor(max_workers=min(4, max(1, len(raw_segs))))
-    leg_futs = [leg_pool.submit(cached_execute_spec, {
-        "origins": seg.get("origins") or [], "destinations": seg.get("destinations") or [],
-        "trip_type": "one_way", "departure_date": seg.get("date"),
-        "cabin": spec.get("cabin"), "adults": spec.get("adults"),
-        "children": spec.get("children"),
-        "carry_on": spec.get("carry_on"), "checked_bags": spec.get("checked_bags"),
-        "departure_time": seg.get("departure_time"),
-    }) for seg in raw_segs]
+    leg_futs = [leg_pool.submit(cached_execute_spec, _mc_leg_spec(spec, seg)) for seg in raw_segs]
     # RepresentativeSearch for the parallel expansion + identity inheritance.
     # (For 2-leg trips its representative reorder of leg-1 candidates fires
     # too — deliberate: the expansion set should represent the leg, not just
@@ -3383,7 +3756,8 @@ def search_multi_city(spec: dict, currency: str) -> dict:
     if not results:
         price_pool.shutdown(wait=False, cancel_futures=True)
         leg_pool.shutdown(wait=False)  # futures keep running; the fallback consumes them
-        return multi_city_fallback(spec, currency, probe_note=probe_note, leg_futs=leg_futs)
+        return multi_city_fallback(spec, currency, probe_note=probe_note, leg_futs=leg_futs,
+                                   deadline=mc_started + MC_LEGS_DEADLINE_S, started=mc_started)
 
     # harvest the leg prices that finished while the expansion ran; anything
     # still pending gets only a short grace before we degrade to joint prices
@@ -3402,30 +3776,22 @@ def search_multi_city(spec: dict, currency: str) -> dict:
     # never fires (all_matched False) and production quoted "$5,409 one
     # ticket" as best value in the same turn whose per-leg searches found
     # $789 + $701 purchasable. The full per-leg payloads (leg_futs) already
-    # ran beside the probe; use them. Exception-proof by design: any surprise
-    # degrades to floor=None, which is exactly the old behavior.
-    floor_parts, floor_total = [], None
+    # ran beside the probe; harvest them whole — they are also the per-leg
+    # board — and derive the floor from them. Exception-proof by design: any
+    # surprise degrades to floor=None, which is exactly the old behavior.
+    floor_parts, floor_total, legs = [], None, []
     try:
-        parts_acc, total_acc = [], 0.0
-        # one shared deadline, not 8s per leg: the legs launched before the
-        # probe ran, so they are normally already done — this is a grace, and
-        # a slow day must not stack it per future on the 58s turn budget
-        floor_deadline = time.monotonic() + 8.0
-        for fu in leg_futs:
-            try:
-                leg_payload = fu.result(timeout=max(0.1, floor_deadline - time.monotonic()))
-            except Exception:
-                leg_payload = None
-            rows = (leg_payload.get("results") or []) if isinstance(leg_payload, dict) else []
-            best = min((r for r in rows if isinstance(r.get("price"), (int, float))),
-                       key=lambda r: r["price"], default=None)
-            if best is None:  # an unpriced or empty leg means no purchasable floor
-                parts_acc = []
-                break
-            parts_acc.append(best)
-            total_acc += best["price"]
-        if parts_acc and len(parts_acc) == len(raw_segs):
-            floor_parts, floor_total = parts_acc, round(total_acc)
+        # the legs launched before the probe, so they are normally done; this
+        # is a grace (with room for one retry of an empty leg), capped by the
+        # shared multi-city deadline so the batch window is never blown
+        legs = harvest_mc_legs(
+            spec, raw_segs, leg_futs,
+            deadline=min(mc_started + MC_LEGS_DEADLINE_S, time.monotonic() + 15.0),
+            started=mc_started)
+        bests = [min((r for r in leg_["results"] if isinstance(r.get("price"), (int, float))),
+                     key=lambda r: r["price"], default=None) for leg_ in legs]
+        if bests and all(b is not None for b in bests) and len(bests) == len(raw_segs):
+            floor_parts, floor_total = bests, round(sum(b["price"] for b in bests))
     except Exception:
         floor_parts, floor_total = [], None
     finally:
@@ -3484,18 +3850,24 @@ def search_multi_city(spec: dict, currency: str) -> dict:
                 f"{format_money(floor_total, currency)} — see the separate-ticket option in this list."
             ))
 
+        basis = ("separate tickets" if best_total == separate_total
+                 and separate_total is not None else "one ticket")
         itineraries.append({
             "total_price": best_total,
             "combined_price": combined_total,
             "separate_price": separate_total,
-            "price_basis": ("separate tickets" if best_total == separate_total
-                            and separate_total is not None else "one ticket"),
+            "price_basis": basis,
             "currency": parts[0].currency or currency,
             "parts": serialized,
             "warnings": ticket_warnings,
-            "booking_url": (itinerary_url([p.legs for p in parts], spec.get("cabin"), trip_type=3,
-                                          **spec_pax(spec))
-                            or multi_city_url(parts, spec.get("cabin"))),
+            # a separate-ticket quote books leg by leg: the one-ticket link for
+            # these same flights opens at the JOINT fare, so the card's price
+            # would not belong to the itinerary its button opens
+            "booking_url": None if basis == "separate tickets" else (
+                itinerary_url([p.legs for p in parts], spec.get("cabin"), trip_type=3,
+                              **spec_pax(spec))
+                or multi_city_url(parts, spec.get("cabin"))),
+            **({"book_per_leg": True} if basis == "separate tickets" else {}),
         })
     # "Quote what you can actually buy": when the purchasable per-leg sum
     # beats every combined option, it ships as its own option — the same
@@ -3519,12 +3891,15 @@ def search_multi_city(spec: dict, currency: str) -> dict:
                 "Booked as separate tickets: no through-checked bags or "
                 "missed-connection protection between legs",
             ],
-            "booking_url": check_url,
+            # separate tickets book leg by leg: Google's multi-city search
+            # page (check_url) prices them as ONE ticket — the other product
+            "booking_url": None,
+            "book_per_leg": True,
         })
     itineraries.sort(key=lambda i: i["total_price"] or 1e9)
     for i, itin in enumerate(itineraries):
         itin["score"] = round(95 - (i / max(len(itineraries) - 1, 1)) * 55)
-    route_text = " → ".join([resolved[0][0][0].name] + [d[0].name for _, d, _, _ in resolved])
+    route_text = mc_route_text(raw_segs)
     return stamp_party({
         "type": "multicity",
         "message": (
@@ -3536,9 +3911,12 @@ def search_multi_city(spec: dict, currency: str) -> dict:
             "and always give the bags/misconnection caveat when recommending it. Mixed-carrier "
             "one-ticket combinations are often issued as separate tickets by sellers anyway. "
             "Google's own page for these legs is linked in the section for one-tap verification."
+            + mc_legs_note(legs)
         ),
         "results": itineraries,
+        "legs": legs,
         "combined_check_url": check_url,
+        "combined_probe": probe_note,
     }, spec)
 
 

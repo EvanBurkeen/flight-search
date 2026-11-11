@@ -77,11 +77,19 @@ this file, then **"Lessons the hard way"** below before debugging anything.
   cross-turn results ledger — the useful slice of "trip memory" without login
   — and price context shipped July 28; reload persistence + recent-trip
   chips, the no-login slice of saved trips, shipped Aug 8.)
-- **KNOWN OPEN BUGS (as of Aug 7, 2026) — pick these up before new features:**
+- **KNOWN OPEN BUGS (as of Nov 11, 2026) — pick these up before new features:**
   1. **Google withholds some fares entirely.** The $111 Breeze HVN-FLL fare
      never appears, even from a dedicated single-airport search. Disclosed
      by the manifest layer rather than hidden; probably not fixable
      client-side, but worth re-testing occasionally.
+  2. **Google refuses some route pairs to production's session outright.**
+     Nov 11: SGN→JFK refused on every attempt (fresh identities, two turns)
+     while SGN→EWR passed in the same window and SGN→JFK returns 106 flights
+     from a home IP. Mitigated, not fixed: a multi-airport search now routes
+     around a refused pair, and nothing calls it "no service". Next step is
+     evidence, not theory: read `search_diag` / the `debug_timings` status
+     lines for a refused pair in prod (bytes per attempt) before changing
+     anything, and run a control in the same minute.
   (The Aug 6 list's other two — the multi-city separate-vs-combined
   comparison that never fired, and the passenger count that never reached
   the Book link — were fixed Aug 7; see the Changelog. `leg_price_index`
@@ -130,6 +138,15 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
   what a "fix" REMOVES, not just what it adds.
 
 **Google's data layer**
+- **Refused is not an answer.** A refusal parses to no chunk at all; Google
+  saying "no flights" is a well-formed chunk with no rows. Only the second is
+  evidence of absence (Nov 11: a dedicated SGN→JFK search was refused every
+  time while the route has 100+ flights, and the airport probe had been
+  calling that "VERIFIED NO SERVICE"). `run_search` records the verdict per
+  attempt; read it before believing an empty.
+- **A combined request collapses to its worst member** — date grids (Aug 8,
+  HVN) and flight lists (Nov 11, SGN→JFK refused, taking EWR and LGA down
+  with it) alike. Split per airport pair before calling anything empty.
 - **Results arrive as PROGRESSIVE chunks inside one HTTP response.** `GetShoppingResults`
   returns several `wrb.fr` chunks (this is why the real UI "fills in").
   `fli` parses only the first; we patch it to take the UNION of every
@@ -283,6 +300,17 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
   `leg_futs` searches) ships as its own honestly-labeled option when it wins,
   its DIFFERENT-flights warning intact, while every one-ticket card keeps its
   own price (a displayed price belongs to the itinerary displayed beside it).
+  Every separate-ticket quote books leg by leg on each leg's own deep link,
+  never on a one-ticket or multi-city search page priced at the joint fare.
+- Multi-city ships every leg's own one-way result set; a leg that fails never
+  erases the legs that worked (it is retried once, then named); all legs share
+  one deadline inside the agent's 55s batch; combos are value-ranked and keep
+  the outright cheapest pairing; the route text keeps every city of an
+  open-jaw trip.
+- "No service" is licensed only by a search Google ANSWERED with no flights.
+  A refused or failed search, or probe, is reported as not verified — never
+  as absence — and a multi-airport one-way that comes back with nothing is
+  re-run per airport pair before anyone is told it is empty.
 - Rolled dates stay coherent: a return, arrival target, or flexible `to_date`
   can never land before the (possibly year-rolled) date it depends on.
 - A flexible-dates grid covering less than half its window is retried, then
@@ -394,8 +422,11 @@ Google traffic through a proxy (see Operations).
      for that pairing, PLUS up to 24 `more_outbounds` — every outbound Google
      listed but we did not expand, shipped with its honest "from" total) /
      8 multi-city itineraries (priced BOTH as one ticket and as
-     separate tickets, quoting the cheaper — `price_basis` says which), each
-     with a `tfs` deep link to that exact itinerary, alliance tag, aircraft,
+     separate tickets, quoting the cheaper — `price_basis` says which; a
+     separate-ticket quote books per leg) PLUS every leg's own one-way
+     result set as `legs`, the per-leg board's data, each with a `status`
+     and `detail` — every item with a `tfs` deep link to that exact
+     itinerary, alliance tag, aircraft,
      warnings (tight <45m connections, overnight, self-transfer, airport
      change, mixed-carrier separate-ticket risk), CO2 delta, and
      `route_points` (with per-stop `layover_min`) for the map.
@@ -453,7 +484,11 @@ PLACE via `/api/returns`, ~1-4s, no model turn, with an ask-the-concierge
 fallback — the selected outbound's returns on the right, each priced as the
 real pairing total and filterable/sortable, "Load every return" for the
 full Google list, sticky chosen-pairing bar with Book; "Show top picks
-only" collapses to the pre-paired cards) · Best value badge ·
+only" collapses to the pre-paired cards) · multi-city **leg board** (the
+DEFAULT multi-city view since Nov 11: one column per leg with that leg's full
+one-way list under the shared filter bar, a sticky separate-ticket total with
+Book leg N on each leg's own link, the cheapest one-ticket option named, and
+a one-tap re-search for a leg that did not come back) · Best value badge ·
 Book deep-links straight to the chosen itinerary on Google · flexible-date grids show best-value dates
 first (within 15% of cheapest) and expand to month calendars heatmapped by price
 (tiers relative to the window's cheapest; cheapest days outlined; round-trip
@@ -541,6 +576,77 @@ fully exercisable locally.
   lakes; run it, then bump the `?v=N` cache-buster on the script tag in index.html).
 
 ## Changelog
+
+**November 11, 2026 (NYC to Hanoi, Saigon to NYC: the leg that was never there)**
+Evan's multi-city NYC→Hanoi Mar 4 / Saigon→NYC Mar 20: the first attempt
+showed nothing but a Google link, and the retry's nine combos used TWO of
+the 120 NYC→Hanoi flights Google had. Reproduced in production first (two
+runs: one shipped zero results twice in a 76s turn, "leg 2 came back
+empty"; one shipped 8 combos as "JFK → HAN → JFK"). Then the controls, which
+moved the diagnosis twice:
+- **Saigon→NYC failed in prod as a plain one-way**, no multi-city involved:
+  every attempt EMPTY, while the JFK→ORD control passed in the same window
+  and the identical search returns 52 flights locally. Bisected in prod:
+  Saigon→EWR alone 55 flights, **Saigon→JFK alone refused on every
+  attempt**. A size theory (multi-airport long-haul responses are 1.3-1.5MB
+  vs 224KB for JFK→ORD) was ruled out by the same bisection — the 522KB
+  SGN→JFK response is the one that fails. Root cause on Google's side is
+  still unknown; see KNOWN OPEN BUGS.
+- **The wire verdict.** "EMPTY" conflated two different things. A refusal
+  parses to no chunk at all; Google genuinely answering "no flights" is a
+  well-formed chunk with no rows. `run_search` now records a per-attempt
+  verdict (`answered-empty` / `refused` / exception) on the thread
+  (`search_verdict()`), on raised exceptions (`e.search_diag`), on every
+  empty payload (`search_diag`), and in the turn's status lines — so
+  `debug_timings` in prod says WHICH kind of empty it was.
+- **"VERIFIED NO SERVICE" was not.** `probe_missing_airports` did
+  `except Exception: rows = []` and called the result verified absence —
+  even a probe that never reached Google. Now only an ANSWERED empty
+  licenses it; a refused or failed probe ships "NOT VERIFIED ... NOT
+  evidence of no service". Same rule for a whole search: one Google never
+  answered no longer says "No flights found".
+- **One refused pair no longer kills a multi-airport search** (the class of
+  the Aug 8 HVN date grid: a combined request collapses to its worst
+  member). A multi-airport one-way that comes back with nothing is re-run
+  per airport pair inside the remaining time, merged, and every pair is
+  reported honestly. Its own ladder is capped at 20s so the rescue fits
+  the agent's 55s batch (`MULTI_COMBINED_BUDGET_S`, `SEARCH_END_S`).
+- **Multi-city ships every leg whole, as a per-leg board.** Separate
+  tickets are independent purchases, so choosing per leg is the honest
+  model, exactly as for round trips. The legs (each a normal one-way with
+  every honesty layer) ship as `legs`; the section opens ON the board (one
+  column per leg, the shared filter bar, a sticky separate-ticket total,
+  **Book leg N** on each leg's own exact deep link, the cheapest one-ticket
+  option named in the bar); "Show top picks only" collapses to the combos.
+- **A failed leg no longer erases the legs that worked.** `harvest_mc_legs`
+  waits on every leg against ONE deadline (48s from the start of the
+  multi-city search; the old fallback waited 50s per leg, in sequence),
+  retries an empty leg once immediately, ships partial truth with the
+  missing leg named for the model (and a one-tap "Search this leg again"
+  on the card), and records each leg's outcome in `detail`.
+- **Combos are value-ranked, not rank-zipped.** The fallback paired leg-1
+  rank k with leg-2 rank k: unsorted, and it could omit the cheapest
+  pairing ($1,095 purchasable, the list opened at $1,163). `pair_mc_legs`
+  scores each leg's best few by effective cost and always keeps the
+  outright cheapest pairing.
+- **Every separate-ticket quote books per leg.** The floor option linked to
+  Google's multi-city SEARCH page, and combos where the same flights were
+  cheaper bought separately linked to the one-ticket itinerary — both open
+  at the JOINT fare, so the card's price did not belong to the itinerary
+  its button opened.
+- Also: the open-jaw route text ("JFK → HAN → JFK" erased Saigon from the
+  model's view) now reads "JFK/LGA/EWR → HAN, then SGN → JFK/LGA/EWR"; the
+  model gets `legs_overview` (counts, cheapest, best three per leg) and a
+  prompt rule to answer leg questions from it; the ledger records
+  `leg_boards` so "the 12:00 Korean Air to Hanoi" resolves next turn; the
+  success payload now reports `combined_probe` too.
+- **The check suite had been failing since September**, blocking every
+  push: three time bombs (a 2026-09-24 departure fli now rejects; a
+  speculation check hard-coding "this year" for Sept 18). Fixed with
+  computed dates. Two checks updated deliberately: the fallback's combo
+  COUNT pinned rank-zip (intent kept: the cheapest separate pairing leads),
+  and the children check counted duplicated source lines that are now one
+  `_mc_leg_spec`. 28 checks added (291 -> 319).
 
 **September 5, 2026 (bag-aware pricing: the cheapest fare that was not)**
 - The cheapest headline fare is usually a budget carrier that charges for a
