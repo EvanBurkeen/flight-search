@@ -948,7 +948,7 @@ check("...books each leg on its own link, and offers to re-search a missing leg"
       "'Book leg ' + (k + 1)" in _fe_mc and "mcAskLeg(leg)" in _fe_mc
       and "mcPerLeg(it)" in _fe_mc)
 check("...and a section whose legs came back is never hidden",
-      "|| this.mcHasLegs(s));" in _fe_mc)
+      "|| this.mcHasLegs(s)" in _fe_mc.split("visibleSections(msg) {", 1)[1].split("\n        },", 1)[0])
 check("the prompt answers leg questions from the legs and names a missing leg",
       "legs_overview" in app.assistant_system_prompt()
       and "name exactly which leg is missing" in app.assistant_system_prompt())
@@ -2071,6 +2071,147 @@ check("titles use English place names",
       app.place_name(["HAN"]) == "Hanoi" and app.place_name(["SGN"]) == "Ho Chi Minh City")
 
 # --------------------------------------------------------------------------
+section("The airport Google turned away  — Changelog: 'the airport Google turned away'")
+# --------------------------------------------------------------------------
+# Nov 11, prod: "nyc to hanoi march 4" shipped LGA and EWR only. JFK->HAN was
+# refused 8/8 through the proxy (answered in 0.3s from a home connection),
+# the date grid was refused too, the partial set was cached for 4 minutes,
+# and the reply called a $817 United flight "the only one-stop on offer"
+# while JFK had Asiana at $442 with one stop.
+_bf_ewr = [app.serialize_flight(result([leg("EWR", "HAN", future(60) + "T09:00", future(62) + "T01:25", "AS", str(299 + i))],
+                                       445.0 + 40 * i, stops=2, duration=3145)) for i in range(3)]
+_bf_jfk = [app.serialize_flight(result([leg("JFK", "HAN", future(60) + "T10:30", future(61) + "T22:25", "OZ", "221")],
+                                       442.0, stops=1, duration=1435)),
+           app.serialize_flight(result([leg("JFK", "HAN", future(60) + "T12:00", future(61) + "T21:45", "KE", "86")],
+                                       473.0, stops=1, duration=1305))]
+_bf_spec = {"trip_type": "one_way", "departure_date": future(60),
+            "origins": ["JFK", "LGA", "EWR"], "destinations": ["HAN"]}
+_have, _ = app.rank_and_cut_one_way([dict(r, highlights=[]) for r in _bf_ewr], _bf_spec)
+_merged, _all, _added = app.merge_backfill_rows(_bf_spec, _have, _bf_jfk + [dict(_bf_ewr[0])])
+_best = [r for r in _merged if "Best value" in r["highlights"]]
+check("a late airport is merged and re-ranked by the turn's own rules",
+      _added == 2 and len(_all) == 5 and len(_best) == 1
+      and _best[0]["legs"][0]["from"] == "JFK", f"best: {_best[0]['airline'] if _best else None}")
+check("...without listing a flight twice or stacking stale highlights",
+      sum(1 for r in _merged if r["legs"][0]["flight_number"] == "299") == 1
+      and all(r["highlights"].count("Cheapest option") <= 1 for r in _merged)
+      and sum(1 for r in _merged if "Cheapest option" in r["highlights"]) == 1)
+_note = app.backfill_note("JFK→HAN", 2, _have[0], _merged[0], _bf_spec)
+check("the card says what the late airport changed, from the numbers, with no dashes",
+      # Korean Air wins on value: 2h10m less in the air for $31 more
+      "New best value: KE, $473, 1 stop, 21h 45m." in _note
+      and "—" not in _note and "–" not in _note, _note)
+
+_real_exec = app._execute_spec
+app._execute_spec = lambda sub: {"type": "flights", "results": [dict(r) for r in _bf_jfk]} \
+    if sub["origins"] == ["JFK"] else {"results": []}
+_bf_ok = app.backfill_piece(_bf_spec, {"origins": ["JFK"], "destinations": ["HAN"]}, _have)
+app._execute_spec = lambda sub: {"type": "flights", "results": [],
+                                 "search_diag": {"verdict": "refused", "attempts": ["a1 refused 95B"]}}
+_bf_ref = app.backfill_piece(_bf_spec, {"origins": ["JFK"], "destinations": ["HAN"]}, _have)
+_bf_out = app.backfill_piece(_bf_spec, {"origins": ["BOS"], "destinations": ["HAN"]}, _have)
+_bf_rt = app.backfill_piece({**_bf_spec, "trip_type": "round_trip"}, {"origins": ["JFK"], "destinations": ["HAN"]}, _have)
+app._execute_spec = _real_exec
+check("backfill returns the merged list, the note, and what the next turn's memory should say",
+      _bf_ok["status"] == "ok" and _bf_ok["added"] == 2
+      and _bf_ok["results"][0]["legs"][0]["from"] == "JFK"
+      and _bf_ok["ledger"]["route"] == "JFK/LGA/EWR to HAN" and _bf_ok["price_context_stale"],
+      str({k: _bf_ok.get(k) for k in ("status", "added", "note")}))
+check("...a piece refused again stays a refusal (never 'no flights')",
+      _bf_ref["status"] == "refused")
+check("...and it only ever searches part of the search it was given, one-way only",
+      _bf_out["status"] == "invalid" and _bf_rt["status"] == "invalid")
+
+# the turn ships what it could not get, and the reply is held to it
+_resc_bf = (_resc.get("backfill") or {}).get("pieces") or []
+check("a refused airport pair ships as a piece to ask for again, with Google's own link",
+      {"origins": ["SGN"], "destinations": ["JFK"]} in [{k: p[k] for k in ("origins", "destinations")} for p in _resc_bf]
+      and all(p.get("url", "").startswith("https://www.google.com/travel/flights?tfs=") for p in _resc_bf),
+      str(_resc_bf)[:200])
+check("...a search refused outright ships itself as the piece",
+      [{k: p[k] for k in ("origins", "destinations")} for p in (_alone.get("backfill") or {}).get("pieces") or []]
+      == [{"origins": ["SGN"], "destinations": ["JFK"]}])
+check("...and the reply may not rank a partial list as if it were whole",
+      "STILL LOADING" in _resc["message"] and "never 'cheapest overall'" in _resc["message"]
+      and "STILL LOADING" in app.assistant_system_prompt())
+check("a fully answered search ships no backfill",
+      "backfill" not in _found_payload if (_found_payload := app.attach_backfill(
+          {"type": "flights", "message": "", "results": [1]}, _bf_spec)) else False)
+
+# a partial set must not be served to "try again" for 4 minutes
+_saved = (app.execute_spec, app._start_ctx_for)
+app.execute_spec = lambda spec: {"type": "flights", "message": "", "results": [dict(_bf_ewr[0])],
+                                 "backfill": {"pieces": [{"origins": ["JFK"], "destinations": ["HAN"]}]}}
+app._start_ctx_for = lambda spec: None
+_pspec = dict(_bf_spec, departure_date=future(61))
+app._search_cache.pop(app._spec_key(_pspec), None)
+app.cached_execute_spec(_pspec)
+_ttl_left = app._search_cache[app._spec_key(_pspec)][0] - time.monotonic()
+app._search_cache.pop(app._spec_key(_pspec), None)
+app.execute_spec, app._start_ctx_for = _saved
+check("a result with a refused part is cached for seconds, not minutes",
+      0 < _ttl_left <= 30 < app.SEARCH_CACHE_TTL, f"{_ttl_left:.0f}s")
+
+# the other way out: two proxied refusals, then one direct attempt
+_px_saved, _dir_saved, _sleep = app._proxy_base, dict(app._direct), app.time.sleep
+_br_saved = dict(app._breaker)
+app._proxy_base = "http://user:pass@geo.iproyal.com:12321"
+app._direct.update(ident=None, cool_until=0.0)
+app.time.sleep = lambda s: None
+_via_log = []
+
+
+def _refuse_unless_direct(*a, **k):
+    _via_log.append(bool(app._local.identity.get("direct")))
+    app._local.last_wire = None
+    return [result([leg("JFK", "HAN", future(60) + "T10:30", future(61) + "T22:25", "OZ", "221")], 442.0)] \
+        if app._local.identity.get("direct") else []
+
+
+try:
+    app._breaker.update(consecutive=0, open_until=0.0)
+    _got = app.run_search(types.SimpleNamespace(search=_refuse_unless_direct), app.build_filters(
+        {**_bf_spec, "origins": ["JFK"]}, *[app.resolve_airports(x)[0] for x in (["JFK"], ["HAN"])]),
+        app.SortBy.CHEAPEST, top_n=10, budget_s=30)
+    _d1 = app.search_verdict()["attempts"]
+    _sessions_direct = app._identity_session(app._direct["ident"]).proxies if app._direct["ident"] else None
+    _via_log.clear()
+    app._breaker.update(consecutive=0, open_until=0.0)
+    app._direct.update(ident=None, cool_until=0.0)
+    app.run_search(types.SimpleNamespace(search=lambda *a, **k: (setattr(app._local, "last_wire", None), [])[1]),
+                   app.build_filters({**_bf_spec, "origins": ["JFK"]},
+                                     *[app.resolve_airports(x)[0] for x in (["JFK"], ["HAN"])]),
+                   app.SortBy.CHEAPEST, top_n=10, budget_s=30)
+    _d2 = app.search_verdict()["attempts"]
+    _cooling = app._direct["cool_until"] > time.monotonic() + 200
+    _d3_direct = (app._breaker.update(consecutive=0, open_until=0.0), app.run_search(
+        types.SimpleNamespace(search=lambda *a, **k: (setattr(app._local, "last_wire", None), [])[1]),
+        app.build_filters({**_bf_spec, "origins": ["JFK"]},
+                          *[app.resolve_airports(x)[0] for x in (["JFK"], ["HAN"])]),
+        app.SortBy.CHEAPEST, top_n=10, budget_s=30), any("direct" in d for d in app.search_verdict()["attempts"]))[2]
+finally:
+    app._proxy_base = _px_saved
+    app._direct.clear(); app._direct.update(_dir_saved)
+    app.time.sleep = _sleep
+    app._breaker.clear(); app._breaker.update(_br_saved)
+check("after two proxied refusals the next attempt leaves directly, and says so",
+      len(_got) == 1 and _d1[:3] == [_d1[0], _d1[1], "a3 direct ok 1"] and "refused" in _d1[0]
+      and not _sessions_direct, str(_d1))
+check("...a refused direct attempt rests that route instead of hammering it",
+      any(d.startswith("a3 direct refused") for d in _d2) and _cooling and not _d3_direct, str(_d2))
+check("...and with no proxy configured nothing changes (every attempt is direct anyway)",
+      not app.direct_available() if not app._proxy_base else True)
+
+_fe_bf = open(os.path.join(ROOT, "public", "index.html")).read()
+check("the page asks again after the turn, on both the streamed and the JSON path",
+      _fe_bf.count("this.startBackfills(") == 2 and "fetch('/api/backfill'" in _fe_bf
+      and "updateLedger(out.ledger)" in _fe_bf)
+check("...and a search refused outright still shows, as its notice",
+      "((s.backfill || {}).pieces || []).length > 0" in _fe_bf)
+_bf_routes = [r for r in app.app.routes if getattr(r, "path", "") == "/api/backfill"]
+check("POST /api/backfill is registered", bool(_bf_routes) and "POST" in _bf_routes[0].methods)
+
+# --------------------------------------------------------------------------
 section("Trip briefings  — Changelog: 'trip briefings by email'")
 # --------------------------------------------------------------------------
 # Evan, Nov 11: a Watch button that emails a briefing on a schedule (best,
@@ -2229,8 +2370,10 @@ _t = _re.search(r"_local\.fli_timeout = (\d+)\.0 if i == 0 else (\d+)\.0", _src)
 check("README states the adaptive request timeouts",
       bool(_t) and f"{_t.group(1)}s" in _readme and f"{_t.group(2)}s" in _readme,
       "update the run_search description and Operations")
-for _ep in ("/api/returns", "/api/search/stream"):
+for _ep in ("/api/returns", "/api/search/stream", "/api/backfill"):
     check(f"README documents {_ep}", _ep in _src and _ep in _readme)
+check("README states the direct-route cooldown the code uses",
+      f"{int(app.DIRECT_COOLDOWN_S)}s" in _readme, f"code rests it {app.DIRECT_COOLDOWN_S:.0f}s")
 check("README and code agree on the Haiku first-call router",
       ("claude-haiku-4-5" in _src) == ("claude-haiku-4-5" in _readme))
 _n = _re.search(r"run_search\(searcher, filters, sort, top_n=(\d+)[,)]", _src)

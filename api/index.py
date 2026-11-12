@@ -123,7 +123,7 @@ def _identity_session(ident: dict):
 
             s = _curl_requests.Session()
             s.headers.update(_fli_client.Client.DEFAULT_HEADERS)
-            if _proxy_base:
+            if ident.get("proxy"):  # the direct identity has none, by design
                 s.proxies = {"http": ident["proxy"], "https": ident["proxy"]}
             primary = ident.get("session")
             if primary is None:
@@ -137,7 +137,26 @@ def _identity_session(ident: dict):
     return s
 
 
-def checkout_identity() -> dict:
+# A second WAY OUT, not just a second address. Nov 11, production: every
+# proxied attempt at JFK->HAN was refused (8 of 8, two turns, ~95-byte
+# bodies) while the same search from a home connection answered in 0.3s, and
+# LGA->HAN through the same proxy answered first time. Fresh residential
+# exits are all the same kind of visitor, so a refusal keyed on that kind
+# survives every rotation. After two refused proxy attempts in one ladder,
+# the next goes out directly from the function's own address. A refused
+# direct attempt rests it for DIRECT_COOLDOWN_S: the July lesson stands
+# (datacenter addresses burn under sustained volume), so it is a fallback
+# that is rarely used, never a second pool.
+DIRECT_COOLDOWN_S = 300.0
+_direct: dict = {"ident": None, "cool_until": 0.0}
+
+
+def direct_available() -> bool:
+    """Only meaningful when a proxy is the normal path."""
+    return bool(_proxy_base) and time.monotonic() >= _direct["cool_until"]
+
+
+def checkout_identity(direct: bool = False) -> dict:
     """Bind a healthy identity to this thread for the duration of a search.
 
     Prefers the most recently SUCCESSFUL identity: its curl session still
@@ -147,6 +166,13 @@ def checkout_identity() -> dict:
     comes from retirement — a refused identity is destroyed and the next
     checkout necessarily picks a different one.
     """
+    if direct:
+        with _pool_lock:
+            if _direct["ident"] is None:
+                _direct["ident"] = {**_new_identity(-1), "proxy": "", "direct": True}
+            ident = _direct["ident"]
+        _local.identity = ident
+        return ident
     with _pool_lock:
         while len(_identities) < POOL_SIZE:
             _identities.append(_new_identity(len(_identities)))
@@ -187,7 +213,12 @@ def retire_identity() -> None:
         return
     with _pool_lock:
         _close_identity(ident)
-        if ident in _identities:
+        if ident.get("direct"):
+            # the function's own address cannot be swapped for a new one;
+            # it rests instead, so a refusal wave never hammers it
+            _direct["ident"] = None
+            _direct["cool_until"] = time.monotonic() + DIRECT_COOLDOWN_S
+        elif ident in _identities:
             _identities[_identities.index(ident)] = _new_identity(ident["idx"])
     _local.identity = None
 
@@ -738,7 +769,7 @@ General aviation and travel questions are fully in scope even with no search inv
 REQUEST_RULES = """How to handle requests:
 - Vague is fine. Expand cities to their major airports (NYC -> JFK/LGA/EWR). "mid September" or "cheapest time to go" -> flexible_dates. Loyalty hints -> airline filters. A bare month/day means the nearest FUTURE date — if that month/day has already passed this year, it means next year.
 - Small regional airports (HVN, ISP, ORH, GNV-class fields) often have NO through-ticketed routes to each other. If a search from/to a small airport returns nothing, don't retry the same pair — immediately widen to the nearby majors in the same search (e.g. New Haven -> HVN,BDL,HPN and even LGA/JFK; Gainesville -> GNV,JAX,MCO) and tell the user the drive trade-off for each option you recommend.
-- A multi-airport search returns ONE combined pool. The result message carries per-ORIGIN and per-DESTINATION airport breakdowns ("By origin airport: BDL 49 from $141, HVN 1 from $180") computed over everything Google returned: consult them before ANY claim about a specific airport. A named airport that returns nothing is now searched ALONE automatically before the results reach you, so: if the message says VERIFIED NO SERVICE for an airport, you may say it has no service that day; if an airport is simply absent from the breakdown with no such line, say you did not get options for it and offer to look again, NEVER that it has no service. A thin session and a genuinely empty route look identical, and only the dedicated search can tell them apart.
+- A multi-airport search returns ONE combined pool. The result message carries per-ORIGIN and per-DESTINATION airport breakdowns ("By origin airport: BDL 49 from $141, HVN 1 from $180") computed over everything Google returned: consult them before ANY claim about a specific airport. A named airport that returns nothing is now searched ALONE automatically before the results reach you, so: if the message says VERIFIED NO SERVICE for an airport, you may say it has no service that day; if an airport is simply absent from the breakdown with no such line, say you did not get options for it and offer to look again, NEVER that it has no service. A thin session and a genuinely empty route look identical, and only the dedicated search can tell them apart. When a result says STILL LOADING, part of the search is missing and the app is fetching it in the background: every superlative ("cheapest", "best value", "the only nonstop/one-stop") is about the flights that loaded and must say so, and you tell the user the rest may still appear on the cards.
 - When the user names a specific airport and the breakdown shows it served, LEAD with that airport's options; the cheaper neighbor is the alternative, framed as dollars saved against drive time added, never the headline over the place they actually asked for.
 - Bags change the true price. When the user mentions luggage ("with a carry-on", "we each check a bag", "just a backpack fits under the seat"), set carry_on and/or checked_bags so Google reprices every fare to include the fee. This is the honest answer to "is this basic economy": the cheapest headline fare is often a budget carrier that charges for a bag, and a bag-inclusive search can flip the ranking. When a search priced bags in, the result message says so; tell the user the prices include their bags, and if they did not mention luggage on a budget-carrier-heavy route, it is worth asking once whether they have a bag before calling the cheapest fare the best deal.
 - "arrive by / be there by X" is an ARRIVAL constraint (arrival_time), never a departure cap.
@@ -2681,7 +2712,13 @@ def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy
         if i > 0 and time.monotonic() - started > budget_s:
             break  # out of time: surface what we have rather than dig the hole deeper
         breaker_wait(1.5 if i == 0 else 6.0)
-        checkout_identity()
+        # two proxied refusals in a row: the third attempt leaves by the
+        # other door (see DIRECT_COOLDOWN_S), tagged so prod can say whether
+        # it helped
+        go_direct = (i >= 2 and direct_available() and len(diag) >= 2
+                     and not any(" ok " in d for d in diag[-2:]))
+        checkout_identity(direct=go_direct)
+        via = " direct" if go_direct else ""
         # attempt 1 fails fast into a fresh identity; retries get room for
         # Google's slow progressive streams to actually finish downloading
         _local.fli_timeout = 12.0 if i == 0 else 28.0
@@ -2695,23 +2732,23 @@ def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy
             results = search.search(attempt, top_n=top_n, currency="USD")
         except SearchClientError as e:
             last_exc = e
-            diag.append(f"a{i + 1} {type(e).__name__} {time.monotonic() - _ta:.0f}s")
+            diag.append(f"a{i + 1}{via} {type(e).__name__} {time.monotonic() - _ta:.0f}s")
             retire_identity()
             note_search_outcome(False)
             time.sleep(0.5 + 0.4 * i + random.uniform(0, 0.4))
             continue
         if results:
             note_search_outcome(True)
-            _attempt_stats["ok_on_attempt"].append(i + 1)
-            diag.append(f"a{i + 1} ok {len(results)}")
+            _attempt_stats["ok_on_attempt"].append(f"{i + 1}{via}" if via else i + 1)
+            diag.append(f"a{i + 1}{via} ok {len(results)}")
             _local.search_diag = {"verdict": "ok", "attempts": diag}
             return results
         wire = getattr(_local, "last_wire", None) or {}
         if wire.get("parsed"):
             answered_empty = True
-            diag.append(f"a{i + 1} answered-empty {wire.get('bytes', 0)}B")
+            diag.append(f"a{i + 1}{via} answered-empty {wire.get('bytes', 0)}B")
         else:
-            diag.append(f"a{i + 1} refused {wire.get('bytes', 0)}B {time.monotonic() - _ta:.0f}s")
+            diag.append(f"a{i + 1}{via} refused {wire.get('bytes', 0)}B {time.monotonic() - _ta:.0f}s")
         retire_identity()
         note_search_outcome(False)
         # refusals arrive in BURSTS per request shape (Nov 11: the 3-airport
@@ -2747,6 +2784,20 @@ def absence_proven(verdict: dict | None) -> bool:
 
 AIRPORT_PROBE_BUDGET_S = 12.0
 AIRPORT_PROBE_MAX = 2
+
+
+def _note_missing_piece(origins: list, destinations: list) -> None:
+    """A part of this search Google did not answer (refused or never
+    reached, NOT 'no flights'). search_fixed_dates ships these as
+    `backfill` pieces: the browser asks again after the turn, when the
+    refusal burst has passed, and merges what comes back (Nov 11: NYC to
+    Hanoi shipped without JFK, the airport with Google's best options)."""
+    acc = getattr(_local, "missing_pieces", None)
+    if acc is None:
+        return  # called outside a search (the checks call probes directly)
+    piece = {"origins": [str(c) for c in origins], "destinations": [str(c) for c in destinations]}
+    if piece not in acc:
+        acc.append(piece)
 
 
 def airports_with_no_rows(named: list, results: list, side_of) -> list:
@@ -2786,6 +2837,13 @@ def probe_missing_airports(spec: dict, origins: list, destinations: list,
                airports_with_no_rows(destinations, results, _dest_of_result)])
     if len(origins) + len(destinations) < 3:
         todo = []  # single-airport search: nothing to disambiguate
+
+    def piece_for(side, code):
+        return (([code], [d.name for d in destinations]) if side == "origin"
+                else ([o.name for o in origins], [code]))
+
+    for side, code in todo[AIRPORT_PROBE_MAX:]:
+        _note_missing_piece(*piece_for(side, code))  # not looked at in-turn: look after
     for side, code in todo[:AIRPORT_PROBE_MAX]:
         one = {**spec, "origins": [code]} if side == "origin" else {**spec, "destinations": [code]}
         o2, _ = resolve_airports(one["origins"])
@@ -2810,6 +2868,7 @@ def probe_missing_airports(spec: dict, origins: list, destinations: list,
             print(f"[airport-probe] {code} alone: Google answered with no flights")
         else:
             withheld.append(code)
+            _note_missing_piece(*piece_for(side, code))
             print(f"[airport-probe] {code} alone: no answer ({verdict.get('verdict')}: "
                   f"{verdict.get('attempts')})")
     note = None
@@ -2822,8 +2881,8 @@ def probe_missing_airports(spec: dict, origins: list, destinations: list,
         note = (note or "") + (
             " NOT VERIFIED: " + ", ".join(airport_place(c) for c in withheld)
             + " was searched ALONE and Google did not answer this session at all (refused or "
-              "failed). That is NOT evidence of no service: say you could not get options "
-              "from that airport just now, and offer to try it again.")
+              "failed). That is NOT evidence of no service: say options from that airport "
+              "have not loaded yet (the app is still retrying it, see STILL LOADING).")
     return extra, note
 
 
@@ -2964,6 +3023,13 @@ def rescue_empty_multi_airport(spec: dict, origins: list, destinations: list, so
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
     rows, seen, served, absent, withheld = [], set(), [], [], []
+    # a pair past the cap, or one the pool timed out on, was never asked:
+    # that is a missing piece too, not a silent drop
+    asked = {(o.name, d.name) for (o, d), _g, _v in outs}
+    for o in origins:
+        for d in destinations:
+            if (o.name, d.name) not in asked:
+                _note_missing_piece([o.name], [d.name])
     for (o, d), got, verdict in outs:
         tag = f"{o.name}→{d.name}"
         if got:
@@ -2977,6 +3043,7 @@ def rescue_empty_multi_airport(spec: dict, origins: list, destinations: list, so
             absent.append(tag)
         else:
             withheld.append(tag)
+            _note_missing_piece([o.name], [d.name])
     print(f"[multi-rescue] served={served} answered-empty={absent} withheld={withheld}")
     note = (" The combined multi-airport search came back with nothing, so each airport pair "
             "was searched ALONE: " + (", ".join(served) + " flights" if served else "none returned flights")
@@ -2985,8 +3052,8 @@ def rescue_empty_multi_airport(spec: dict, origins: list, destinations: list, so
         note += f" Google answered NO FLIGHTS for {', '.join(absent)}."
     if withheld:
         note += (f" Google did not answer this session at all for {', '.join(withheld)} (refused "
-                 "even alone): that is NOT evidence of no service; say you could not get those "
-                 "options just now and offer to try again.")
+                 "even alone): that is NOT evidence of no service; say those options have not "
+                 "loaded yet (the app is still retrying them, see STILL LOADING).")
     return rows, note
 
 
@@ -3117,8 +3184,37 @@ def round_trip_as_one_ways(spec: dict, currency: str, legs: list, started: float
     return stamp_party(payload, spec)
 
 
+def attach_backfill(payload: dict, spec: dict) -> dict:
+    """Ship the parts Google refused as retry-later pieces, and stop the
+    reply from ranking a partial set as if it were whole. Nov 11: NYC to
+    Hanoi lost JFK to refusals and the reply called a $817 United flight
+    'the only one-stop on offer' and Alaska 'the cheapest fare overall',
+    while JFK had Asiana at $442 with one stop."""
+    pieces = list(getattr(_local, "missing_pieces", None) or [])
+    _local.missing_pieces = None
+    if not pieces or spec.get("trip_type") == "round_trip":
+        return payload
+    for p in pieces:
+        if len(p["origins"]) == 1 and len(p["destinations"]) == 1 and spec.get("departure_date"):
+            # Google's own page for exactly this piece: if we keep being
+            # turned away, the user's browser is not
+            p["url"] = multi_city_search_url(
+                [{"origins": p["origins"], "destinations": p["destinations"],
+                  "date": spec["departure_date"]}], spec.get("cabin"), trip_type=2, **spec_pax(spec))
+    payload["backfill"] = {"pieces": pieces}
+    labels = ", ".join(f"{'/'.join(p['origins'])}→{'/'.join(p['destinations'])}" for p in pieces)
+    payload["message"] = (payload.get("message") or "") + (
+        f" STILL LOADING: the app keeps asking Google for {labels} in the background for "
+        "about two minutes after this reply, and adds those flights to the cards, re-ranked, "
+        "if they arrive. Until then every comparison is about what loaded: say 'of the flights "
+        "that loaded' (or name the airports), never 'cheapest overall', 'the only one-stop', "
+        "or an unqualified 'best'. Tell the user the missing part may still appear on its own.")
+    return payload
+
+
 def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: str) -> dict:
     fd_started = time.monotonic()
+    _local.missing_pieces = []  # parts Google refuses, collected for attach_backfill
     filters = build_filters(spec, origins, destinations, show_all_results=True)
     sort = SORT_MAP.get(spec.get("sort"), SortBy.CHEAPEST)
     searcher = RepresentativeSearch()
@@ -3231,15 +3327,20 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
             # came back like this every time while the route had 100+ flights
             message = ("Google did not answer this search for this session (refused on every "
                        "attempt, each as a fresh visitor). That is NOT evidence that no flights "
-                       "exist: tell the user plainly you could not get these results just now, "
-                       "and offer to try again or try nearby airports.")
-        return {
+                       "exist: tell the user plainly these results have not loaded yet; one-way "
+                       "searches keep retrying on their own (see STILL LOADING), and nearby "
+                       "airports are worth offering.")
+            if not getattr(_local, "missing_pieces", None):
+                # nothing was decomposed (one airport each way): the whole
+                # search is the piece to ask for again
+                _note_missing_piece([o.name for o in origins], [d.name for d in destinations])
+        return attach_backfill({
             "type": "flights",
             "message": message + (rescue_note or ""),
             "results": [],
             # what each attempt actually got, so the next diagnosis is free
             "search_diag": combined_verdict,
-        }
+        }, spec)
 
     via = {c.strip().upper() for c in spec.get("via_airports") or []}
 
@@ -3450,43 +3551,10 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
     # existed but 11 sat at price ranks 83-98, so the list we shipped (and the
     # summary Claude saw) contained exactly one. Score the whole set, then cut.
     flights = [serialize_flight(r, spec.get("cabin"), **spec_pax(spec)) for r in results[:RANK_POOL]]
-    add_highlights(flights)
-    flights = order_by_value(
-        flights,
-        price_of=lambda f: f.get("price"),
-        duration_of=lambda f: f.get("duration"),
-        stops_of=lambda f: f.get("stops") or 0,
-        warnings_of=lambda f: f.get("warnings"),
-        requested_sort=spec.get("sort"),
-    )
-    if (spec.get("sort") not in EXPLICIT_SORTS
-            and len(flights) > 1 and flights[0].get("price") is not None):
-        flights[0].setdefault("highlights", []).insert(0, "Best value")
-    total_found, total_nonstop = len(flights), sum(1 for f in flights if f["stops"] == 0)
-    cheapest_nonstop = min((f["price"] for f in flights
+    flights, ranked_all = rank_and_cut_one_way(flights, spec)
+    total_found, total_nonstop = len(ranked_all), sum(1 for f in ranked_all if f["stops"] == 0)
+    cheapest_nonstop = min((f["price"] for f in ranked_all
                             if f["stops"] == 0 and f.get("price") is not None), default=None)
-    ranked_all = flights
-    flights = retain_representative(
-        flights, SHIP_LIMIT,
-        price_of=lambda f: f.get("price"),
-        duration_of=lambda f: f.get("duration"),
-        stops_of=lambda f: f.get("stops") or 0,
-    )
-    # a hub neighbor must not erase the named field from the shipped set
-    # (the Gainesville bug, in its one-way form) — on BOTH sides of the
-    # route. Aug 6: HVN/BDL -> FLL crowded out every HVN row, and because
-    # the guarantee and the breakdown were destination-only (one
-    # destination here, so no breakdown at all), the model had zero HVN
-    # evidence and asserted "HVN has no service to FLL". Google had Breeze
-    # at $111 and an Avelo NONSTOP at $180, cheaper than the BDL flight we
-    # recommended, from the airport the user named first.
-    flights = rescue_airports(flights, ranked_all, dest_of=_dest_of_row)
-    flights = rescue_airports(flights, ranked_all, dest_of=_orig_of_row)
-    # ...and a CARRIER must not vanish either: unpriced rows rank last by
-    # design (trip_cost None -> inf), so the cut would drop every trace of a
-    # fare-withheld airline. rescue_airports is generic over its key.
-    flights = rescue_airports(flights, ranked_all,
-                              dest_of=lambda f: f.get("airline"))
     # state the true totals: the shipped list is a sample, and without this
     # Claude reads "everything else needs a connection" off a truncated set
     message = f"Found {total_found} options"
@@ -3510,11 +3578,150 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
         message += airport_note
     if arrival_note:
         message = f"{arrival_note}\n{message}"
-    return stamp_party({
+    return attach_backfill(stamp_party({
         "type": "flights",
         "message": message,
         "results": flights,
-    }, spec)
+    }, spec), spec)
+
+
+def rank_and_cut_one_way(flights: list, spec: dict) -> tuple[list, list]:
+    """Serialized one-way rows -> (shipped cut, everything ranked).
+
+    One function for the turn AND for rows that arrive after it (backfill),
+    so a late airport is ranked by exactly the rules the reply used."""
+    add_highlights(flights)
+    flights = order_by_value(
+        flights,
+        price_of=lambda f: f.get("price"),
+        duration_of=lambda f: f.get("duration"),
+        stops_of=lambda f: f.get("stops") or 0,
+        warnings_of=lambda f: f.get("warnings"),
+        requested_sort=spec.get("sort"),
+    )
+    if (spec.get("sort") not in EXPLICIT_SORTS
+            and len(flights) > 1 and flights[0].get("price") is not None):
+        flights[0].setdefault("highlights", []).insert(0, "Best value")
+    ranked_all = flights
+    flights = retain_representative(
+        flights, SHIP_LIMIT,
+        price_of=lambda f: f.get("price"),
+        duration_of=lambda f: f.get("duration"),
+        stops_of=lambda f: f.get("stops") or 0,
+    )
+    # a hub neighbor must not erase the named field from the shipped set
+    # (the Gainesville bug, in its one-way form) — on BOTH sides of the
+    # route. Aug 6: HVN/BDL -> FLL crowded out every HVN row, and because
+    # the guarantee and the breakdown were destination-only (one
+    # destination here, so no breakdown at all), the model had zero HVN
+    # evidence and asserted "HVN has no service to FLL". Google had Breeze
+    # at $111 and an Avelo NONSTOP at $180, cheaper than the BDL flight we
+    # recommended, from the airport the user named first.
+    flights = rescue_airports(flights, ranked_all, dest_of=_dest_of_row)
+    flights = rescue_airports(flights, ranked_all, dest_of=_orig_of_row)
+    # ...and a CARRIER must not vanish either: unpriced rows rank last by
+    # design (trip_cost None -> inf), so the cut would drop every trace of a
+    # fare-withheld airline. rescue_airports is generic over its key.
+    flights = rescue_airports(flights, ranked_all,
+                              dest_of=lambda f: f.get("airline"))
+    return flights, ranked_all
+
+
+# ---- backfill: the part of a search Google refused, asked again later ----
+BACKFILL_ROWS_MAX = 160   # rows the browser may send back (a size bound, not trust)
+_SET_RELATIVE_HIGHLIGHTS = {"Best value", "Cheapest option", "Fastest option", "Direct"}
+
+
+def merge_backfill_rows(spec: dict, have: list, new: list) -> tuple[list, list, int]:
+    """Rows on screen plus rows that arrived late, re-ranked as one set.
+    Highlights are relative to the set, so they are recomputed, never
+    carried; a flight already listed is not listed twice."""
+    seen, merged, added = set(), [], 0
+    for is_new, rows in ((False, have), (True, new)):
+        for f in rows:
+            if not isinstance(f, dict) or not isinstance(f.get("legs"), list) or not f["legs"]:
+                continue
+            sig = serialized_signature(f)
+            if sig in seen:
+                continue
+            seen.add(sig)
+            g = dict(f)
+            g["highlights"] = [h for h in (f.get("highlights") or [])
+                               if isinstance(h, str) and h not in _SET_RELATIVE_HIGHLIGHTS]
+            g["stops"] = int(g.get("stops") or 0)
+            merged.append(g)
+            added += is_new
+    shipped, ranked_all = rank_and_cut_one_way(merged, spec)
+    return shipped, ranked_all, added
+
+
+def _fmt_minutes(m) -> str:
+    try:
+        m = int(m)
+    except (TypeError, ValueError):
+        return ""
+    return f"{m // 60}h {m % 60:02d}m" if m >= 60 else f"{m}m"
+
+
+def backfill_note(label: str, added: int, before: dict | None, after: dict | None, spec: dict) -> str:
+    """What changed, stated from the numbers (the reply above was written
+    before these flights existed, so the card has to say it)."""
+    if not added:
+        return f"{label} came back after the reply, with no flights beyond the ones already listed."
+    head = f"{label} came back after the reply: {added} more flight{'s' if added != 1 else ''}, now in the list."
+    if not after:
+        return head
+    sort = spec.get("sort")
+    what = {"cheapest": "Cheapest", "fastest": "Fastest", "departure_time": "Earliest"}.get(sort, "Best value")
+    if before and serialized_signature(before) == serialized_signature(after):
+        return f"{head} {what} is unchanged."
+    stops = after.get("stops") or 0
+    bits = [after.get("airline") or "", format_money(after["price"], after.get("currency") or "USD")
+            if after.get("price") is not None else "",
+            "nonstop" if stops == 0 else f"{stops} stop{'s' if stops > 1 else ''}",
+            _fmt_minutes(after.get("duration"))]
+    return f"{head} New {what.lower()}: " + ", ".join(b for b in bits if b) + "."
+
+
+def backfill_piece(spec: dict, piece: dict, rows: list) -> dict:
+    """Ask Google again for one refused part of a one-way search, and merge
+    it into the rows the browser is showing."""
+    if not isinstance(spec, dict) or spec.get("trip_type") in ("round_trip", "multi_city") \
+            or spec.get("multi_city_segments") or spec.get("flexible_dates") \
+            or not spec.get("departure_date"):
+        return {"status": "invalid", "error": "only fixed-date one-way searches are backfilled"}
+    want_o = {str(c).upper() for c in spec.get("origins") or []}
+    want_d = {str(c).upper() for c in spec.get("destinations") or []}
+    po = [str(c).upper() for c in (piece or {}).get("origins") or [] if str(c).upper() in want_o]
+    pd = [str(c).upper() for c in (piece or {}).get("destinations") or [] if str(c).upper() in want_d]
+    if not po or not pd:
+        return {"status": "invalid", "error": "the piece must be part of the search"}
+    label = f"{'/'.join(po)}→{'/'.join(pd)}"
+    sub = {**spec, "origins": po, "destinations": pd}
+    try:
+        payload = _execute_spec(sub)
+    except SearchClientError as e:
+        payload = {"results": [], "search_diag": getattr(e, "search_diag", None) or {"verdict": "error"}}
+    got = [r for r in payload.get("results") or [] if isinstance(r, dict)]
+    if not got:
+        verdict = (payload.get("search_diag") or {}).get("verdict")
+        return {"status": "empty" if verdict == "empty" else "refused", "label": label,
+                "diag": payload.get("search_diag")}
+    have = [r for r in (rows or []) if isinstance(r, dict)][:BACKFILL_ROWS_MAX]
+    before = next((r for r in have if "Best value" in (r.get("highlights") or [])), have[0] if have else None)
+    old_floor = min((r["price"] for r in have if isinstance(r.get("price"), (int, float))), default=None)
+    shipped, ranked_all, added = merge_backfill_rows(spec, have, got)
+    after = shipped[0] if shipped else None
+    new_floor = min((r["price"] for r in shipped if isinstance(r.get("price"), (int, float))), default=None)
+    return {
+        "status": "ok", "label": label, "added": added, "found": len(ranked_all),
+        "results": shipped,
+        "note": backfill_note(label, added, before, after, spec),
+        # the price-context line was about the old cheapest fare
+        "price_context_stale": old_floor is not None and new_floor is not None and new_floor < old_floor,
+        # what the next turn's memory should say is on screen
+        "ledger": ledger_entry(spec, {"type": "flights", "results": shipped}),
+    }
 
 
 def format_money(amount, currency: str = "USD") -> str:
@@ -4718,6 +4925,7 @@ def roll_past_dates(spec: dict) -> tuple[dict, list[str]]:
 # short so a quoted fare is never stale enough to mislead.
 # --------------------------------------------------------------------------
 SEARCH_CACHE_TTL = 240.0
+SEARCH_CACHE_PARTIAL_TTL = 20.0
 _search_cache: dict = {}
 _inflight: dict = {}
 _cache_lock = threading.Lock()
@@ -4799,8 +5007,12 @@ def cached_execute_spec(spec: dict) -> dict:
         # every repeat inside the TTL
         payload = verify_completeness(spec, payload, ctx)
         if payload.get("results") or payload.get("dates"):
+            # a set with a refused part is cached only long enough to merge
+            # duplicate calls inside one turn: Nov 11, "try again" on NYC to
+            # Hanoi was served the same JFK-less set from cache in 1.6s
+            ttl = SEARCH_CACHE_PARTIAL_TTL if payload.get("backfill") else SEARCH_CACHE_TTL
             with _cache_lock:
-                _search_cache[key] = (time.monotonic() + SEARCH_CACHE_TTL, payload)
+                _search_cache[key] = (time.monotonic() + ttl, payload)
                 if len(_search_cache) > 64:  # bound memory in a long-lived process
                     for k in sorted(_search_cache, key=lambda k: _search_cache[k][0])[:16]:
                         _search_cache.pop(k, None)
@@ -5301,6 +5513,29 @@ async def price_returns(request: Request):
         return JSONResponse({"error": str(e)}, status_code=400)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/backfill")
+async def backfill(request: Request):
+    """One part of a one-way search Google refused during the turn, asked
+    again after it and merged into the cards by the turn's own ranking.
+    Refusals come in bursts per request shape; a minute later is usually a
+    different burst, and the turn's own 58s cannot wait for one to pass.
+    Stateless like /api/returns: the browser sends back the rows it shows,
+    so any instance can answer."""
+    from starlette.concurrency import run_in_threadpool
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    spec, piece, rows = body.get("spec"), body.get("piece"), body.get("rows")
+    if not isinstance(spec, dict) or not isinstance(piece, dict) or not isinstance(rows, list):
+        return JSONResponse({"error": "spec, piece and rows are required"}, status_code=400)
+    try:
+        return JSONResponse(await run_in_threadpool(backfill_piece, spec, piece, rows))
+    except Exception as e:
+        return JSONResponse({"status": "error", "error": str(e)[:200]})
 
 
 @app.post("/api/search")

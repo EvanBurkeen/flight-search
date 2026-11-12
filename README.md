@@ -87,13 +87,15 @@ this file, then **"Lessons the hard way"** below before debugging anything.
      by the manifest layer rather than hidden; probably not fixable
      client-side, but worth re-testing occasionally.
   2. **Google refuses some route pairs to production's session outright.**
-     Nov 11: SGN→JFK refused on every attempt (fresh identities, two turns)
-     while SGN→EWR passed in the same window and SGN→JFK returns 106 flights
-     from a home IP. Mitigated, not fixed: a multi-airport search now routes
-     around a refused pair, and nothing calls it "no service". Next step is
-     evidence, not theory: read `search_diag` / the `debug_timings` status
-     lines for a refused pair in prod (bytes per attempt) before changing
-     anything, and run a control in the same minute.
+     Nov 11: SGN→JFK, then JFK→HAN, refused on every proxied attempt while
+     neighbors on the same proxy passed and a home connection got them in
+     0.3s. JFK pairs are refused far more than others through the proxy.
+     Mitigated three ways, not fixed: a multi-airport search routes around
+     a refused pair; the refused part is asked for again after the turn
+     (backfill) and merged in; and the third attempt of a refused ladder
+     goes out directly. Next step: read the `direct` attempts in
+     `search_diag` from prod to learn whether the direct route is answered.
+     If it is, consider using it earlier; if not, try a different proxy pool.
   (The Aug 6 list's other two — the multi-city separate-vs-combined
   comparison that never fired, and the passenger count that never reached
   the Book link — were fixed Aug 7; see the Changelog. `leg_price_index`
@@ -157,6 +159,19 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
   one-ways instead of a round trip, the same request a few seconds later) is
   the retry that works. Every round trip and multi-airport search now has
   such a decomposition (`rescue_round_trip`, `rescue_empty_multi_airport`).
+- **Who asks matters as much as what is asked.** Nov 11: JFK→HAN was
+  refused 8/8 through the residential proxy (fresh exits, fresh
+  fingerprints) and answered in 0.3s from a home connection, while LGA→HAN
+  passed through the same proxy first time. Rotating within one kind of
+  visitor cannot escape a refusal keyed on that kind; a different way out
+  (direct) or a different TIME (backfill, after the burst) can. When a
+  shape is refused, run it from this laptop as the control before
+  concluding anything about the request itself.
+- **A partial answer must not look or live like a whole one.** The NYC to
+  Hanoi set without JFK was cached for the full 4 minutes, so "try again"
+  re-served it in 1.6s, and the reply ranked it as complete ("the only
+  one-stop", "the cheapest overall"). Partial sets now cache for 20s and
+  carry STILL LOADING until the missing part lands or is named.
 - **Refused is not an answer.** A refusal parses to no chunk at all; Google
   saying "no flights" is a well-formed chunk with no rows. Only the second is
   evidence of absence (Nov 11: a dedicated SGN→JFK search was refused every
@@ -386,6 +401,11 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
   cut each keep at least one option per destination airport, and search
   messages state per-airport counts and cheapest fares over the full
   pre-cut set whenever more than one destination airport is in play.
+- A part of a one-way search Google refused is never silently dropped: it
+  ships as a backfill piece (with Google's own link to it), is cached 20s
+  rather than 240s, is asked for again after the turn and merged by the
+  same ranking the turn used, and until it lands every superlative in the
+  reply is scoped to what loaded.
 - Trip briefings are owner-only: every `/api/watches` route but unsubscribe
   answers 401 without the site key, and on Vercel an unset `OWNER_KEY` turns
   the whole feature off (503) rather than open. The cron runs only with
@@ -401,7 +421,7 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
 | Layer | What |
 |---|---|
 | Hosting | Vercel serverless (Python), auto-deploys on push to `main` (`EvanBurkeen/flight-search`) |
-| Backend | [api/index.py](api/index.py) — FastAPI. `/api/search/stream` (SSE) is what the frontend uses (prose types first, cards land on `done`; sends `: open` immediately then `: ping` every 15s so the client can tell a live-but-slow turn from a dead socket), with `/api/search` (JSON) as its automatic fallback and the prod-verification probe; `/api/returns` prices every return Google pairs with ONE outbound (no model in the loop — the board's tap-to-price, ~1-4s); `GET /api/warm` opens the Google + Anthropic tunnels before the first search (no API spend), pinged by the frontend on load/focus/tab-return |
+| Backend | [api/index.py](api/index.py) — FastAPI. `/api/search/stream` (SSE) is what the frontend uses (prose types first, cards land on `done`; sends `: open` immediately then `: ping` every 15s so the client can tell a live-but-slow turn from a dead socket), with `/api/search` (JSON) as its automatic fallback and the prod-verification probe; `/api/returns` prices every return Google pairs with ONE outbound (no model in the loop — the board's tap-to-price, ~1-4s); `/api/backfill` re-asks Google for one refused part of a one-way search after the turn and merges it into the rows the browser sends back (no model, stateless); `GET /api/warm` opens the Google + Anthropic tunnels before the first search (no API spend), pinged by the frontend on load/focus/tab-return |
 | LLM | `claude-sonnet-5` agent loop (near-Opus on tool-driven work, 40% less per token; `ASSISTANT_MODEL` env var overrides it — set `claude-opus-4-8` in Vercel for an A/B, no code push), `max_retries=4`, effort `medium`, adaptive thinking on by default (hence `max_tokens` 8000: it caps thinking + text together); prompt caching: system+tools at 1h TTL (the only prefix that survives across turns), plus a 5m breakpoint on the conversation tail so a turn's later calls read its earlier messages at 0.1x — WITHIN-turn only, since the client replays history as bare prose and the wrap-up's `tool_choice: none` invalidates the messages tier (so that call sends no tail marker); plainly-route-shaped queries emit their first tool call via `claude-haiku-4-5` (no `output_config` — Haiku rejects effort), with an automatic loop-model redo if Haiku answers in prose instead of calling the tool |
 | Flight data | [`fli`](https://github.com/punitarani/fli) (PyPI `flights`) — reverse-engineered Google Flights |
 | Web context | Anthropic server-side `web_search` tool (max 3/turn) for event dates, venues, etc. |
@@ -453,7 +473,9 @@ Google traffic through a proxy (see Operations).
    **whole ladder bounded by `budget_s`**, 35s default / 45s
    multi-city, because a retry re-runs the entire search including any
    fan-out; each failed attempt RETIRES the identity — cookies + exit IP +
-   fingerprint — because refusals are session-sticky; a process-wide circuit
+   fingerprint — because refusals are session-sticky; after two proxied
+   refusals the third attempt goes out DIRECTLY (no proxy; rested 300s if
+   refused, see Operations); a process-wide circuit
    breaker imposes quiet after repeated refusals, capped at 1.5s on a user's
    first attempt. No warmup page-load: the study found warmed sessions did
    not outperform fresh ones) →
@@ -573,7 +595,12 @@ airline logos (Google's own marks, the IATA code underneath as a fallback);
 every results section opens with a type icon, a title built from the search
 itself (place names, then codes, trip type and dates with the year) and tags
 for every filter; the concierge's replies carry the brand mark as an avatar;
-the best-value card is outlined in the accent · **trip briefings** (owner
+the best-value card is outlined in the accent · **late airports**
+(when Google refuses part of a one-way search, the section says so and the
+page asks again 5s, 20s and 45s after the reply; flights that arrive are
+merged and re-ranked in place, with a note naming the new best value; if
+Google keeps refusing, Try again and a link to that exact search on Google
+Flights; a fully refused search still shows as its notice) · **trip briefings** (owner
 only, invisible to visitors: the footer's "Trip briefings" link takes the
 site key once per device, kept in localStorage as `fa_owner_key`; then a
 Watch button sits on every results section and a Briefings button in the
@@ -635,7 +662,14 @@ overrides) instead of being sent. Open one in a browser to review a briefing.
   seconds. An identity holds one curl handle PER THREAD (same exit, same
   fingerprint, cookies cloned from its primary jar): a single shared handle
   silently serialized every parallel code path in fli — see Changelog July 25,
-  round trips v2 — so never "simplify" back to one session per identity. Any refusal RETIRES that identity, so the retry is a genuinely new
+  round trips v2 — so never "simplify" back to one session per identity.
+  One extra identity sits outside the pool: **direct** (no proxy). A ladder
+  uses it only for its third attempt after two proxied refusals; a refused
+  direct attempt rests it for 300s (`DIRECT_COOLDOWN_S`), because datacenter
+  addresses burn under volume (the July lesson above). Attempts that used it
+  read `a3 direct ok` / `a3 direct refused` in `search_diag`, and
+  `search_ok_on_attempt` shows `3 direct`; that is how to tell from prod
+  whether it helps. Any refusal RETIRES that identity, so the retry is a genuinely new
   visitor. Do not "fix" a refusal by retrying on the same session: refusals are
   session-sticky (a flagged session failed 64/64 while fresh ones passed 20/32
   in the same window — see Changelog July 24).
@@ -683,6 +717,48 @@ overrides) instead of being sent. Open one in a browser to review a briefing.
   watch that misses the budget is simply due again tomorrow.
 
 ## Changelog
+
+**November 11, 2026 (the airport Google turned away)**
+- Evan, with Google Flights side by side: "nyc to hanoi march 4 ... clearly
+  these aren't the best flights. wtf happened?" Our list had LGA and EWR
+  only; Google's top picks were all JFK (Asiana $442 and Korean Air $473
+  with one stop). The reply called a $817 United flight "the only one-stop
+  on offer" and Alaska "the cheapest fare overall".
+- Read from prod, not guessed: the combined search was refused, the
+  per-airport rescue got LGA (76) and EWR (98), and JFK->HAN was refused
+  even alone (8 of 8 attempts over two turns, ~95-byte bodies). The date
+  grid was refused too, so the completeness sentinel had nothing to compare
+  against. Control: from a home connection every shape answered first time
+  (JFK->HAN 91 flights in 0.3s, all three airports 265). Same request,
+  different asker. Prod was in a broad wave too (successes on attempts 2-4,
+  JFK->LAX 46s). LGA/EWR matched home exactly, and Air India ($403/$421)
+  was missing from BOTH: that is open bug 1 (withheld fares), not this.
+- Fixed as a class, five ways:
+  1. **Ask again later.** A part of a one-way search Google refuses
+     (`_note_missing_piece`: a rescue pair, a probed airport, the whole
+     search) ships as a `backfill` piece. The page asks for it again 5s,
+     20s and 45s after the turn via the new `POST /api/backfill`, which
+     merges the browser's rows with the new ones and re-ranks them with the
+     turn's own rules (`rank_and_cut_one_way`, now shared). In-turn retries
+     all land inside the same burst; this is the one retry that outlives it.
+  2. **Ask from somewhere else.** After two proxied refusals in a ladder,
+     the third attempt goes out directly from the function (`go_direct`,
+     tagged `direct` in `search_diag`). A refused direct attempt rests that
+     route for 300s, so it is a rare fallback, never a second pool.
+  3. **Do not cache a partial answer.** A payload with backfill pieces is
+     cached 20s (enough to merge duplicate calls in one turn), not 240s.
+  4. **Do not rank a partial answer as whole.** STILL LOADING in the
+     message and a standing prompt rule: every superlative is about what
+     loaded and says so, and the reply says the rest may still appear.
+  5. **Say what changed.** The section shows a status note: retrying,
+     then what the late airport added and the new best value (computed from
+     the numbers), or, if Google keeps refusing, a Try again button and a
+     link to that exact search on Google Flights. The cross-turn ledger is
+     updated so the next reply knows the late flights are on screen.
+- The owner's Briefings header button is hidden at phone width (it pushed
+  the view toggle off-screen); the footer link opens the same panel.
+- 17 checks under "The airport Google turned away"; README drift checks
+  pin `/api/backfill` and the direct-route cooldown.
 
 **November 11, 2026 (briefing storage setup, first real run)**
 - Evan's first setup hit "Briefing storage isn't connected yet" with

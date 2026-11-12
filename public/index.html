@@ -316,6 +316,23 @@
       display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap;
       font-size: 0.8125rem; color: var(--ink-2); margin: -0.25rem 0 0.75rem;
     }
+    /* a part of the search Google turned away, being asked for again */
+    .bf-note {
+      display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+      font-size: 0.8125rem; line-height: 1.45; color: var(--info);
+      background: var(--info-bg); border-radius: 8px; padding: 0.5rem 0.75rem;
+      margin: -0.25rem 0 0.75rem;
+    }
+    .bf-note.bf-failed, .bf-note.bf-idle { color: var(--warn); background: var(--warn-bg); }
+    .bf-note.bf-done { color: var(--good); background: var(--good-bg); }
+    .bf-note > span:nth-child(2) { flex: 1 1 14rem; }
+    .bf-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
+    .bf-retrying .bf-dot { animation: bf-pulse 1.2s ease-in-out infinite; }
+    @keyframes bf-pulse { 50% { opacity: 0.25; } }
+    .bf-act {
+      font: inherit; font-weight: 600; color: inherit; background: none; border: 0;
+      padding: 0; text-decoration: underline; text-underline-offset: 2px; cursor: pointer;
+    }
     .price-ctx .pc-tier { font-weight: 600; color: var(--ink); flex: none; }
     .price-ctx .pc-tier.pc-low { color: var(--good); }
     .price-ctx .pc-tier.pc-high { color: var(--warn); }
@@ -768,6 +785,8 @@
       .brand-name { display: none; }
       .section-head .mini-toggle { display: none; }  /* the header's toggle covers it; titles get the width */
       .watch-btn span { display: none; }
+      /* the footer link opens the same panel; here it pushed the view toggle off-screen */
+      .brief-head-btn { display: none !important; }
       .watch-btn { padding: 0 0.55rem; }
       .flight-card { padding: 1rem; }
       .stub-divider { margin-left: -1rem; margin-right: -1rem; }
@@ -779,6 +798,7 @@
     @media (prefers-reduced-motion: reduce) {
       .messages > div, .sec-appear, .new-below { animation: none; }
       .loading-dot { animation-duration: 2s; }
+      .bf-retrying .bf-dot { animation: none; }
     }
   </style>
 </head>
@@ -795,7 +815,7 @@
         <span class="brand-name">Flight Assistant</span>
       </div>
       <div class="header-tools">
-        <button class="newconv-btn" x-show="ownerKey" @click="openBriefings()">Briefings</button>
+        <button class="newconv-btn brief-head-btn" x-show="ownerKey" @click="openBriefings()">Briefings</button>
         <button class="newconv-btn" x-show="hasSearched" @click="newConversation()"
                 title="Start fresh. Your recent trips are kept.">New trip</button>
         <button class="theme-btn" @click="cycleTheme()" :title="themeTitle()" aria-label="Color theme">
@@ -892,6 +912,15 @@
                 </div>
                 <div class="sec-tags" x-show="(sec.tags || []).length">
                   <template x-for="(t, ti) in (sec.tags || [])" :key="ti"><span class="sec-tag" x-text="t"></span></template>
+                </div>
+
+                <div class="bf-note" x-show="bfState(sec) !== 'none'" :class="'bf-' + bfState(sec)" role="status">
+                  <span class="bf-dot" aria-hidden="true"></span>
+                  <span x-text="bfText(sec)"></span>
+                  <button class="bf-act" x-show="bfState(sec) === 'failed' || bfState(sec) === 'idle'"
+                          @click="runBackfill(sec, true)">Try again</button>
+                  <a class="bf-act" x-show="(bfState(sec) === 'failed' || bfState(sec) === 'idle') && bfUrl(sec)"
+                     :href="bfUrl(sec)" target="_blank" rel="noopener">Open on Google Flights</a>
                 </div>
 
                 <div class="price-ctx" x-show="sec.price_context">
@@ -2246,6 +2275,7 @@
             });
             this.maybeNudge();
             this.persistConvo();
+            this.startBackfills(this.messages[this.messages.length - 1]);
           } catch (err) {
             if (timedOut) { const e = new Error('timeout'); e.netTimeout = true; throw e; }
             throw err;
@@ -2440,6 +2470,7 @@
           this.rememberLedger(d.ledger);
           this.maybeNudge();
           this.persistConvo();
+          this.startBackfills(msg);
           release();
         },
 
@@ -2855,7 +2886,106 @@
             // multi-city link — the prose says "the link is in this
             // section", so hiding the section broke that promise
             || (s.type === 'multicity' && s.combined_check_url)
-            || this.mcHasLegs(s));
+            || this.mcHasLegs(s)
+            // a search Google refused outright still shows, as its notice:
+            // the cards may yet arrive (backfill)
+            || ((s.backfill || {}).pieces || []).length > 0);
+        },
+
+        // ---- backfill. Nov 11, NYC to Hanoi: Google refused every JFK search
+        // inside the turn (refusals come in bursts per request shape), so the
+        // airport with the best options never appeared and the reply ranked a
+        // partial list. The server ships what it could not get as `pieces`;
+        // the page asks again AFTER the turn, when the burst has passed, and
+        // /api/backfill merges and re-ranks by the turn's own rules. ----
+        BF_DELAYS_MS: [5000, 20000, 45000],
+
+        bfLabel(p) { return (p.origins || []).join('/') + '→' + (p.destinations || []).join('/'); },
+
+        bfState(sec) {
+          if (sec._bf && sec._bf.state === 'done') return sec.backfill_note ? 'done' : 'none';
+          if (sec._bf && sec._bf.state) return sec._bf.state;
+          if (((sec.backfill || {}).pieces || []).length) return 'idle';   // restored mid-way
+          return sec.backfill_note ? 'done' : 'none';
+        },
+
+        bfText(sec) {
+          const st = this.bfState(sec);
+          const p = ((sec.backfill || {}).pieces || [])[0];
+          const label = p ? this.bfLabel(p) : '';
+          const prior = sec.backfill_note ? sec.backfill_note + ' ' : '';
+          if (st === 'retrying') return prior + label + " hasn't loaded yet: Google turned it away during the search. "
+            + 'Asking again; these cards update if it comes back.';
+          if (st === 'failed') return prior + label + ' still has not loaded. Google keeps turning it away right now, '
+            + 'so the list above is missing it.';
+          if (st === 'idle') return prior + label + ' did not finish loading, so the list above is missing it.';
+          return sec.backfill_note || '';
+        },
+
+        bfUrl(sec) { return (((sec.backfill || {}).pieces || [])[0] || {}).url || ''; },
+
+        sectionAlive(sec) {
+          return this.messages.some(m => (m.sections || []).includes(sec));
+        },
+
+        startBackfills(msg) {
+          for (const sec of (msg && msg.sections) || []) {
+            if (((sec.backfill || {}).pieces || []).length && sec.watch_spec && !sec._bf) this.runBackfill(sec);
+          }
+        },
+
+        async runBackfill(sec, manual = false) {
+          if ((sec._bf || {}).state === 'retrying' || !sec.watch_spec) return;
+          sec._bf = { state: 'retrying' };
+          while (((sec.backfill || {}).pieces || []).length) {
+            const piece = sec.backfill.pieces[0];
+            let out = null;
+            // a tap means "now"; the automatic run waits out the burst first
+            const delays = manual ? [300, ...this.BF_DELAYS_MS.slice(1)] : this.BF_DELAYS_MS;
+            for (const wait of delays) {
+              await new Promise(r => setTimeout(r, wait));
+              if (!this.sectionAlive(sec)) return;           // New trip, or the turn was dropped
+              try {
+                const res = await fetch('/api/backfill', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ spec: sec.watch_spec, piece, rows: sec.results || [] }),
+                });
+                const d = await res.json();
+                if (['ok', 'empty', 'invalid'].includes(d.status)) { out = d; break; }
+              } catch (e) { /* a dropped socket is just another refusal: wait and ask again */ }
+            }
+            if (!this.sectionAlive(sec)) return;
+            if (!out) { sec._bf = { state: 'failed' }; this.persistConvo(); return; }
+            let note = '';
+            if (out.status === 'ok') {
+              sec.results = out.results || sec.results;
+              if (out.price_context_stale) sec.price_context = null;   // it described the old cheapest fare
+              this.updateLedger(out.ledger);
+              note = out.note || '';
+            } else if (out.status === 'empty') {
+              note = 'Google answered for ' + this.bfLabel(piece) + ': no flights on this date.';
+            }
+            if (note) sec.backfill_note = ((sec.backfill_note || '') + ' ' + note).trim();
+            sec.backfill = { pieces: sec.backfill.pieces.slice(1) };
+            this.persistConvo();
+          }
+          sec._bf = { state: 'done' };
+          this.persistConvo();
+        },
+
+        // the next turn's memory must describe the cards as they are NOW,
+        // not as the reply left them, or it will say JFK never loaded
+        updateLedger(entry) {
+          if (!entry || !entry.route) return;
+          for (let i = this.ledgers.length - 1; i >= 0; i--) {
+            const es = this.ledgers[i].entries || [];
+            const j = es.findIndex(e => e.route === entry.route && e.kind === entry.kind);
+            if (j >= 0) { es[j] = { ...es[j], ...entry, search: es[j].search || entry.search }; return; }
+          }
+          // the turn recorded nothing for it (the section was empty)
+          if (this.ledgers.length) (this.ledgers[this.ledgers.length - 1].entries ||= []).push(entry);
+          else this.ledgers.push({ entries: [entry] });
         },
 
         ladder() {
@@ -2863,7 +2993,8 @@
           for (const m of this.messages) {
             for (const sec of m.sections || []) {
               if (sec._anchor && ((sec.results || []).length || (sec.dates || []).length || (sec.more_outbounds || []).length
-                  || (sec.type === 'multicity' && sec.combined_check_url) || this.mcHasLegs(sec))) {
+                  || (sec.type === 'multicity' && sec.combined_check_url) || this.mcHasLegs(sec)
+                  || ((sec.backfill || {}).pieces || []).length)) {
                 items.push({ anchor: sec._anchor, label: this.sectionLabel(sec) });
               }
             }
