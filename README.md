@@ -52,7 +52,10 @@ this file, then **"Lessons the hard way"** below before debugging anything.
   Local works + prod empty = IP throttling (see Operations). Both empty = real
   data gap (small airports, or genuinely no service).
 - **Env (Vercel only, never in git):** `ANTHROPIC_API_KEY`, `FLI_PROXY`
-  (IPRoyal rotating US-residential proxy; the fix for Google throttling).
+  (IPRoyal rotating US-residential proxy; the fix for Google throttling),
+  `SERPAPI_KEY` (the second way in: SerpApi answers what Google refuses us;
+  optional `SERPAPI_DAILY_MAX`, default 30, and `SERPAPI_DEEP_SEARCH=0` to
+  trade fidelity for speed; see Operations).
   Trip briefings add `OWNER_KEY`, `KV_REST_API_URL` + `KV_REST_API_TOKEN`
   (Upstash, injected by Vercel Storage), `RESEND_API_KEY`, `BRIEFING_FROM`
   and `CRON_SECRET`; see Operations. Without them the feature is inert.
@@ -63,7 +66,11 @@ this file, then **"Lessons the hard way"** below before debugging anything.
   account running out of credit mid-conversation: top up at
   console.anthropic.com, and consider auto-reload with a monthly cap so it
   degrades predictably. IPRoyal bandwidth (~$6/GB, ~2GB purchased July 2026,
-  months of runway at current usage).
+  months of runway at current usage). SerpApi (Nov 12): only searches Google
+  refused us are sent there; a one-way costs 1 search, a round trip 3, a
+  tapped return 1-2. Free plan 250/month, $25 for 1,000, $75 for 5,000; it
+  stops at the plan's quota rather than billing overage, and
+  `debug_timings.serpapi` shows the day's count.
 - **Streaming is LIVE on main since July 25, 2026** (Evan's spec: the
   recommendation types out first, THEN the cards land). The frontend consumes
   `/api/search/stream` with a hard auto-fallback to `/api/search` on any
@@ -111,11 +118,15 @@ this file, then **"Lessons the hard way"** below before debugging anything.
      tests like real traffic and run a home-connection control. Two
      refusal types: ~95B is the proxy-address one, ~325B the occasional
      fresh-session one (seen from home too, absorbed by the ladder).
-     Remaining options: a licensed source, or an exit Google treats like a
-     home connection.
-     The only true prevention is a licensed source (SerpApi's Google
-     Flights API was the candidate priced Nov 12; Amadeus self-service
-     shut down July 2026).
+     **Answered Nov 12 with a second way in:** after two refused attempts
+     (one, mid-wave) the same question goes to SerpApi's Google Flights
+     API, and its rows are converted into fli's own objects (Changelog, "a
+     second way in"). Live once `SERPAPI_KEY` is set in Vercel; until then
+     behavior is exactly as before. What it does not cover: flexible-date
+     grids and the price-context grid (SerpApi has no date grid), and
+     multi-city combined pricing (each leg is covered as a one-way). Watch
+     `debug_timings.serpapi` (ok vs errors, the day's count) alongside
+     `attempt_outcomes`.
   (The Aug 6 list's other two — the multi-city separate-vs-combined
   comparison that never fired, and the passenger count that never reached
   the Book link — were fixed Aug 7; see the Changelog. `leg_price_index`
@@ -190,6 +201,15 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
   12, so do not chase fingerprints). When a
   shape is refused, run it from this laptop as the control before
   concluding anything about the request itself.
+- **Every address you can rent is somebody's shared exit.** Nov 12:
+  residential and "mobile" pools were refused alike (the "mobile" pool was
+  mostly home broadband), Vercel's own address 0 for 4, a home connection
+  always answered. Google judges the address, and a rented one carries
+  everyone else's traffic, so no pool, fingerprint or pacing change made our
+  own requests reliable. The durable answer was a source whose business is
+  getting Google's answer (SerpApi, the second way in), asked only where ours
+  failed. And pace any proxy test like real use: a burst of 40 attempts in
+  two minutes read 90% refused on a pool that answers 3 of 4 when paced.
 - **A partial answer must not look or live like a whole one.** The NYC to
   Hanoi set without JFK was cached for the full 4 minutes, so "try again"
   re-served it in 1.6s, and the reply ranked it as complete ("the only
@@ -450,7 +470,7 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
 | Hosting | Vercel serverless (Python), auto-deploys on push to `main` (`EvanBurkeen/flight-search`) |
 | Backend | [api/index.py](api/index.py) — FastAPI. `/api/search/stream` (SSE) is what the frontend uses (prose types first, cards land on `done`; sends `: open` immediately then `: ping` every 15s so the client can tell a live-but-slow turn from a dead socket), with `/api/search` (JSON) as its automatic fallback and the prod-verification probe; `/api/returns` prices every return Google pairs with ONE outbound (no model in the loop — the board's tap-to-price, ~1-4s); `/api/backfill` re-asks Google for one refused part of a one-way search after the turn and merges it into the rows the browser sends back (no model, stateless); `GET /api/warm` opens the Google + Anthropic tunnels before the first search (no API spend), pinged by the frontend on load/focus/tab-return |
 | LLM | `claude-sonnet-5` agent loop (near-Opus on tool-driven work, 40% less per token; `ASSISTANT_MODEL` env var overrides it — set `claude-opus-4-8` in Vercel for an A/B, no code push), `max_retries=4`, effort `medium`, adaptive thinking on by default (hence `max_tokens` 8000: it caps thinking + text together); prompt caching: system+tools at 1h TTL (the only prefix that survives across turns), plus a 5m breakpoint on the conversation tail so a turn's later calls read its earlier messages at 0.1x — WITHIN-turn only, since the client replays history as bare prose and the wrap-up's `tool_choice: none` invalidates the messages tier (so that call sends no tail marker); plainly-route-shaped queries emit their first tool call via `claude-haiku-4-5` (no `output_config` — Haiku rejects effort), with an automatic loop-model redo if Haiku answers in prose instead of calling the tool |
-| Flight data | [`fli`](https://github.com/punitarani/fli) (PyPI `flights`) — reverse-engineered Google Flights |
+| Flight data | [`fli`](https://github.com/punitarani/fli) (PyPI `flights`) — reverse-engineered Google Flights; when Google refuses our request, [SerpApi's Google Flights API](https://serpapi.com/google-flights-api) answers the same question (`SERPAPI_KEY`), converted into fli's own result objects |
 | Web context | Anthropic server-side `web_search` tool (max 3/turn) for event dates, venues, etc. |
 | Coordinates | `airportsdata` (IATA → lat/lon) for route maps |
 | Frontend | Single static [public/index.html](public/index.html), Alpine.js, no build step |
@@ -503,7 +523,15 @@ Google traffic through a proxy (see Operations).
    fingerprint — because refusals are session-sticky; a process-wide circuit
    breaker imposes quiet after repeated refusals, capped at 1.5s on a user's
    first attempt. No warmup page-load: the study found warmed sessions did
-   not outperform fresh ones) →
+   not outperform fresh ones. **The second way in:** after 2 refused
+   attempts (`SERP_AFTER_REFUSALS`; 1 while the breaker is open), or when a
+   ladder ends refused, the same question goes to SerpApi once, deep search
+   and the full "more flights" list, every named airport in one request;
+   its rows become fli `FlightResult`s, so everything below runs unchanged.
+   A round trip there is the outbound list plus the returns of
+   `SERP_RT_EXPAND` (2) outbounds. An answered "no flights" is never
+   re-asked, and the rescues that run only because the main search failed
+   pass `fallback=False`) →
    post-process:
    - `via_airports` filter over the FULL result set (the only trustworthy way to
      assert a routing exists/doesn't)
@@ -678,7 +706,26 @@ overrides) instead of being sent. Open one in a browser to review a briefing.
   evanburkeen@gmail.com; ~2GB non-expiring credit bought July 2026; top up in
   their dashboard when low; searches use ~100-300KB each). If switching
   providers keep the URL format `http://user:pass@host:port`; the sticky
-  session suffix is IPRoyal-gated in code.
+  session suffix is IPRoyal-gated in code. When the proxy is refused
+  anyway (69% of attempts on Nov 12), SerpApi answers: next bullet.
+- **The second way in: SerpApi (Nov 12).** When Google refuses our own
+  request twice, `run_search` asks SerpApi's Google Flights API instead
+  (see "How a turn works", step 3). Setup, one time, Evan only (the key
+  never goes in git or chat): sign up at serpapi.com (the free plan is 250
+  searches a month), copy the key from its dashboard, add it in Vercel as
+  `SERPAPI_KEY` for Production, and redeploy. Check it took:
+  `debug_timings` on `/api/search` returns `timings.serpapi` with
+  `configured: true`; after a refused search, `ok` counts up. Spend is
+  bounded by the plan's quota (SerpApi stops, it does not bill overage),
+  `SERPAPI_DAILY_MAX` searches per UTC day across instances (default 30,
+  counted in Upstash as `serp:day:<date>` when storage is connected), and
+  `fallback=False` on the rescue paths. A rejected key or a spent month
+  pauses the fallback for an hour, SerpApi's hourly limit for 5 minutes;
+  meanwhile the old path (backfill, STILL LOADING) carries on. Deep search
+  is on because SerpApi documents it as identical to Google Flights in a
+  browser; `SERPAPI_DEEP_SEARCH=0` trades that for speed. No sort is sent,
+  so the board's tap-to-price repeats the turn's exact outbound question
+  and SerpApi's free one-hour cache answers it.
 - **Identity pool (supersedes the old single sticky session).** Each identity
   bundles its own cookie jar, proxy exit (`_session-<random>_lifetime-30m`) and
   browser fingerprint. `checkout_identity()` prefers the most recently
@@ -743,6 +790,34 @@ overrides) instead of being sent. Open one in a browser to review a briefing.
   refusal wave; that is the price of never mailing half a trip.
 
 ## Changelog
+
+**November 12, 2026 (a second way in)**
+- Evan: "I need to fix this production issue. There is no reliability
+  here... make sure the flights I want to find show up". Production was
+  refusing 18 of 26 attempts in one process (69%). Residential, "mobile"
+  and Vercel's own address were all refused while a home connection was
+  answered, so Google is judging the address, and no address we can rent
+  will fix it. Asking less (the entry below) only slows the bleeding.
+- So the same question now has a second way in. After 2 refused attempts
+  (1 while the breaker is open), or when a ladder ends refused, `run_search`
+  asks SerpApi's Google Flights API once: deep search (documented as
+  identical to the browser), the full "more flights" list, every named
+  airport in one request. Its rows become fli `FlightResult`s, so ranking,
+  the airport rescue, arrival windows, Book links, backfill and briefings
+  run on them unchanged. Round trips get the outbound list plus the returns
+  of 2 representative outbounds; a refused tap-to-price is answered the
+  same way. Google answering "no flights" is never paid for twice, and
+  SerpApi relaying it still licenses "no service".
+- Spend is bounded: the plan's quota, `SERPAPI_DAILY_MAX` (30 a day by
+  default, shared through Upstash), and `fallback=False` on every rescue
+  that runs only because the main search failed. A rejected key or a spent
+  quota pauses it; the old backfill path carries on meanwhile. Checked
+  bags are never sent (SerpApi cannot price them), so the bag-inclusive
+  promise holds.
+- Inert until `SERPAPI_KEY` is set in Vercel. `debug_timings.serpapi`
+  reports configured, the day's count, ok/empty/errors and the last error
+  (never the key). 25 checks under "A second way in", against responses in
+  SerpApi's documented shape.
 
 **November 12, 2026 (ask Google less)**
 - Evan: "what do I need to change to prevent google from refusing

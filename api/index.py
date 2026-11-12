@@ -13,7 +13,7 @@ from concurrent.futures import TimeoutError as FuturesTimeout
 from concurrent.futures import wait as futures_wait
 from datetime import date, datetime, timedelta
 from functools import lru_cache
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 # must precede the fli imports: its default is 60s x 3 retries, which lets a
 # Google tarpit hang a request for minutes
@@ -27,8 +27,11 @@ from fli.models import (
     Airport,
     Alliance,
     DateSearchFilters,
+    FlightLeg,
+    FlightResult,
     FlightSearchFilters,
     FlightSegment,
+    Layover,
     MaxStops,
     PassengerInfo,
     SeatType,
@@ -2661,9 +2664,452 @@ class RepresentativeSearch(SearchFlights):
         return combos
 
 
+# --------------------------------------------------------------------------
+# A second way in: SerpApi's Google Flights API
+#
+# Nov 12, production: Google refused 18 of 26 attempts in one process (69%).
+# Residential and "mobile" proxy pools were refused alike while a home
+# connection was answered every time, and going out from Vercel directly was
+# refused 0 for 4. Google judges the ADDRESS, and every address we can rent
+# is somebody's shared exit, so no pool, fingerprint or pacing change makes
+# our own requests reliable. What can be reliable is asking someone whose
+# business is getting Google's answer: SerpApi fetches the same Google
+# Flights results from its own infrastructure and returns them as JSON.
+#
+# fli stays first (free, and its wire data is richer: Google's carrier
+# manifest and its own booking tokens). The question goes to SerpApi only
+# after SERP_AFTER_REFUSALS refused attempts in one ladder, or when a ladder
+# ends refused, so a paid search is spent only where ours failed. The answer
+# is converted into fli's own FlightResult objects, so every rule downstream
+# (value ranking, the airport rescue, arrival windows, Book links, the
+# briefings) runs on it unchanged.
+#
+# Inert until SERPAPI_KEY is set. Spend is bounded three ways: the plan's
+# monthly quota (SerpApi stops answering; it does not bill overage),
+# SERPAPI_DAILY_MAX searches per UTC day across instances (an Upstash
+# counter when storage is connected), and the call sites that run only
+# because the main search already had its chance (the per-pair rescues, the
+# carrier probe, the multi-city combined probe) pass fallback=False, so one
+# turn cannot fan out into a handful of paid searches.
+# --------------------------------------------------------------------------
+SERP_URL = "https://serpapi.com/search.json"
+SERP_AFTER_REFUSALS = 2        # refused attempts in one ladder before the question goes to SerpApi
+SERP_TIMEOUT_S = 25.0          # one SerpApi request; the turn must still end inside the agent's 55s
+SERP_RT_EXPAND = 2             # round trips: outbounds whose returns are priced (one paid search each)
+SERP_DAILY_MAX_DEFAULT = 30    # SERPAPI_DAILY_MAX overrides; the plan's quota is the hard ceiling
+SERP_PAUSE_S = 3600.0          # a rejected key or a spent quota stops the asking for this long
+SERP_THROTTLE_PAUSE_S = 300.0  # SerpApi's hourly throughput limit: a short pause
+
+_serp_stats: dict = {"calls": 0, "ok": 0, "empty": 0, "errors": 0, "skipped": 0, "last_error": None}
+_serp_state: dict = {"paused_until": 0.0, "day": None, "count": 0}
+_serp_lock = threading.Lock()
+_SERP_EMPTY = ("hasn't returned any results", "has not returned any results")
+
+
+class SerpError(Exception):
+    """SerpApi was asked and did not answer (network, quota, key, request)."""
+
+
+class SerpUnavailable(Exception):
+    """SerpApi was not asked: no key, paused, or today's cap is spent."""
+
+
+def _serp_key() -> str:
+    return (os.environ.get("SERPAPI_KEY") or "").strip()
+
+
+def _serp_daily_max() -> int:
+    try:
+        return max(0, int(os.environ.get("SERPAPI_DAILY_MAX") or SERP_DAILY_MAX_DEFAULT))
+    except ValueError:
+        return SERP_DAILY_MAX_DEFAULT
+
+
+def serp_available() -> bool:
+    return bool(_serp_key()) and time.monotonic() >= _serp_state["paused_until"]
+
+
+def _serp_note(field: str, error: str | None = None) -> None:
+    with _serp_lock:
+        _serp_stats[field] += 1
+        if error:
+            _serp_stats["last_error"] = error
+
+
+def _serp_pause(seconds: float, why: str) -> None:
+    with _serp_lock:
+        _serp_state["paused_until"] = max(_serp_state["paused_until"], time.monotonic() + seconds)
+        _serp_stats["last_error"] = why
+    print(f"[serpapi] paused {seconds:.0f}s: {why}")
+
+
+def serp_status() -> dict:
+    """For debug_timings: what the fallback has done in this process. Never the key."""
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    with _serp_lock:
+        stats, state = dict(_serp_stats), dict(_serp_state)
+    return {"configured": bool(_serp_key()), "daily_max": _serp_daily_max(),
+            "today": state["count"] if state["day"] == today else 0,
+            "paused_s": max(0, round(state["paused_until"] - time.monotonic())), **stats}
+
+
+def _serp_take() -> bool:
+    """Reserve one search against today's cap (UTC day). Shared across
+    instances through Upstash when storage is connected; per process
+    otherwise. A broken counter never takes the fallback down with it."""
+    cap = _serp_daily_max()
+    day = time.strftime("%Y-%m-%d", time.gmtime())
+    if _kv_conf()[0]:
+        try:
+            n = int(_kv(["INCR", f"serp:day:{day}"]) or 0)
+            if n == 1:
+                _kv(["EXPIRE", f"serp:day:{day}", 172800])
+            with _serp_lock:
+                _serp_state["day"], _serp_state["count"] = day, n
+            return n <= cap
+        except Exception as e:  # noqa: BLE001
+            print(f"[serpapi] shared day counter unavailable ({type(e).__name__}); counting here")
+    with _serp_lock:
+        if _serp_state["day"] != day:
+            _serp_state["day"], _serp_state["count"] = day, 0
+        if _serp_state["count"] >= cap:
+            return False
+        _serp_state["count"] += 1
+        return True
+
+
+def _serp_get(params: dict) -> dict:
+    """One HTTP request to SerpApi. The key rides only in this URL, which is
+    never printed or returned."""
+    import urllib.error as _ue
+    import urllib.request as _ur
+
+    url = SERP_URL + "?" + urlencode({**params, "engine": "google_flights", "api_key": _serp_key()})
+    req = _ur.Request(url, headers={"User-Agent": _HTTP_UA, "Accept": "application/json"})
+    try:
+        with _ur.urlopen(req, timeout=SERP_TIMEOUT_S) as r:
+            return json.loads(r.read().decode())
+    except _ue.HTTPError as e:
+        try:
+            msg = str(json.loads(e.read().decode()).get("error") or "")
+        except Exception:  # noqa: BLE001
+            msg = ""
+        low = msg.lower()
+        if e.code == 401 or "api key" in low:
+            _serp_pause(SERP_PAUSE_S, f"key rejected (HTTP {e.code})")
+        elif "run out of searches" in low:
+            _serp_pause(SERP_PAUSE_S, "this month's searches are used up")
+        elif e.code == 429:
+            _serp_pause(SERP_THROTTLE_PAUSE_S, "hourly throughput limit")
+        raise SerpError(f"HTTP {e.code} {msg[:100]}".strip())
+    except (OSError, ValueError) as e:
+        raise SerpError(type(e).__name__)
+
+
+def _serp_call(params: dict) -> dict:
+    """A budgeted SerpApi search. Google answering 'no flights' comes back
+    as empty lists: that IS an answer, unlike a refusal."""
+    if not serp_available():
+        raise SerpUnavailable("paused" if _serp_key() else "no key")
+    if not _serp_take():
+        _serp_note("skipped", "daily cap reached")
+        raise SerpUnavailable("daily cap reached")
+    _serp_note("calls")
+    try:
+        data = _serp_get(params)
+    except SerpError as e:
+        _serp_note("errors", str(e))
+        raise
+    err = str(data.get("error") or "") if isinstance(data, dict) else "not a JSON object"
+    if err:
+        if any(s in err.lower() for s in _SERP_EMPTY):
+            return {"best_flights": [], "other_flights": []}
+        _serp_note("errors", err[:120])
+        raise SerpError(err[:120])
+    return data
+
+
+def serp_params(filters) -> dict | None:
+    """The question fli was asking, in SerpApi's words; None when SerpApi
+    cannot ask it faithfully, because an answer to a different question
+    (checked bags it cannot price, include and exclude lists at once) is
+    worse than an honest gap. No sort_by: the app ranks every row itself,
+    and identical parameters let SerpApi serve a repeat (the board's
+    tap-to-price) from its free one-hour cache."""
+    tt = filters.trip_type
+    segs = filters.flight_segments or []
+    if tt not in (TripType.ONE_WAY, TripType.ROUND_TRIP) or not segs:
+        return None
+    if tt == TripType.ROUND_TRIP and len(segs) < 2:
+        return None
+    if filters.bags is not None and filters.bags.checked_bags:
+        return None  # SerpApi reprices carry-ons only: the fare would be quoted without the bag
+    if filters.layover_restrictions or filters.alliances_exclude or (
+            (filters.airlines or filters.alliances) and filters.airlines_exclude):
+        return None
+
+    def ids(side) -> str:
+        return ",".join(a[0].name for a in side if getattr(a[0], "name", None))
+
+    def hours(tr) -> str | None:
+        if tr is None or all(v is None for v in (tr.earliest_departure, tr.latest_departure,
+                                                 tr.earliest_arrival, tr.latest_arrival)):
+            return None
+        span = lambda lo, hi: f"{lo or 0},{23 if hi is None else hi}"  # noqa: E731
+        if tr.earliest_arrival is None and tr.latest_arrival is None:
+            return span(tr.earliest_departure, tr.latest_departure)
+        return (span(tr.earliest_departure, tr.latest_departure) + ","
+                + span(tr.earliest_arrival, tr.latest_arrival))
+
+    out = segs[0]
+    p = {
+        "type": 1 if tt == TripType.ROUND_TRIP else 2,
+        "departure_id": ids(out.departure_airport),
+        "arrival_id": ids(out.arrival_airport),
+        "outbound_date": out.travel_date,
+        "currency": "USD", "hl": "en", "gl": "us",
+        "adults": filters.passenger_info.adults or 1,
+        "travel_class": filters.seat_type.value,
+        "show_hidden": "true",  # Google's "View more flights": the whole list, not the top picks
+    }
+    if not p["departure_id"] or not p["arrival_id"]:
+        return None
+    if filters.passenger_info.children:
+        p["children"] = filters.passenger_info.children
+    if filters.stops != MaxStops.ANY:
+        p["stops"] = filters.stops.value
+    if hours(out.time_restrictions):
+        p["outbound_times"] = hours(out.time_restrictions)
+    if tt == TripType.ROUND_TRIP:
+        p["return_date"] = segs[1].travel_date
+        if hours(segs[1].time_restrictions):
+            p["return_times"] = hours(segs[1].time_restrictions)
+    include = ([airline_code(a) for a in filters.airlines or []]
+               + [a.value for a in filters.alliances or []])
+    if include:
+        p["include_airlines"] = ",".join(sorted(include))
+    if filters.airlines_exclude:
+        p["exclude_airlines"] = ",".join(sorted(airline_code(a) for a in filters.airlines_exclude))
+    if filters.price_limit and filters.price_limit.max_price:
+        p["max_price"] = int(filters.price_limit.max_price)
+    if filters.max_duration:
+        p["max_duration"] = int(filters.max_duration)
+    if filters.exclude_basic_economy and filters.seat_type == SeatType.ECONOMY:
+        p["exclude_basic"] = "true"
+    if filters.bags is not None and filters.bags.carry_on:
+        p["bags"] = 1
+    if filters.emissions and filters.emissions.value:
+        p["emissions"] = 1
+    # SerpApi's default results can differ from the browser's; deep search
+    # is documented as identical to Google Flights in a browser, the whole
+    # point of asking (Evan, Nov 11: "clearly these arent the best flights")
+    if os.environ.get("SERPAPI_DEEP_SEARCH", "1") != "0":
+        p["deep_search"] = "true"
+    return p
+
+
+def _serp_enum(enum_cls, code):
+    c = str(code or "").strip().upper()
+    if not c:
+        return None
+    return enum_cls.__members__.get(c) or enum_cls.__members__.get("_" + c)
+
+
+def _serp_number(s) -> tuple[str, str] | None:
+    """'NH 962' -> ('NH', '962'): fli keeps the carrier and the number apart."""
+    parts = str(s or "").strip().upper().split()
+    if len(parts) >= 2:
+        return parts[0], parts[-1]
+    m = re.match(r"^([A-Z0-9]{2})(\d+[A-Z]?)$", parts[0] if parts else "")
+    return (m.group(1), m.group(2)) if m else None
+
+
+def serp_flight(opt: dict):
+    """One SerpApi option as a fli FlightResult, or None when a carrier or
+    airport is missing from fli's tables (fli's own parser drops those rows
+    too). Times are local wall-clock, exactly like fli's."""
+    segs = opt.get("flights") or []
+    if not segs:
+        return None
+    legs = []
+    for s in segs:
+        num = _serp_number(s.get("flight_number"))
+        dep, arr = s.get("departure_airport") or {}, s.get("arrival_airport") or {}
+        airline = _serp_enum(Airline, num[0]) if num else None
+        dap, aap = _serp_enum(Airport, dep.get("id")), _serp_enum(Airport, arr.get("id"))
+        if airline is None or dap is None or aap is None:
+            return None
+        legs.append(FlightLeg(
+            airline=airline, flight_number=num[1],
+            departure_airport=dap, arrival_airport=aap,
+            departure_datetime=datetime.strptime(str(dep.get("time")).strip(), "%Y-%m-%d %H:%M"),
+            arrival_datetime=datetime.strptime(str(arr.get("time")).strip(), "%Y-%m-%d %H:%M"),
+            duration=max(1, int(s.get("duration") or 1)),
+            departure_airport_name=dep.get("name"), arrival_airport_name=arr.get("name"),
+            aircraft=s.get("airplane"), legroom=s.get("legroom"),
+            overnight=bool(s.get("overnight")),
+        ))
+    layovers = []
+    for i, lo in enumerate(opt.get("layovers") or []):
+        ap = _serp_enum(Airport, lo.get("id"))
+        if ap is None:
+            continue
+        landed = (segs[i].get("arrival_airport") or {}).get("id") if i < len(segs) else None
+        leaves = (segs[i + 1].get("departure_airport") or {}).get("id") if i + 1 < len(segs) else None
+        layovers.append(Layover(
+            airport=ap, duration=max(0, int(lo.get("duration") or 0)),
+            overnight=bool(lo.get("overnight")),
+            change_of_airport=bool(landed and leaves and landed != leaves),
+            city=(airport_coords().get(ap.name) or {}).get("city") or lo.get("name"),
+            airport_name=lo.get("name"),
+        ))
+    co2 = opt.get("carbon_emissions") or {}
+    as_int = lambda v: int(v) if isinstance(v, (int, float)) and v >= 0 else None  # noqa: E731
+    notes = " ".join(str(x) for x in (opt.get("extensions") or [])).lower()
+    price = opt.get("price")
+    total = opt.get("total_duration") or (sum(lg.duration for lg in legs)
+                                          + sum(lo.duration for lo in layovers))
+    return FlightResult(
+        legs=legs,
+        price=float(price) if isinstance(price, (int, float)) and price >= 0 else None,
+        currency="USD",
+        duration=max(1, int(total)),
+        stops=len(legs) - 1,
+        layovers=layovers or None,
+        co2_emissions_g=as_int(co2.get("this_flight")),
+        co2_emissions_typical_g=as_int(co2.get("typical_for_this_route")),
+        co2_emissions_delta_pct=co2.get("difference_percent")
+        if isinstance(co2.get("difference_percent"), int) else None,
+        self_transfer=any(k in notes for k in ("self transfer", "self-transfer", "separate tickets")) or None,
+        mixed_cabin=len({str(s.get("travel_class") or "") for s in segs}) > 1 or None,
+        primary_airline=legs[0].airline,
+        primary_airline_name=segs[0].get("airline") or None,
+    )
+
+
+def _serp_options(data: dict) -> tuple[list, int]:
+    """[(FlightResult, raw option)] for every option SerpApi returned, best
+    and other alike, deduplicated; plus how many could not be represented."""
+    pairs, seen, dropped = [], set(), 0
+    for opt in (data.get("best_flights") or []) + (data.get("other_flights") or []):
+        try:
+            r = serp_flight(opt) if isinstance(opt, dict) else None
+        except Exception:  # noqa: BLE001 - one malformed row must not cost the rest
+            r = None
+        if r is None:
+            dropped += 1
+            continue
+        sig = (flight_signature(r), r.legs[0].departure_datetime)
+        if sig not in seen:
+            seen.add(sig)
+            pairs.append((r, opt))
+    return pairs, dropped
+
+
+def serp_results(data: dict) -> tuple[list, int]:
+    pairs, dropped = _serp_options(data)
+    return [r for r, _o in pairs], dropped
+
+
+def _serp_round_trip(search, params: dict) -> tuple[list, int]:
+    """Outbounds, each priced at the best round-trip total it reaches (as
+    fli's are), then the returns of the SERP_RT_EXPAND most representative
+    ones, one paid search each. Every other outbound ships from-priced and
+    prices on tap via /api/returns, exactly as on fli's path."""
+    pairs, dropped = _serp_options(_serp_call(params))
+    outs = [r for r, _o in pairs]
+    token = {id(r): o.get("departure_token") for r, o in pairs}
+    try:
+        search.last_outbounds = list(outs)
+    except Exception:  # noqa: BLE001 - a searcher without the attribute still gets combos
+        pass
+    chosen = [f for f in representative_outbounds(outs, SERP_RT_EXPAND) if token.get(id(f))]
+
+    def expand(out):
+        try:
+            rets, _d = _serp_options(_serp_call({**params, "departure_token": token[id(out)]}))
+        except (SerpError, SerpUnavailable):
+            return []
+        return [(out, r) for r, _o in rets]
+
+    combos: list = []
+    if chosen:
+        with ThreadPoolExecutor(max_workers=len(chosen)) as ex:
+            for got in ex.map(expand, chosen):
+                combos += got
+    return combos, dropped
+
+
+def serp_fallback(search, filters, diag: list):
+    """Ask SerpApi the question Google refused us.
+
+    None means not answered (keep laddering, or report the refusal). A
+    list, possibly empty, IS an answer and _local.search_diag says so: an
+    empty list here is Google answering 'no flights' through SerpApi, which
+    licenses an absence claim exactly as fli's answered-empty does."""
+    if not serp_available():
+        return None
+    params = serp_params(filters)
+    if params is None:
+        diag.append("serpapi n/a (a shape it cannot ask faithfully)")
+        return None
+    t0 = time.monotonic()
+    try:
+        if params["type"] == 1:
+            rows, dropped = _serp_round_trip(search, params)
+            answered = bool(rows) or bool(getattr(search, "last_outbounds", None))
+        else:
+            rows, dropped = serp_results(_serp_call(params))
+            answered = bool(rows)
+    except SerpUnavailable as e:
+        diag.append(f"serpapi not asked: {e}")
+        return None
+    except SerpError as e:
+        diag.append(f"serpapi error {str(e)[:60]}")
+        return None
+    took = time.monotonic() - t0
+    if not answered and dropped:
+        # rows came back that fli's tables cannot hold: that is not "no flights"
+        diag.append(f"serpapi {dropped} unreadable rows {took:.0f}s")
+        return None
+    _serp_note("ok" if answered else "empty")
+    diag.append(f"serpapi {'ok ' + str(len(rows)) if answered else 'answered-empty'} {took:.0f}s")
+    _local.search_diag = {"verdict": "ok" if answered else "empty", "attempts": diag, "source": "serpapi"}
+    print(f"[second-way-in] {diag[-1]} after {diag[:-1]}" + (f" ({dropped} rows unreadable)" if dropped else ""))
+    return rows
+
+
+def serp_returns_for(filters, sel_legs) -> list | None:
+    """/api/returns when Google refuses the tap: SerpApi's outbound list
+    (usually its free one-hour cache of the turn's own search), the row that
+    IS this outbound, then that row's returns. None when it cannot."""
+    if not sel_legs or not serp_available():
+        return None
+    params = serp_params(filters)
+    if not params or params.get("type") != 1:
+        return None
+
+    def sig(legs) -> tuple:
+        return tuple((airline_code(lg.airline), str(lg.flight_number),
+                      lg.departure_datetime.strftime("%Y-%m-%d %H:%M") if lg.departure_datetime else "")
+                     for lg in legs)
+
+    want = sig(sel_legs)
+    try:
+        pairs, _d = _serp_options(_serp_call(params))
+        tok = next((o.get("departure_token") for r, o in pairs if sig(r.legs) == want), None)
+        if not tok:
+            return None
+        rets, _d = _serp_options(_serp_call({**params, "departure_token": tok}))
+    except (SerpError, SerpUnavailable):
+        return None
+    _serp_note("ok" if rets else "empty")
+    return [r for r, _o in rets]
+
+
 def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy,
                top_n: int, budget_s: float = 35.0, max_attempt_s: float | None = None,
-               refusal_exit: int | None = None):
+               refusal_exit: int | None = None, fallback: bool = True):
     # Refusals come as HTTP 200 + a tiny body (parses to empty) or as raised
     # client errors. Both gates are answered the same way: retire the identity
     # (cookies + exit IP + fingerprint) so the retry is a different visitor,
@@ -2687,6 +3133,26 @@ def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy
     diag: list = []
     answered_empty = False
     _local.search_diag = None
+    # Nov 12: refusals are about our ADDRESS, so after SERP_AFTER_REFUSALS
+    # of them the same question goes to SerpApi (see "A second way in").
+    # Only refusals and errors count: Google answering "no flights" is an
+    # answer, and asking again elsewhere would pay to hear it twice.
+    # Mid-wave (the breaker is open) the next attempt would first sit out up
+    # to 6s of cooldown just to be refused again, so one refusal is enough.
+    refusals, serp_tried = 0, False
+
+    def serp_due() -> bool:
+        with _breaker_lock:
+            mid_wave = _breaker["open_until"] > time.monotonic()
+        return refusals >= (1 if mid_wave else SERP_AFTER_REFUSALS)
+
+    def second_way_in():
+        nonlocal serp_tried
+        if not fallback or serp_tried or refusals < 1:
+            return None
+        serp_tried = True
+        return serp_fallback(search, filters, diag)
+
     for i, attempt_sort in enumerate((sort, sort, SortBy.CHEAPEST, SortBy.CHEAPEST)):
         if i > 0 and time.monotonic() - started > budget_s:
             break  # out of time: surface what we have rather than dig the hole deeper
@@ -2711,6 +3177,11 @@ def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy
             _attempt_stats["outcomes"]["error"] += 1
             retire_identity()
             note_search_outcome(False)
+            refusals += 1
+            if serp_due():
+                got = second_way_in()
+                if got is not None:
+                    return got
             time.sleep(0.5 + 0.4 * i + random.uniform(0, 0.4))
             continue
         if results:
@@ -2729,8 +3200,13 @@ def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy
         else:
             diag.append(f"a{i + 1} refused {wire.get('bytes', 0)}B {time.monotonic() - _ta:.0f}s")
             _attempt_stats["outcomes"]["refused"] += 1
+            refusals += 1
         retire_identity()
         note_search_outcome(False)
+        if serp_due() and not answered_empty:
+            got = second_way_in()
+            if got is not None:
+                return got
         # refusals arrive in BURSTS per request shape (Nov 11: the 3-airport
         # NYC->HAN round trip refused 16/16 inside bursts while JFK->HAN
         # alone and the one-ways were answered). When a caller has a
@@ -2740,6 +3216,12 @@ def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy
                 and all(" refused " in d for d in diag[-refusal_exit:]):
             break
         time.sleep(0.4 * (i + 1) + random.uniform(0, 0.4))
+    if not answered_empty:
+        # the ladder ran out of time or attempts before the threshold (one
+        # slow refusal can spend a whole budget): last chance, same rules
+        got = second_way_in()
+        if got is not None:
+            return got
     _local.search_diag = {
         "verdict": "empty" if answered_empty else ("error" if last_exc else "refused"),
         "attempts": diag,
@@ -2998,8 +3480,11 @@ def rescue_empty_multi_airport(spec: dict, origins: list, destinations: list, so
         o, d = pair
         sub = {**spec, "origins": [o.name], "destinations": [d.name]}
         try:
+            # fallback=False: the combined search already asked SerpApi (one
+            # paid search covers every airport); this rescue runs because it could not
             rows = run_search(SearchFlights(), build_filters(sub, [o], [d], show_all_results=True),
-                              sort, top_n=10, budget_s=budget, max_attempt_s=per_attempt) or []
+                              sort, top_n=10, budget_s=budget, max_attempt_s=per_attempt,
+                              fallback=False) or []
             return pair, [r for r in rows if not isinstance(r, tuple)], search_verdict()
         except Exception as e:
             return pair, [], getattr(e, "search_diag", None) or {"verdict": "error"}
@@ -3094,7 +3579,8 @@ def rescue_round_trip(spec: dict, origins: list, destinations: list, sort, filte
             o_list, d_list, show_all_results=True)
         try:
             combos = run_search(searcher, f, sort, top_n=6,  # as search_fixed_dates: requests are the limit
-                                budget_s=max(1.0, remaining - per_attempt), max_attempt_s=per_attempt) or []
+                                budget_s=max(1.0, remaining - per_attempt), max_attempt_s=per_attempt,
+                                fallback=False) or []  # the main round trip already asked SerpApi
             verdict = search_verdict()
         except Exception as e:
             combos, verdict = [], getattr(e, "search_diag", None) or {"verdict": "error"}
@@ -3297,7 +3783,7 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
                 pf = build_filters({**spec, "airlines_include": probe_codes},
                                    origins, destinations, show_all_results=True)
                 extra = run_search(SearchFlights(), pf, SortBy.CHEAPEST,
-                                   top_n=10, budget_s=16.0) or []
+                                   top_n=10, budget_s=16.0, fallback=False) or []  # a supplement, never paid for
             except Exception:
                 extra = []
             if extra:
@@ -4198,7 +4684,8 @@ def search_multi_city(spec: dict, currency: str) -> dict:
         results, note = [], None
         try:
             results = run_search(RepresentativeSearch(), filters, sort,
-                                 top_n=fanout, budget_s=MC_PROBE_BUDGET_S) or []
+                                 top_n=fanout, budget_s=MC_PROBE_BUDGET_S,
+                                 fallback=False) or []  # each leg's own search has the fallback
             note = (f"priced {len(results)} combinations in {time.monotonic() - _tp:.1f}s"
                     if results else f"returned nothing in {time.monotonic() - _tp:.1f}s")
         except SearchClientError as e:
@@ -5460,11 +5947,12 @@ def fetch_returns_for_outbound(spec: dict, legs_in: list, from_total=None) -> di
     filters.flight_segments[0].selected_flight = _types.SimpleNamespace(legs=sel_legs)
 
     searcher = RepresentativeSearch()
-    rows, last_exc = None, None
+    rows, last_exc, answered = None, None, False
     for i in range(2):
         breaker_wait(1.5 if i == 0 else 6.0)
         checkout_identity()
         _local.fli_timeout = 12.0 if i == 0 else 24.0
+        _local.last_wire = None
         try:
             rows = searcher._fetch_flights(filters, currency="USD", language=None,
                                            country=None, capture_session=False)
@@ -5477,8 +5965,13 @@ def fetch_returns_for_outbound(spec: dict, legs_in: list, from_total=None) -> di
         if rows:
             note_search_outcome(True)
             break
+        answered = answered or bool((getattr(_local, "last_wire", None) or {}).get("parsed"))
         retire_identity()
         note_search_outcome(False)
+    if not rows and not answered:
+        # Google refused the tap: the same outbound's returns through SerpApi
+        # (usually 1 paid search; its outbound list is the turn's cached one)
+        rows = serp_returns_for(filters, sel_legs) or rows
     if not rows:
         if last_exc:
             raise last_exc
@@ -5608,6 +6101,8 @@ async def search(request: Request):
                 "phases": result.get("timings") or [],
                 "search_ok_on_attempt": _attempt_stats["ok_on_attempt"][-6:],
                 "attempt_outcomes": dict(_attempt_stats["outcomes"]),
+                # the second way in: how often Google's refusal was answered elsewhere
+                "serpapi": serp_status(),
                 "cached_specs": len(_search_cache),
             }
         return JSONResponse(payload)

@@ -2275,6 +2275,287 @@ _bf_routes = [r for r in app.app.routes if getattr(r, "path", "") == "/api/backf
 check("POST /api/backfill is registered", bool(_bf_routes) and "POST" in _bf_routes[0].methods)
 
 # --------------------------------------------------------------------------
+section("A second way in  — Changelog: 'a second way in'")
+# --------------------------------------------------------------------------
+# Nov 12, prod: Google refused 18 of 26 attempts in one process (69%), on
+# residential and "mobile" proxies alike, while a home connection was always
+# answered. Google judges the address and every rentable address is shared,
+# so a refused question now goes to SerpApi's Google Flights API, which
+# answers from its own infrastructure. Offline here: _serp_get is faked with
+# responses in SerpApi's documented shape, and Google refuses on cue.
+import io as _io_s
+import urllib.error as _ue_s
+import urllib.request as _ur_s
+
+
+def _s_seg(frm, to, dep, arr, airline, num, dur, **kw):
+    return {"departure_airport": {"name": f"{frm} Airport", "id": frm, "time": dep},
+            "arrival_airport": {"name": f"{to} Airport", "id": to, "time": arr},
+            "duration": dur, "airplane": "Boeing 787", "airline": airline, "travel_class": "Economy",
+            "flight_number": num, "legroom": "31 in", "extensions": [], **kw}
+
+
+def _s_opt(segs, layovers, total, price, **kw):
+    return {"flights": segs, "layovers": layovers, "total_duration": total, "price": price,
+            "carbon_emissions": {"this_flight": 880000, "typical_for_this_route": 949000,
+                                 "difference_percent": -7}, "type": "One way", **kw}
+
+
+_sd, _sd2, _sr = future(70), future(71), future(84)
+_S_OW = {"best_flights": [
+    _s_opt([_s_seg("JFK", "ICN", f"{_sd} 10:30", f"{_sd2} 15:05", "Asiana", "OZ 221", 875),
+            _s_seg("ICN", "HAN", f"{_sd2} 18:20", f"{_sd2} 21:10", "Asiana", "OZ 733", 290, overnight=True)],
+           [{"duration": 195, "name": "Incheon International Airport", "id": "ICN", "overnight": True}],
+           1360, 442),
+    _s_opt([_s_seg("EWR", "HAN", f"{_sd} 01:00", f"{_sd2} 09:00", "United", "UA 9", 1200)], [], 1200, 817),
+], "other_flights": [
+    _s_opt([_s_seg("LGA", "ICN", f"{_sd} 13:00", f"{_sd2} 17:00", "Korean Air", "KE 86", 900),
+            _s_seg("ICN", "HAN", f"{_sd2} 19:00", f"{_sd2} 22:00", "Korean Air", "KE 455", 300)],
+           [{"duration": 120, "name": "Incheon International Airport", "id": "ICN"}], 1320, 473),
+    # a carrier fli's tables do not know: dropped, never fatal, never "no flights"
+    _s_opt([_s_seg("JFK", "HAN", f"{_sd} 02:00", f"{_sd2} 10:00", "Nowhere Air", "ZZZ 1", 1200)], [], 1200, 99),
+]}
+_S_RET = {"best_flights": [_s_opt(
+    [_s_seg("HAN", "ICN", f"{_sr} 23:00", f"{_sr} 05:00", "Asiana", "OZ 734", 270),
+     _s_seg("ICN", "JFK", f"{_sr} 10:00", f"{_sr} 11:00", "Asiana", "OZ 222", 840)],
+    [{"duration": 300, "name": "Incheon International Airport", "id": "ICN"}], 1410, 980)], "other_flights": []}
+_s_calls: list = []
+_s_reply = {"next": None}
+
+
+def _s_fake_get(params):
+    _s_calls.append(dict(params))
+    if _s_reply["next"] is not None:
+        r = _s_reply["next"]
+        if isinstance(r, Exception):
+            raise r
+        return r
+    if params.get("departure_token"):
+        return _S_RET
+    if params.get("type") == 1:
+        return {"best_flights": [dict(o, type="Round trip", departure_token=f"tok{i}")
+                                 for i, o in enumerate(_S_OW["best_flights"] + _S_OW["other_flights"][:1])],
+                "other_flights": []}
+    return _S_OW
+
+
+_s_fli = {"n": 0, "mode": "refuse"}
+
+
+def _s_fli_search(self, *a, **k):
+    _s_fli["n"] += 1
+    if _s_fli["mode"] == "empty":   # Google ANSWERED: no flights
+        app._local.last_wire = {"bytes": 4000, "parsed": True, "rows": 0}
+    else:                           # Google refused: the ~95-byte body
+        app._local.last_wire = {"bytes": 95, "parsed": False, "rows": 0}
+    return None
+
+
+def _s_reset():
+    _s_calls.clear()
+    _s_fli.update(n=0, mode="refuse")
+    _s_reply["next"] = None
+    app._serp_state.update(paused_until=0.0, day=None, count=0)
+    for _k in app._serp_stats:
+        app._serp_stats[_k] = None if _k == "last_error" else 0
+    with app._breaker_lock:   # earlier refusals must not open it and move the threshold
+        app._breaker.update(consecutive=0, open_until=0.0)
+
+
+def _s_ladder(**kw):
+    """One run_search with Google refusing on cue. Backoff sleeps are
+    silenced: a bare ladder has no deadline loop that needs them to pass."""
+    _sleep = time.sleep
+    time.sleep = lambda s: None
+    try:
+        return app.run_search(app.SearchFlights(), app.build_filters(_s_spec, _s_o, _s_d),
+                              app.SortBy.CHEAPEST, top_n=6, **kw)
+    finally:
+        time.sleep = _sleep
+
+
+with app._breaker_lock:
+    _s_breaker_before = dict(app._breaker)
+_s_saved = (app._serp_get, app.SearchFlights.search, app.RepresentativeSearch._fetch_flights)
+_s_env = {k: os.environ.pop(k, None) for k in ("SERPAPI_KEY", "SERPAPI_DAILY_MAX", "SERPAPI_DEEP_SEARCH",
+                                              "KV_REST_API_URL", "KV_REST_API_TOKEN")}
+app._serp_get = _s_fake_get
+app.SearchFlights.search = _s_fli_search
+_s_spec = {"trip_type": "one_way", "origins": ["JFK", "LGA", "EWR"], "destinations": ["HAN"], "departure_date": _sd}
+_s_o, _s_d = app.resolve_airports(_s_spec["origins"])[0], app.resolve_airports(_s_spec["destinations"])[0]
+try:
+    # no key: exactly the old behavior, and SerpApi is never contacted
+    # (budget_s=0 ends a ladder after one attempt: the end-of-ladder chance
+    # is exercised without paying the suite seconds of real retry sleeps)
+    _s_reset()
+    _s_none = _s_ladder(budget_s=0.0)
+    check("without SERPAPI_KEY the fallback is inert (old ladder, nothing sent)",
+          _s_none == [] and _s_fli["n"] == 1 and not _s_calls and app.search_verdict()["verdict"] == "refused")
+
+    os.environ["SERPAPI_KEY"] = "offline-test-key"
+    _s_reset()
+    _s_pay = app.search_fixed_dates(_s_spec, _s_o, _s_d, "USD")
+    _s_rows = _s_pay.get("results") or []
+    check("two refusals send the same question to SerpApi, and its flights ship",
+          _s_fli["n"] == 2 and len(_s_calls) == 1 and len(_s_rows) == 3, f"fli {_s_fli['n']}, serp {len(_s_calls)}")
+    check("...one paid search covers every named airport (comma-separated ids)",
+          _s_calls[0]["departure_id"] == "JFK,LGA,EWR" and _s_calls[0]["arrival_id"] == "HAN"
+          and {r["legs"][0]["from"] for r in _s_rows} == {"JFK", "LGA", "EWR"})
+    check("...so nothing is left 'still loading' and the reply is not hedged",
+          not _s_pay.get("backfill") and "STILL LOADING" not in _s_pay["message"])
+    _s_rerank = app.rank_and_cut_one_way([dict(r, highlights=[]) for r in _s_rows], _s_spec)[0]
+    check("...ranked by the turn's own rules, exactly as fli's rows would be",
+          [app.serialized_signature(r) for r in _s_rows] == [app.serialized_signature(r) for r in _s_rerank]
+          and sum("Best value" in r["highlights"] for r in _s_rows) == 1)
+    _s_a = next(r for r in _s_rows if r["legs"][0]["flight_number"] == "221")
+    check("a SerpApi row is a real fli row: codes, numbers, local times, the layover city",
+          _s_a["airline_code"] == "OZ" and _s_a["legs"][0]["flight_number"] == "221"
+          and _s_a["legs"][0]["departure"] == f"{_sd}T10:30:00" and _s_a["stops"] == 1
+          and _s_a["layovers"][0]["city"] == "Seoul" and _s_a["co2_delta_pct"] == -7,
+          f"{_s_a['airline_code']} {_s_a['legs'][0]['flight_number']} {_s_a['layovers']}")
+    check("...whose overnight layover still raises the warning, and Book opens the exact flights",
+          any("Overnight layover" in w for w in _s_a["warnings"]) and "tfs=" in _s_a["booking_url"])
+    check("an unknown carrier's row is dropped, never fatal and never read as 'no flights'",
+          all(r["airline_code"] != "ZZ" for r in _s_rows) and app.search_verdict().get("source") == "serpapi")
+    check("deep search and the full list are asked for, with no sort to split the cache",
+          _s_calls[0].get("deep_search") == "true" and _s_calls[0].get("show_hidden") == "true"
+          and "sort_by" not in _s_calls[0] and _s_calls[0]["type"] == 2)
+
+    # Google ANSWERED "no flights": an answer, so nothing is paid for
+    _s_reset()
+    _s_fli["mode"] = "empty"
+    _s_ladder(budget_s=0.0)
+    check("an answered-empty ladder never pays to hear 'no flights' twice",
+          not _s_calls and app.search_verdict()["verdict"] == "empty")
+
+    # SerpApi relays Google's own "no results": absence, proven
+    _s_reset()
+    _s_reply["next"] = {"error": "Google Flights hasn't returned any results for this query."}
+    _s_e = _s_ladder(budget_s=30)
+    check("SerpApi's 'no results' is an answer: it licenses 'no service'",
+          _s_e == [] and app.absence_proven(app.search_verdict()) and _s_fli["n"] == 2)
+
+    # SerpApi down: the ladder keeps going and reports the refusal honestly
+    _s_reset()
+    _s_reply["next"] = app.SerpError("URLError")
+    _s_d2 = _s_ladder(budget_s=30)
+    _s_v = app.search_verdict()
+    check("when SerpApi fails, the ladder finishes and the refusal stays a refusal",
+          _s_d2 == [] and _s_fli["n"] == 4 and len(_s_calls) == 1 and _s_v["verdict"] == "refused"
+          and any("serpapi error" in a for a in _s_v["attempts"]), f"{_s_v}")
+
+    # call sites that run only because the main search had its chance
+    _s_reset()
+    _s_ladder(budget_s=0.0, fallback=False)
+    check("fallback=False never asks SerpApi", not _s_calls and _s_fli["n"] == 1)
+    _s_src = open(os.path.join(ROOT, "api", "index.py")).read()
+
+    def _s_body(name):
+        return _s_src.split(f"def {name}(", 1)[1].split("\ndef ", 1)[0]
+
+    check("rescues, the carrier probe and the multi-city probe never buy a second search",
+          "fallback=False" in _s_body("rescue_empty_multi_airport")
+          and "fallback=False" in _s_body("rescue_round_trip")
+          and "budget_s=16.0, fallback=False" in _s_src
+          and "budget_s=MC_PROBE_BUDGET_S,\n                                 fallback=False" in _s_src)
+
+    # mid-wave, one refusal is enough: the next attempt would sit out the cooldown first
+    _s_reset()
+    with app._breaker_lock:
+        _s_brk = dict(app._breaker)
+        app._breaker["open_until"] = time.monotonic() + 30
+    _s_ladder(budget_s=30)
+    with app._breaker_lock:
+        app._breaker.update(_s_brk)
+    check("while the breaker is open, one refusal sends the question to SerpApi",
+          _s_fli["n"] == 1 and len(_s_calls) == 1, f"fli {_s_fli['n']}")
+
+    # spend is bounded: the daily cap, and a rejected key pauses the asking
+    _s_reset()
+    os.environ["SERPAPI_DAILY_MAX"] = "0"
+    _s_ladder(budget_s=0.0)
+    os.environ.pop("SERPAPI_DAILY_MAX")
+    check("the daily cap stops the asking, and the refusal is reported as one",
+          not _s_calls and app._serp_stats["skipped"] == 1
+          and app.search_verdict()["verdict"] == "refused"
+          and any("daily cap" in a for a in app.search_verdict()["attempts"]))
+    _s_reset()
+    app._serp_get = _s_saved[0]
+    _s_uo = _ur_s.urlopen
+
+    def _s_401(req, timeout=None):
+        raise _ue_s.HTTPError(req.full_url, 401, "Unauthorized", {}, _io_s.BytesIO(b'{"error": "Invalid API key."}'))
+
+    _ur_s.urlopen = _s_401
+    try:
+        _s_ladder(budget_s=0.0)
+    finally:
+        _ur_s.urlopen = _s_uo
+        app._serp_get = _s_fake_get
+    _s_st = app.serp_status()
+    check("a rejected key pauses the fallback instead of paying for every search",
+          not app.serp_available() and _s_st["paused_s"] > 3000 and "401" in (_s_st["last_error"] or ""),
+          f"{_s_st}")
+    check("...and the key itself is never in the status, the log line or the diagnosis",
+          "offline-test-key" not in json.dumps(_s_st) + json.dumps(app.search_verdict()))
+
+    # the question is asked faithfully, or not at all
+    _s_reset()
+    _s_p = app.serp_params(app.build_filters(
+        {"trip_type": "round_trip", "origins": ["JFK"], "destinations": ["LHR"], "departure_date": _sd,
+         "return_date": _sr, "cabin": "business", "max_stops": "non_stop", "adults": 2, "children": 1,
+         "airlines_include": ["BA"], "alliances": ["ONEWORLD"], "max_price": 4000, "carry_on": True,
+         "departure_time": {"earliest": 6, "latest": 12}},
+        *[app.resolve_airports(x)[0] for x in (["JFK"], ["LHR"])]))
+    check("every filter crosses over: cabin, stops, party, airlines and alliance, cap, carry-on, times",
+          _s_p["type"] == 1 and _s_p["return_date"] == _sr and _s_p["travel_class"] == 3
+          and _s_p["stops"] == app.STOPS_MAP["non_stop"].value and _s_p["adults"] == 2 and _s_p["children"] == 1
+          and _s_p["include_airlines"] == "BA,ONEWORLD" and _s_p["max_price"] == 4000
+          and _s_p["bags"] == 1 and _s_p["outbound_times"] == "6,12", f"{_s_p}")
+    check("a checked-bag search is never sent where the bag cannot be priced",
+          app.serp_params(app.build_filters({**_s_spec, "checked_bags": 1}, _s_o, _s_d)) is None)
+
+    # round trips: outbounds with honest from-totals, two priced with their returns
+    _s_reset()
+    _s_rt = app.search_fixed_dates({**_s_spec, "trip_type": "round_trip", "return_date": _sr},
+                                   _s_o, _s_d, "USD")
+    check("a refused round trip comes back through SerpApi: list + priced returns",
+          _s_rt["type"] == "itineraries" and len(_s_rt["results"]) == app.SERP_RT_EXPAND
+          and len(_s_calls) == 1 + app.SERP_RT_EXPAND
+          and sum(1 for c in _s_calls if c.get("departure_token")) == app.SERP_RT_EXPAND
+          and _s_rt["results"][0]["total_price"] == 980.0, f"{len(_s_calls)} calls")
+    check("...and every other outbound ships from-priced, tappable",
+          len(_s_rt.get("more_outbounds") or []) == 1 and _s_rt["more_outbounds"][0].get("from_total"))
+
+    # the tap on a from-priced outbound, when Google refuses it too
+    _s_list_params = dict(_s_calls[0])
+    _s_reset()
+    app.RepresentativeSearch._fetch_flights = lambda self, *a, **k: (
+        setattr(app._local, "last_wire", {"bytes": 95, "parsed": False}) or [])
+    _s_mo = _s_rt["more_outbounds"][0]
+    _s_tap = app.fetch_returns_for_outbound(_s_rt["spec_echo"], _s_mo["legs"], _s_mo["from_total"])
+    check("a refused tap-to-price is answered through SerpApi",
+          _s_tap["count"] == 1 and _s_tap["cheapest_total"] == 980.0 and len(_s_calls) == 2
+          and _s_calls[1].get("departure_token"))
+    check("...asking the turn's exact outbound question, so SerpApi's free cache answers it",
+          {k: v for k, v in _s_calls[0].items()} == _s_list_params)
+    _s_reset()
+    app.RepresentativeSearch._fetch_flights = lambda self, *a, **k: (
+        setattr(app._local, "last_wire", {"bytes": 4000, "parsed": True}) or [])
+    app.fetch_returns_for_outbound(_s_rt["spec_echo"], _s_mo["legs"], _s_mo["from_total"])
+    check("...but a tap Google answered with no pairings is not paid for again", not _s_calls)
+finally:
+    app._serp_get, app.SearchFlights.search, app.RepresentativeSearch._fetch_flights = _s_saved
+    for _k, _v in _s_env.items():
+        if _v is None:
+            os.environ.pop(_k, None)
+        else:
+            os.environ[_k] = _v
+    _s_reset()
+    with app._breaker_lock:
+        app._breaker.update(_s_breaker_before)
+
+# --------------------------------------------------------------------------
 section("Trip briefings  — Changelog: 'trip briefings by email'")
 # --------------------------------------------------------------------------
 # Evan, Nov 11: a Watch button that emails a briefing on a schedule (best,
@@ -2591,6 +2872,17 @@ check("README states the briefing cron's schedule",
       bool(_cron) and _cron[0] in _readme, f"vercel.json says {_cron}")
 check("README states the cadences the code offers",
       all(label in _readme for label in ("Daily", "Every 3 days", "Weekly")))
+# The second way in: the env vars Evan sets, and the numbers that decide
+# when a paid search is spent and how many.
+for _env in ("SERPAPI_KEY", "SERPAPI_DAILY_MAX", "SERPAPI_DEEP_SEARCH"):
+    check(f"README names the SerpApi env var {_env}", f'"{_env}"' in _src and _env in _readme)
+check("README states when the question goes to SerpApi",
+      f"after {app.SERP_AFTER_REFUSALS} refused attempts" in " ".join(_readme.lower().split()))
+check("README states the SerpApi daily default",
+      f"`SERPAPI_DAILY_MAX`, default {app.SERP_DAILY_MAX_DEFAULT}" in _readme
+      and f"(default {app.SERP_DAILY_MAX_DEFAULT}," in _readme)
+check("README states how many round-trip returns SerpApi prices",
+      f"`SERP_RT_EXPAND` ({app.SERP_RT_EXPAND})" in _readme)
 
 # --------------------------------------------------------------------------
 section("Process guards")
