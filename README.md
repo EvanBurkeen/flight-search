@@ -124,6 +124,13 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
   failed request, run a request you KNOW should work (a plain one-way) in
   the same process, minutes apart. If the control fails, stop: you are
   debugging your own network, not the product.
+- **A sleeping Mac makes production look hung.** Nov 11: three post-deploy
+  `/api/search` probes "hung" (no bytes in 100-150s, one curl reporting 344s
+  against `--max-time 120`) while `/api/warm` answered in 0.1s and the stream
+  worked. The laptop was on battery and in Maintenance Sleep about 20 times an
+  hour (`pmset -g log`); the JSON endpoint is silent for its whole turn, so
+  it is the request a sleep kills. A curl that overruns its own `--max-time`
+  means the CLIENT froze. Check `pmset -g log` before suspecting the deploy.
 - **Production is the only clean testbed.** It has the residential proxy;
   this laptop does not. When local evidence is ambiguous, instrument the
   code to report what it did (`combined_probe`, `price_context_status`,
