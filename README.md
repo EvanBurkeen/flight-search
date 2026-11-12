@@ -420,6 +420,10 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
   recipient gets their own one-click unsubscribe token (RFC 8058 headers)
   that cannot touch anyone else's subscription. Only a POST unsubscribes;
   a GET (what mail scanners send) shows the confirm button and changes nothing.
+  A briefing never prices part of a trip as the whole: refused airports are
+  retried on the server first; a scheduled run that still lacks one sends
+  nothing, a forced one says what is missing everywhere it names a price,
+  and only checks covering the same airport pairs are ever compared.
 
 ## Stack
 
@@ -612,8 +616,8 @@ Watch button sits on every results section and a Briefings button in the
 header. Watch takes recipients as chips (you plus friends, up to 10, comma or
 Enter), a cadence of Daily / Every 3 days / Weekly, and an optional "only
 when a price moves by $X"; the first briefing goes out at once. The email
-names the best-value, cheapest, fastest and cheapest-nonstop flights with
-Book links, what changed since the last briefing, a cheaper nearby date when
+names the best-value, cheapest, fastest (as a footnote when it costs more
+than twice the best value) and cheapest-nonstop flights with Book links, what changed since the last briefing, a cheaper nearby date when
 the price context found one, a trend strip once there are 3 checks, a short
 summary written by Haiku from the numbers only, and an "Open in Flight
 Assistant" link (`/?q=<the query>`, which runs the search on load). The
@@ -721,9 +725,36 @@ overrides) instead of being sent. Open one in a browser to review a briefing.
   Daily is the fastest cadence; a watch is due again after its period minus
   3 hours of slack, so cron jitter never skips a day. One cron run checks
   due watches 3 at a time inside a 240s budget (`maxDuration` is 300s); a
-  watch that misses the budget is simply due again tomorrow.
+  watch that misses the budget is simply due again tomorrow. A watch whose
+  search has a refused part spends up to 80s more winning it back
+  (`BRIEFING_COMPLETE_S`), so "Send now" can take a minute or two during a
+  refusal wave; that is the price of never mailing half a trip.
 
 ## Changelog
+
+**November 12, 2026 (a briefing never prices half a trip as the whole)**
+- Evan's first delivered briefing, "New York to Hanoi: $817 best value",
+  was built on EWR alone: Google had refused JFK and LGA for that check.
+  It called United $817 the best value and Delta $704 the cheapest while
+  JFK had Korean Air at $473, it became the baseline (so the next full
+  check would have announced a fake "$344 drop"), and it showed a $6,581
+  "Fastest" to save 2h 45m. "wrong info AGAIN!!!" The page's backfill
+  could not help: an email has no page to ask again.
+- `complete_for_briefing`: the backfill, run on the server before anything
+  is written, for up to 80s per watch (gaps 4s/12s/25s, alternating shape,
+  merged by `rank_and_cut_one_way`).
+- If a part still will not load: a scheduled run sends NOTHING (status
+  `incomplete`, named in the panel, retried next run); "Send now" sends,
+  with the missing part in the subject ("best of what loaded"), an amber
+  banner, "(of what loaded)" on every label, and "Not compared".
+- Snapshots record `coverage` (the airport pairs priced) and `missing`.
+  Two checks compare only with the same coverage (`briefing_comparable`);
+  a partial check never becomes the baseline or a trend point, and a
+  snapshot from before coverage existed starts a fresh baseline. Evan's
+  existing watch resets that way on its next full check.
+- A "Fastest" costing more than 2x the best value is a footnote line
+  ("$5,764 more than the best value to save 2h 45m"), not a pick card.
+- 7 checks pin it.
 
 **November 12, 2026 (first real briefing: Resend 403, error code 1010)**
 - Evan's first live briefing failed for all three recipients with "Resend

@@ -5909,11 +5909,17 @@ def briefing_snapshot(payload: dict) -> dict | None:
     picks["fastest"] = _pick(kind, fast_row)
     nonstop = [p for p in (_pick(kind, r) for r in rows) if p["stops"] == 0]
     ctx = payload.get("price_context") or {}
+    pieces = (payload.get("backfill") or {}).get("pieces") or []
     return {
         "kind": kind, "n": len(payload.get("results") or []),
         "best": picks["best"]["price"], "cheapest": picks["cheapest"]["price"],
         "nonstop": min((p["price"] for p in nonstop), default=None),
         "picks": picks,
+        # which airport pairs these prices actually cover, and which parts
+        # Google refused: two checks compare only when they cover the same
+        "coverage": (sorted({f"{_orig_of_row(r)}→{_dest_of_row(r)}" for r in rows})
+                     if kind == "flights" else None),
+        "missing": [f"{'/'.join(p['origins'])}→{'/'.join(p['destinations'])}" for p in pieces],
         "nearby": ({"date": ctx["cheapest_nearby"].get("date"), "price": ctx["cheapest_nearby"].get("price")}
                    if (ctx.get("cheapest_nearby") or {}).get("date") else None),
         "more_from": min((m.get("from_total") for m in payload.get("more_outbounds") or []
@@ -5925,10 +5931,29 @@ def _money(x) -> str:
     return f"${x:,.0f}" if isinstance(x, (int, float)) else "n/a"
 
 
+def briefing_comparable(prev: dict | None, cur: dict) -> bool:
+    """Two checks compare only when they priced the same thing. Nov 12: the
+    first NYC to Hanoi briefing covered EWR alone (Google refused JFK and
+    LGA); compared with a later full check it would have announced a $344
+    'price drop' that was really JFK reappearing. A snapshot from before
+    coverage was recorded cannot prove what it covered, so it is not used."""
+    if not prev or cur.get("missing") or prev.get("missing"):
+        return False
+    if cur.get("kind") == "flights":
+        return bool(prev.get("coverage")) and prev.get("coverage") == cur.get("coverage")
+    return prev.get("kind") == cur.get("kind")
+
+
 def briefing_changes(prev: dict | None, cur: dict) -> list[str]:
     """Plain sentences: what moved since the last briefing that was sent."""
+    if cur.get("missing"):
+        return [f"Not compared: {', '.join(cur['missing'])} did not load this time, so these prices "
+                "cover only part of the trip and are not compared with earlier briefings."]
     if not prev:
         return ["First briefing: these prices are your baseline. Future briefings show what changed."]
+    if not briefing_comparable(prev, cur):
+        return ["New baseline: the last briefing did not cover the same airports as this one, so "
+                "this check starts the comparison fresh. Future briefings show what changed."]
     out = []
     for key, label in (("best", "Best value"), ("cheapest", "Cheapest")):
         a, b = prev.get(key), cur.get(key)
@@ -5950,7 +5975,7 @@ def briefing_changes(prev: dict | None, cur: dict) -> list[str]:
 
 
 def briefing_moved(prev: dict | None, cur: dict, threshold) -> bool:
-    if not prev or not threshold:
+    if not prev or not threshold or not briefing_comparable(prev, cur):
         return True
     return any(isinstance(prev.get(k), (int, float)) and isinstance(cur.get(k), (int, float))
                and abs(cur[k] - prev[k]) >= threshold for k in ("best", "cheapest"))
@@ -5965,13 +5990,19 @@ def briefing_summary(w: dict, cur: dict, changes: list[str]) -> str:
     Falls back to a plain sentence when the model is unavailable."""
     best = (cur.get("picks") or {}).get("best") or {}
     cheap = (cur.get("picks") or {}).get("cheapest") or {}
-    moved = [c for c in changes if not c.startswith("First") and "unchanged" not in c]
-    lead = ("Here is your baseline for this trip." if changes and changes[0].startswith("First")
+    missing = cur.get("missing") or []
+    moved = [c for c in changes if not c.startswith(("First", "New baseline", "Not compared"))
+             and "unchanged" not in c]
+    # a partial check carries a banner saying what did not load; the summary
+    # does not repeat it, it scopes every claim to what did
+    lead = ("" if missing
+            else "Here is your baseline for this trip." if changes and changes[0].startswith(("First", "New baseline"))
             else f"{moved[0]}." if moved else "No price changes since the last briefing.")
     if best.get("airline"):
         hours = f", {best['minutes'] // 60}h {best['minutes'] % 60:02d}m" if best.get("minutes") else ""
         kind = "nonstop" if best.get("stops") == 0 else f"{best.get('stops')} stop"
-        body = f" Best value is {best['airline']} at {_money(best.get('price'))} ({kind}{hours})."
+        body = (f" {'From the airports that loaded, the best value' if missing else 'Best value'} is "
+                f"{best['airline']} at {_money(best.get('price'))} ({kind}{hours}).")
         if cheap.get("sig") and cheap.get("sig") != best.get("sig"):
             body += f" The cheapest fare is {_money(cheap.get('price'))} on {cheap.get('airline')}."
     else:
@@ -5988,6 +6019,9 @@ def briefing_summary(w: dict, cur: dict, changes: list[str]) -> str:
         "cheapest_nearby_date": cur.get("nearby"),
         "options_found": cur.get("n"),
     }
+    if missing:
+        facts["coverage_warning"] = (f"Google refused {', '.join(missing)} for this check, so every price "
+                                     "here covers only the airports that loaded, not the whole trip.")
     try:
         client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"], max_retries=2)
         resp = client.messages.create(
@@ -5995,8 +6029,11 @@ def briefing_summary(w: dict, cur: dict, changes: list[str]) -> str:
             system=("You write the opening of a flight briefing email for a traveler who asked to "
                     "keep an eye on this trip. Two or three short sentences, warm and precise, like "
                     "a hotel concierge. Lead with what changed, then the flight worth booking and "
-                    "why. Use only the facts given; never predict where prices will go. No "
-                    "greeting, no sign-off, no lists, and never use em dashes or en dashes."),
+                    "why. Use only the facts given; never predict where prices will go. If "
+                    "coverage_warning is present, a banner above you already says what did not "
+                    "load: do not repeat it, but scope every claim to the flights that loaded and "
+                    "never call anything the cheapest or best for the whole trip. No greeting, no "
+                    "sign-off, no lists, and never use em dashes or en dashes."),
             messages=[{"role": "user", "content": json.dumps(facts, default=str)}],
         )
         text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
@@ -6015,7 +6052,10 @@ def _esc(x) -> str:
 
 
 def _trend_html(history: list[dict]) -> str:
-    pts = [h for h in history[-14:] if isinstance(h.get("best"), (int, float))]
+    # only checks that priced the same airports as the latest one: a point
+    # from a check that lost JFK is a different question, not a price move
+    cov = (history[-1] if history else {}).get("cov")
+    pts = [h for h in history[-14:] if isinstance(h.get("best"), (int, float)) and h.get("cov") == cov]
     if len(pts) < 3:  # two points are a comparison, already in "What changed"
         return ""
     lo, hi = min(h["best"] for h in pts), max(h["best"] for h in pts)
@@ -6054,17 +6094,33 @@ def briefing_email(w: dict, cur: dict, changes: list[str], summary: str, recipie
     unsub = f"{SITE_URL}/api/watches/unsubscribe?w={quote(w['id'])}&t={quote(recipient['token'])}"
     open_url = f"{SITE_URL}/?q={quote(w['query'])}"
     moved = next((c for c in changes if c.startswith("Best value ") and "unchanged" not in c), None)
-    subject = f"{w['title']}: {_money(cur.get('best'))} best value" + (
-        f" ({'down' if ' down ' in moved else 'up'} {moved.split(' to ')[0].split(' ')[-1]})" if moved else "")
+    missing = cur.get("missing") or []
+    subject = (f"{w['title']}: {_money(cur.get('best'))} best of what loaded ({', '.join(missing)} did not load)"
+               if missing else f"{w['title']}: {_money(cur.get('best'))} best value" + (
+                   f" ({'down' if ' down ' in moved else 'up'} {moved.split(' to ')[0].split(' ')[-1]})"
+                   if moved else ""))
     picks = cur.get("picks") or {}
     shown, blocks, text_picks = set(), [], []
     labels = {"best": "Best value", "cheapest": "Cheapest", "fastest": "Fastest"}
+    # Nov 12: "Fastest: United $6,581" sat beside an $817 best value to save
+    # 2h 45m. A fastest that costs more than twice the best value is a
+    # footnote, not a pick
+    fast, best_p = picks.get("fastest"), picks.get("best")
+    fast_note = None
+    if (fast and best_p and fast["sig"] != best_p["sig"]
+            and isinstance(fast.get("price"), (int, float)) and isinstance(best_p.get("price"), (int, float))
+            and fast["price"] > BRIEFING_FASTEST_MAX_RATIO * best_p["price"]):
+        saved = (best_p.get("minutes") or 0) - (fast.get("minutes") or 0)
+        fast_note = (f"The fastest option is {fast.get('airline')} at {_money(fast['price'])}, "
+                     f"{_money(fast['price'] - best_p['price'])} more than the best value"
+                     + (f" to save {_fmt_minutes(saved)}" if saved > 0 else "") + ".")
+        picks = {k: v for k, v in picks.items() if k != "fastest"}
     for key in ("best", "cheapest", "fastest"):
         p = picks.get(key)
         if not p or p["sig"] in shown:
             continue
         same = [labels[k] for k in ("best", "cheapest", "fastest") if picks.get(k) and picks[k]["sig"] == p["sig"]]
-        label = " · ".join(same)
+        label = " · ".join(same) + (" (of what loaded)" if missing else "")
         shown.add(p["sig"])
         blocks.append(_pick_html(label, p))
         text_picks.append(f"{label}: {p.get('airline')} {_money(p.get('price'))}\n  " + "\n  ".join(p["lines"])
@@ -6077,7 +6133,7 @@ def briefing_email(w: dict, cur: dict, changes: list[str], summary: str, recipie
         text_picks.append("Cheapest dates:\n  " + "\n  ".join(
             f"{_fmt_day(d['date'])} {_money(d['price'])}" for d in cur.get("dates") or []))
     nearby = cur.get("nearby")
-    extra = []
+    extra = [fast_note] if fast_note else []
     if nearby:
         extra.append(f"Cheapest nearby date: {_fmt_day(nearby['date'])} at {_money(nearby['price'])} (a comparison across dates, not price history).")
     if cur.get("nonstop") is not None:
@@ -6086,6 +6142,13 @@ def briefing_email(w: dict, cur: dict, changes: list[str], summary: str, recipie
         extra.append("No nonstop options on this search.")
     who = f"{WATCH_FREQUENCIES.get(w['frequency_days'], 'Regular')} briefing set up by Evan with Flight Assistant."
     change_html = "".join(f'<li style="margin:3px 0;">{_esc(c)}</li>' for c in changes)
+    partial = (f"Part of this search did not load: Google refused {', '.join(missing)} for this check, "
+               "so every price below covers only the airports that did load, not the whole trip. "
+               "That is not a sign those flights don't exist; open the search to see them live."
+               if missing else "")
+    partial_html = (f'<tr><td style="padding:12px 24px 0;"><div style="background:#fdf6e3;border-radius:10px;'
+                    f'padding:10px 14px;font-size:14px;line-height:1.5;color:#a16207;">{_esc(partial)}</div></td></tr>'
+                    if partial else "")
     html_doc = (
         f'<!doctype html><html><body style="margin:0;padding:0;background:{_E["bg"]};">'
         f'<div style="display:none;max-height:0;overflow:hidden;">{_esc(summary)}</div>'
@@ -6095,6 +6158,7 @@ def briefing_email(w: dict, cur: dict, changes: list[str], summary: str, recipie
         f'<tr><td style="padding:22px 24px 0;"><div style="font-size:13px;font-weight:700;color:{_E["accent"]};">Flight Assistant · Trip briefing</div>'
         f'<div style="font-size:22px;font-weight:700;letter-spacing:-0.02em;margin-top:6px;">{_esc(w["title"])}</div>'
         f'<div style="font-size:13px;color:{_E["ink3"]};margin-top:3px;">{_esc(w["subtitle"])}</div></td></tr>'
+        + partial_html +
         f'<tr><td style="padding:14px 24px 0;font-size:15px;line-height:1.6;color:{_E["ink"]};">{_esc(summary)}</td></tr>'
         f'<tr><td style="padding:12px 24px 0;"><div style="background:{_E["soft"]};border-radius:10px;padding:10px 14px;">'
         f'<div style="font-size:12px;font-weight:700;color:{_E["accent"]};">What changed</div>'
@@ -6105,13 +6169,13 @@ def briefing_email(w: dict, cur: dict, changes: list[str], summary: str, recipie
         f'<div style="font-size:12px;color:{_E["ink3"]};margin-top:14px;line-height:1.5;">Prices are live Google Flights fares at the time of this check and change often; '
         f'the Book links open each flight on Google. {_esc(who)} <a href="{_esc(unsub)}" style="color:{_E["ink3"]};">Unsubscribe</a></div>'
         f'</td></tr></table></td></tr></table></body></html>')
-    text = "\n\n".join([
-        f"{w['title']}\n{w['subtitle']}", summary,
+    text = "\n\n".join([x for x in [
+        f"{w['title']}\n{w['subtitle']}", partial, summary,
         "What changed:\n- " + "\n- ".join(changes),
         "\n\n".join(text_picks), " ".join(extra),
         f"Open this search: {open_url}",
         f"Prices are live Google Flights fares at the time of this check and change often. {who}\nUnsubscribe: {unsub}",
-    ])
+    ] if x])
     return subject, html_doc, text
 
 
@@ -6140,6 +6204,48 @@ def send_email(to: str, subject: str, html_doc: str, text: str, unsubscribe_url:
         raise WatchError(f"Resend refused the email ({e.code}): {e.read().decode()[:200]}")
 
 
+BRIEFING_FASTEST_MAX_RATIO = 2.0   # a "Fastest" pick costing more than this x best value is a footnote
+BRIEFING_COMPLETE_S = 80.0         # per watch: time to win back refused airports before anything is sent
+BRIEFING_RETRY_GAPS_S = (4.0, 12.0, 25.0)
+
+
+def complete_for_briefing(spec: dict, payload: dict, budget_s: float = BRIEFING_COMPLETE_S) -> dict:
+    """The page's backfill, run on the server: an email has no page to ask
+    again after it is written. Nov 12, the first NYC to Hanoi briefing went
+    out built on EWR alone (Google refused JFK and LGA) and called $817 the
+    best value and $704 the cheapest, while JFK had Korean Air at $473.
+    Each refused piece is asked again, spaced and alternating shape, and
+    merged by the turn's own ranking; whatever still will not load stays
+    listed in `backfill`, and briefing_snapshot reports it as missing."""
+    pieces = list((payload.get("backfill") or {}).get("pieces") or [])
+    if not pieces or payload.get("type") != "flights":
+        return payload
+    deadline = time.monotonic() + budget_s
+    rows, left, stale = list(payload.get("results") or []), [], False
+    for piece in pieces:
+        out = None
+        for attempt, gap in enumerate(BRIEFING_RETRY_GAPS_S):
+            if time.monotonic() + gap > deadline:
+                break
+            time.sleep(gap)
+            got = backfill_piece(spec, piece, rows, attempt)
+            if got.get("status") in ("ok", "empty", "invalid"):
+                out = got
+                break
+        if out is None:
+            left.append(piece)
+        elif out["status"] == "ok":
+            rows, stale = out["results"], stale or out.get("price_context_stale")
+    done = {**payload, "results": rows}
+    if stale:
+        done.pop("price_context", None)  # it described the old cheapest fare
+    if left:
+        done["backfill"] = {"pieces": left}
+    else:
+        done.pop("backfill", None)
+    return done
+
+
 def run_watch(w: dict, force: bool = False) -> dict:
     """One check: search, snapshot, decide, email every active recipient."""
     today = date.today().isoformat()
@@ -6149,6 +6255,8 @@ def run_watch(w: dict, force: bool = False) -> dict:
         return {"id": w["id"], "status": "expired"}
     try:
         payload = cached_execute_spec(dict(w["spec"]))
+        if (payload.get("backfill") or {}).get("pieces"):
+            payload = complete_for_briefing(dict(w["spec"]), payload)
     except Exception as e:
         payload = {"type": "error", "message": str(e)}
     cur = briefing_snapshot(payload)
@@ -6158,10 +6266,20 @@ def run_watch(w: dict, force: bool = False) -> dict:
         w["last_error"] = f"{datetime.now():%b %d %H:%M}: no fares came back ({str(payload.get('message') or '')[:120]})"
         watch_save(w)
         return {"id": w["id"], "status": "no_data"}
+    if cur.get("missing") and not force:
+        # a partial check is never a scheduled briefing: it would name a
+        # "best" and a "cheapest" for a trip it did not fully price
+        w["last_error"] = (f"{datetime.now():%b %d %H:%M}: Google refused {', '.join(cur['missing'])}, "
+                           "so no briefing went out; the next run tries again.")
+        watch_save(w)
+        return {"id": w["id"], "status": "incomplete", "missing": cur["missing"]}
     w["last_error"] = None
-    w["history"] = (w.get("history") or []) + [
-        {"t": now, "best": cur["best"], "cheapest": cur["cheapest"], "nonstop": cur.get("nonstop")}]
-    w["history"] = w["history"][-WATCH_HISTORY_MAX:]
+    if not cur.get("missing"):
+        # the trend and the baseline hold only checks that priced the whole trip
+        w["history"] = (w.get("history") or []) + [
+            {"t": now, "best": cur["best"], "cheapest": cur["cheapest"], "nonstop": cur.get("nonstop"),
+             "cov": cur.get("coverage")}]
+        w["history"] = w["history"][-WATCH_HISTORY_MAX:]
     prev = w.get("last_sent_snapshot")
     w["next_due"] = now + w["frequency_days"] * 86400 - WATCH_DUE_SLACK_S
     if not force and not briefing_moved(prev, cur, w.get("threshold")):
@@ -6181,11 +6299,17 @@ def run_watch(w: dict, force: bool = False) -> dict:
         except Exception as e:
             failed.append(f"{r['email']}: {str(e)[:160]}")
     if sent:
-        w["last_sent_snapshot"], w["last_sent"] = cur, now
+        w["last_sent"] = now
+        if not cur.get("missing"):
+            w["last_sent_snapshot"] = cur  # a partial check never becomes the baseline
+        else:
+            w["last_error"] = (f"Sent, but Google refused {', '.join(cur['missing'])}: the email says "
+                               "it covers only what loaded.")
     if failed:
         w["last_error"] = "; ".join(failed)[:400]
     watch_save(w)
-    return {"id": w["id"], "status": "sent" if sent else "send_failed", "sent": sent, "failed": failed}
+    return {"id": w["id"], "status": "sent" if sent else "send_failed", "sent": sent, "failed": failed,
+            "missing": cur.get("missing") or []}
 
 
 def run_due_watches(budget_s: float = WATCH_RUN_BUDGET_S) -> list[dict]:

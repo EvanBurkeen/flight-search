@@ -2313,7 +2313,8 @@ _bprice["v"] = 432.0
 _res = app.run_watch(app.watch_load(_bw["id"]))
 _cur = app.briefing_snapshot(_brief_payload(_bspec))
 _subj = app.briefing_email(app.watch_load(_bw["id"]), _cur,
-                           app.briefing_changes({"best": 470.0, "cheapest": 300.0, "nonstop": 470.0}, _cur),
+                           app.briefing_changes({"best": 470.0, "cheapest": 300.0, "nonstop": 470.0,
+                                                 "coverage": _cur["coverage"]}, _cur),
                            "s", app.watch_load(_bw["id"])["recipients"][0])[0]
 check("a real move is sent, and the subject says what moved",
       _res["status"] == "sent" and "(down $38)" in _subj, _subj)
@@ -2362,6 +2363,67 @@ _vj = json.load(open(os.path.join(ROOT, "vercel.json")))
 check("a daily cron drives the briefings (Hobby allows once a day)",
       any(c["path"] == "/api/watches/run" and c["schedule"].split()[2:] == ["*", "*", "*"]
           and c["schedule"].split()[1].isdigit() for c in _vj.get("crons", [])))
+
+# Nov 12, the first live NYC to Hanoi briefing: built on EWR alone (Google
+# refused JFK and LGA), it called $817 the best value and $704 the cheapest
+# while JFK had Korean Air at $473, became the baseline for "what changed",
+# and offered a $6,581 "Fastest" to save 2h 45m.
+_hspec = {"trip_type": "one_way", "origins": ["JFK", "LGA", "EWR"], "destinations": ["HAN"],
+          "departure_date": future(60)}
+_hpartial = lambda spec: {"type": "flights", "message": "m", "results": [dict(r) for r in _bf_ewr],
+                          "backfill": {"pieces": [{"origins": ["JFK"], "destinations": ["HAN"]}]}}
+_saved_b = (app.cached_execute_spec, app.backfill_piece, app.BRIEFING_RETRY_GAPS_S)
+app.cached_execute_spec, app.BRIEFING_RETRY_GAPS_S = _hpartial, (0.0, 0.0, 0.0)
+_outbox = lambda: len(_glob_b.glob(os.path.join(app._LOCAL_OUTBOX, "*.html")))
+try:
+    _hw = app.watch_create(_hspec, "nyc to hanoi march 4", ["evan@x.com"], 1)
+    _asks = []
+    app.backfill_piece = lambda spec, piece, rows, attempt=0: (_asks.append(attempt), {"status": "refused"})[1]
+    _n0 = _outbox()
+    _sched = app.run_watch(app.watch_load(_hw["id"]))
+    _hw1 = app.watch_load(_hw["id"])
+    check("a scheduled briefing that could not price the whole trip is not sent",
+          _sched["status"] == "incomplete" and _outbox() == _n0 and _asks == [0, 1, 2]
+          and "JFK→HAN" in (_hw1["last_error"] or "") and not _hw1["history"], str(_sched))
+    _forced = app.run_watch(app.watch_load(_hw["id"]), force=True)
+    _mail_f = open(sorted(_glob_b.glob(os.path.join(app._LOCAL_OUTBOX, "*.html")), key=os.path.getmtime)[-1]).read()
+    _hw2 = app.watch_load(_hw["id"])
+    check("...'Send now' on a partial check says so in the subject, a banner and every label",
+          _forced["status"] == "sent" and "best of what loaded (JFK→HAN did not load)" in _mail_f
+          and "Part of this search did not load" in _mail_f and "(of what loaded)" in _mail_f
+          and "Not compared" in _mail_f, _mail_f[:160])
+    check("...and never becomes the baseline or a point on the trend",
+          _hw2["last_sent_snapshot"] is None and not _hw2["history"] and _hw2["last_sent"])
+    # the server wins JFK back on the second try: the email is built on all of it
+    app.backfill_piece = lambda spec, piece, rows, attempt=0: (
+        {"status": "ok", "results": app.merge_backfill_rows(spec, rows, [dict(r) for r in _bf_jfk])[0]}
+        if attempt == 1 else {"status": "refused"})
+    _won = app.run_watch(app.watch_load(_hw["id"]))
+    _mail_w = open(sorted(_glob_b.glob(os.path.join(app._LOCAL_OUTBOX, "*.html")), key=os.path.getmtime)[-1]).read()
+    _hw3 = app.watch_load(_hw["id"])
+    check("a refused airport is won back on the server before the email is written",
+          _won["status"] == "sent" and not _won["missing"] and "did not load" not in _mail_w
+          and "KE" in _mail_w and _hw3["last_sent_snapshot"]["coverage"] == ["EWR→HAN", "JFK→HAN"]
+          and len(_hw3["history"]) == 1, str(_won))
+finally:
+    app.cached_execute_spec, app.backfill_piece, app.BRIEFING_RETRY_GAPS_S = _saved_b
+
+_full = {"kind": "flights", "best": 473.0, "cheapest": 442.0, "coverage": ["EWR→HAN", "JFK→HAN"], "missing": []}
+check("checks compare only when they priced the same airports",
+      app.briefing_changes({**_full, "best": 817.0, "coverage": ["EWR→HAN"]}, _full)[0].startswith("New baseline")
+      and app.briefing_changes({"best": 817.0, "cheapest": 704.0}, _full)[0].startswith("New baseline")
+      and app.briefing_changes({**_full, "best": 500.0}, _full)[0] == "Best value down $27 to $473 (was $500)")
+check("...and the trend charts only checks with the same coverage",
+      app._trend_html([{"t": 1, "best": 817.0}, {"t": 2, "best": 800.0, "cov": ["EWR→HAN"]}]
+                      + [{"t": 3 + i, "best": 473.0 + i, "cov": ["EWR→HAN", "JFK→HAN"]} for i in range(3)]).count("<td valign") == 3)
+_fast_cur = {"kind": "flights", "best": 817.0, "cheapest": 704.0, "nonstop": None, "missing": [],
+             "picks": {"best": {"sig": "a", "airline": "United", "price": 817.0, "minutes": 1395, "lines": ["l"], "book": []},
+                       "cheapest": {"sig": "b", "airline": "Delta", "price": 704.0, "minutes": 1590, "lines": ["l"], "book": []},
+                       "fastest": {"sig": "c", "airline": "United", "price": 6581.0, "minutes": 1230, "lines": ["l"], "book": []}}}
+_fast_html = app.briefing_email(_hw3, _fast_cur, ["x"], "s", _hw3["recipients"][0])[1]
+check("a fastest flight at more than twice the best value is a footnote, not a pick",
+      ">Fastest<" not in _fast_html and "The fastest option is United at $6,581, $5,764 more than the best "
+      "value to save 2h 45m." in _fast_html)
 # Nov 11, first real setup: "Briefing storage isn't connected yet" after
 # Upstash was added. Vercel's connect dialog can prefix the variable names,
 # and the bare error gave no way to tell which setup step went wrong.
