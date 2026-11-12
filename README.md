@@ -93,9 +93,14 @@ this file, then **"Lessons the hard way"** below before debugging anything.
      Mitigated three ways, not fixed: a multi-airport search routes around
      a refused pair; the refused part is asked for again after the turn
      (backfill) and merged in; and the third attempt of a refused ladder
-     goes out directly. Next step: read the `direct` attempts in
-     `search_diag` from prod to learn whether the direct route is answered.
-     If it is, consider using it earlier; if not, try a different proxy pool.
+     goes out directly. Later that night prod was refused on EVERY shape
+     (JFK->ORD control too) while a home connection answered in 0.3s, and
+     the direct route was refused as well (0 for 2). So this is a
+     proxy-pool reputation problem, not a route problem. Next steps, in
+     order: watch `debug_timings.direct_route` and `search_ok_on_attempt`
+     over a few days; if waves keep recurring, trial a different residential
+     pool or provider (keep the `user:pass@host:port` format; the sticky
+     session suffix is IPRoyal-gated in `_make_proxy_url`).
   (The Aug 6 list's other two — the multi-city separate-vs-combined
   comparison that never fired, and the passenger count that never reached
   the Book link — were fixed Aug 7; see the Changelog. `leg_price_index`
@@ -766,7 +771,17 @@ overrides) instead of being sent. Open one in a browser to review a briefing.
      updated so the next reply knows the late flights are on screen.
 - The owner's Briefings header button is hidden at phone width (it pushed
   the view toggle off-screen); the footer link opens the same panel.
-- 20 checks under "The airport Google turned away"; README drift checks
+- Backfill never adds volume to a wave: it stands down while the
+  process's breaker is open and asks lean (two attempts per ladder), since
+  the page asks again anyway.
+- Post-deploy evidence, same night: production then refused EVERYTHING,
+  the JFK->ORD control included (0 rows, no success in 4 minutes on that
+  instance), while this laptop got JFK->ORD in 0.3s. The direct route was
+  refused too (0 for 2, a 322-byte body unlike the proxy's ~95). So the
+  direct route is not the cure; it stays as a rare, rested, counted
+  fallback until `direct_route` says otherwise. Proxy-wide waves are the
+  real open problem (open bug 2).
+- 21 checks under "The airport Google turned away"; README drift checks
   pin `/api/backfill` and the direct-route cooldown.
 
 **November 11, 2026 (briefing storage setup, first real run)**

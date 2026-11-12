@@ -2714,6 +2714,8 @@ def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy
     for i, attempt_sort in enumerate((sort, sort, SortBy.CHEAPEST, SortBy.CHEAPEST)):
         if i > 0 and time.monotonic() - started > budget_s:
             break  # out of time: surface what we have rather than dig the hole deeper
+        if i >= 2 and getattr(_local, "lean", False):
+            break  # a backfill retry: the page asks again later, in another burst
         breaker_wait(1.5 if i == 0 else 6.0)
         # two proxied refusals in a row: the third attempt leaves by the
         # other door (see DIRECT_COOLDOWN_S), tagged so prod can say whether
@@ -3716,12 +3718,22 @@ def backfill_piece(spec: dict, piece: dict, rows: list, attempt: int = 0) -> dic
     if not po or not pd:
         return {"status": "invalid", "error": "the piece must be part of the search"}
     label = f"{'/'.join(po)}→{'/'.join(pd)}"
+    with _breaker_lock:
+        resting = _breaker["open_until"] > time.monotonic()
+    if resting:
+        # this process is mid-wave: an optional retry must never add to the
+        # volume that turns a cheap flag into an IP-level block
+        return {"status": "refused", "label": label,
+                "diag": {"verdict": "refused", "attempts": ["not asked: breaker open"]}}
     whole = bool(attempt % 2) and (set(po) != want_o or set(pd) != want_d)
     sub = {**spec, "origins": po, "destinations": pd} if not whole else dict(spec)
+    _local.lean = True   # two attempts per ladder: the page will ask again anyway
     try:
         payload = _execute_spec(sub)
     except SearchClientError as e:
         payload = {"results": [], "search_diag": getattr(e, "search_diag", None) or {"verdict": "error"}}
+    finally:
+        _local.lean = False
     got = [r for r in payload.get("results") or [] if isinstance(r, dict)]
     if whole:
         # the whole search answered; the piece arrived only if its rows did

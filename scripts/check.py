@@ -2123,6 +2123,22 @@ _bf_alone = app.backfill_piece(_bf_spec, {"origins": ["JFK"], "destinations": ["
 app._execute_spec = lambda sub: {"type": "flights", "results": [dict(r) for r in _bf_ewr]}
 _bf_lacks = app.backfill_piece(_bf_spec, {"origins": ["JFK"], "destinations": ["HAN"]}, _have, attempt=1)
 app._execute_spec = _real_exec
+# a backfill must never add volume to a wave (README: "Retrying harder makes
+# it worse"): it stands down while the breaker is open, and asks lean
+_br_keep = dict(app._breaker)
+app._breaker["open_until"] = time.monotonic() + 30
+_asked = []
+app._execute_spec = lambda sub: (_asked.append(1), {"results": []})[1]
+_bf_rest = app.backfill_piece(_bf_spec, {"origins": ["JFK"], "destinations": ["HAN"]}, _have)
+app._breaker.clear(); app._breaker.update(_br_keep)
+_lean_seen = []
+app._execute_spec = lambda sub: (_lean_seen.append(getattr(app._local, "lean", False)), {"results": []})[1]
+app.backfill_piece(_bf_spec, {"origins": ["JFK"], "destinations": ["HAN"]}, _have)
+app._execute_spec = _real_exec
+check("backfill stands down mid-wave and asks lean otherwise",
+      _bf_rest["status"] == "refused" and not _asked and _lean_seen == [True]
+      and not getattr(app._local, "lean", False)
+      and "getattr(_local, \"lean\", False)" in open(os.path.join(ROOT, "api", "index.py")).read())
 check("backfill alternates the request's shape: alone, then the whole search",
       _shapes == [("JFK", "LGA", "EWR"), ("JFK",)] and _bf_whole["status"] == "ok"
       and _bf_whole["added"] == 2 and _bf_alone["status"] == "refused", str(_shapes))
