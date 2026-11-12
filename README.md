@@ -664,12 +664,14 @@ overrides) instead of being sent. Open one in a browser to review a briefing.
   silently serialized every parallel code path in fli — see Changelog July 25,
   round trips v2 — so never "simplify" back to one session per identity.
   One extra identity sits outside the pool: **direct** (no proxy). A ladder
-  uses it only for its third attempt after two proxied refusals; a refused
-  direct attempt rests it for 300s (`DIRECT_COOLDOWN_S`), because datacenter
-  addresses burn under volume (the July lesson above). Attempts that used it
-  read `a3 direct ok` / `a3 direct refused` in `search_diag`, and
-  `search_ok_on_attempt` shows `3 direct`; that is how to tell from prod
-  whether it helps. Any refusal RETIRES that identity, so the retry is a genuinely new
+  uses it only for its third attempt after two proxied refusals, capped at
+  10s (`DIRECT_ATTEMPT_S`); a refused direct attempt rests it for 300s
+  (`DIRECT_COOLDOWN_S`), because datacenter addresses burn under volume (the
+  July lesson above). Attempts that used it read `a3 direct ok` /
+  `a3 direct refused` in `search_diag`, `search_ok_on_attempt` shows
+  `3 direct`, and `debug_timings.direct_route` counts the process's
+  ok/refused/error and how long it is resting; that is how to tell from
+  prod whether it helps. Any refusal RETIRES that identity, so the retry is a genuinely new
   visitor. Do not "fix" a refusal by retrying on the same session: refusals are
   session-sticky (a flagged session failed 64/64 while fresh ones passed 20/32
   in the same window — see Changelog July 24).
@@ -741,10 +743,17 @@ overrides) instead of being sent. Open one in a browser to review a briefing.
      merges the browser's rows with the new ones and re-ranks them with the
      turn's own rules (`rank_and_cut_one_way`, now shared). In-turn retries
      all land inside the same burst; this is the one retry that outlives it.
+     It also alternates SHAPE: even attempts ask for the piece alone, odd
+     ones re-run the whole search and keep the piece's rows. Post-deploy,
+     prod showed why: JFK->HAN alone was refused 4/4, answered 3/3 a minute
+     later, refused again the minute after, while the combined search
+     containing it was answered first time.
   2. **Ask from somewhere else.** After two proxied refusals in a ladder,
      the third attempt goes out directly from the function (`go_direct`,
-     tagged `direct` in `search_diag`). A refused direct attempt rests that
-     route for 300s, so it is a rare fallback, never a second pool.
+     tagged `direct` in `search_diag`), capped at 10s. A refused direct
+     attempt rests that route for 300s, so it is a rare fallback, never a
+     second pool. `debug_timings.direct_route` counts its ok/refused/error
+     per process: read it before deciding whether to use it earlier.
   3. **Do not cache a partial answer.** A payload with backfill pieces is
      cached 20s (enough to merge duplicate calls in one turn), not 240s.
   4. **Do not rank a partial answer as whole.** STILL LOADING in the
@@ -757,7 +766,7 @@ overrides) instead of being sent. Open one in a browser to review a briefing.
      updated so the next reply knows the late flights are on screen.
 - The owner's Briefings header button is hidden at phone width (it pushed
   the view toggle off-screen); the footer link opens the same panel.
-- 17 checks under "The airport Google turned away"; README drift checks
+- 20 checks under "The airport Google turned away"; README drift checks
   pin `/api/backfill` and the direct-route cooldown.
 
 **November 11, 2026 (briefing storage setup, first real run)**

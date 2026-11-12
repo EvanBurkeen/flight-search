@@ -2942,14 +2942,16 @@
             let out = null;
             // a tap means "now"; the automatic run waits out the burst first
             const delays = manual ? [300, ...this.BF_DELAYS_MS.slice(1)] : this.BF_DELAYS_MS;
-            for (const wait of delays) {
+            for (const [attempt, wait] of delays.entries()) {
               await new Promise(r => setTimeout(r, wait));
               if (!this.sectionAlive(sec)) return;           // New trip, or the turn was dropped
               try {
+                // the server alternates the request's shape by attempt:
+                // refusals are per shape, so two shapes are two chances
                 const res = await fetch('/api/backfill', {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ spec: sec.watch_spec, piece, rows: sec.results || [] }),
+                  body: JSON.stringify({ spec: sec.watch_spec, piece, rows: sec.results || [], attempt }),
                 });
                 const d = await res.json();
                 if (['ok', 'empty', 'invalid'].includes(d.status)) { out = d; break; }

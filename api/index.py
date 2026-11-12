@@ -148,6 +148,7 @@ def _identity_session(ident: dict):
 # (datacenter addresses burn under sustained volume), so it is a fallback
 # that is rarely used, never a second pool.
 DIRECT_COOLDOWN_S = 300.0
+DIRECT_ATTEMPT_S = 10.0
 _direct: dict = {"ident": None, "cool_until": 0.0}
 
 
@@ -278,7 +279,9 @@ _fli_client.Client.get = _get_as_identity
 # Sustained volume during a refusal wave is what escalates a cheap session
 # flag into an expensive IP burn, so consecutive refusals buy a pause rather
 # than a faster retry.
-_attempt_stats: dict = {"ok_on_attempt": []}  # profiling: which try succeeded
+# profiling: which try succeeded, and how the direct route fares (read from
+# debug_timings in prod: it is the only place that can answer that)
+_attempt_stats: dict = {"ok_on_attempt": [], "direct": {"ok": 0, "refused": 0, "error": 0}}
 
 BREAKER_TRIP_AT = 3          # consecutive refusals across the process
 BREAKER_COOLDOWN = 25.0      # seconds of quiet once tripped
@@ -2722,6 +2725,10 @@ def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy
         # attempt 1 fails fast into a fresh identity; retries get room for
         # Google's slow progressive streams to actually finish downloading
         _local.fli_timeout = 12.0 if i == 0 else 28.0
+        if go_direct:
+            # an answer comes back in seconds and a refusal in one; a slow
+            # datacenter route must never cost a turn the full 28s
+            _local.fli_timeout = DIRECT_ATTEMPT_S
         if max_attempt_s:  # a bounded caller (a rescue) caps every attempt
             _local.fli_timeout = min(_local.fli_timeout, max_attempt_s)
         search._attempt = i  # expansion patience scales with the attempt too
@@ -2733,13 +2740,18 @@ def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy
         except SearchClientError as e:
             last_exc = e
             diag.append(f"a{i + 1}{via} {type(e).__name__} {time.monotonic() - _ta:.0f}s")
+            if go_direct:
+                _attempt_stats["direct"]["error"] += 1
             retire_identity()
             note_search_outcome(False)
             time.sleep(0.5 + 0.4 * i + random.uniform(0, 0.4))
             continue
+        if go_direct:
+            _attempt_stats["direct"]["ok" if results else "refused"] += 1
         if results:
             note_search_outcome(True)
             _attempt_stats["ok_on_attempt"].append(f"{i + 1}{via}" if via else i + 1)
+            del _attempt_stats["ok_on_attempt"][:-50]  # a long-lived process must not grow it
             diag.append(f"a{i + 1}{via} ok {len(results)}")
             _local.search_diag = {"verdict": "ok", "attempts": diag}
             return results
@@ -3683,9 +3695,16 @@ def backfill_note(label: str, added: int, before: dict | None, after: dict | Non
     return f"{head} New {what.lower()}: " + ", ".join(b for b in bits if b) + "."
 
 
-def backfill_piece(spec: dict, piece: dict, rows: list) -> dict:
+def backfill_piece(spec: dict, piece: dict, rows: list, attempt: int = 0) -> dict:
     """Ask Google again for one refused part of a one-way search, and merge
-    it into the rows the browser is showing."""
+    it into the rows the browser is showing.
+
+    Refusals are per request SHAPE and flip minute to minute (Nov 11, prod:
+    JFK->HAN alone refused 4/4, answered 3/3 a minute later, refused again
+    the minute after, while the combined JFK/LGA/EWR search that contains it
+    was answered first time). So the shape alternates: even attempts ask for
+    the piece alone, odd attempts re-run the whole search and keep only the
+    piece's rows. Two independent chances per round, not one."""
     if not isinstance(spec, dict) or spec.get("trip_type") in ("round_trip", "multi_city") \
             or spec.get("multi_city_segments") or spec.get("flexible_dates") \
             or not spec.get("departure_date"):
@@ -3697,12 +3716,20 @@ def backfill_piece(spec: dict, piece: dict, rows: list) -> dict:
     if not po or not pd:
         return {"status": "invalid", "error": "the piece must be part of the search"}
     label = f"{'/'.join(po)}→{'/'.join(pd)}"
-    sub = {**spec, "origins": po, "destinations": pd}
+    whole = bool(attempt % 2) and (set(po) != want_o or set(pd) != want_d)
+    sub = {**spec, "origins": po, "destinations": pd} if not whole else dict(spec)
     try:
         payload = _execute_spec(sub)
     except SearchClientError as e:
         payload = {"results": [], "search_diag": getattr(e, "search_diag", None) or {"verdict": "error"}}
     got = [r for r in payload.get("results") or [] if isinstance(r, dict)]
+    if whole:
+        # the whole search answered; the piece arrived only if its rows did
+        got = [r for r in got if _orig_of_row(r) in po and _dest_of_row(r) in pd]
+        if not got:
+            return {"status": "refused", "label": label, "shape": "whole",
+                    "diag": payload.get("search_diag") or {"verdict": "refused",
+                                                            "attempts": ["whole search lacked the piece"]}}
     if not got:
         verdict = (payload.get("search_diag") or {}).get("verdict")
         return {"status": "empty" if verdict == "empty" else "refused", "label": label,
@@ -5533,7 +5560,11 @@ async def backfill(request: Request):
     if not isinstance(spec, dict) or not isinstance(piece, dict) or not isinstance(rows, list):
         return JSONResponse({"error": "spec, piece and rows are required"}, status_code=400)
     try:
-        return JSONResponse(await run_in_threadpool(backfill_piece, spec, piece, rows))
+        attempt = max(0, min(int(body.get("attempt") or 0), 9))
+    except (TypeError, ValueError):
+        attempt = 0
+    try:
+        return JSONResponse(await run_in_threadpool(backfill_piece, spec, piece, rows, attempt))
     except Exception as e:
         return JSONResponse({"status": "error", "error": str(e)[:200]})
 
@@ -5572,6 +5603,9 @@ async def search(request: Request):
                 "model": ASSISTANT_MODEL,
                 "phases": result.get("timings") or [],
                 "search_ok_on_attempt": _attempt_stats["ok_on_attempt"][-6:],
+                # this process's direct-route record, and whether it is resting
+                "direct_route": {**_attempt_stats["direct"],
+                                 "resting_s": max(0, round(_direct["cool_until"] - time.monotonic()))},
                 "cached_specs": len(_search_cache),
             }
         return JSONResponse(payload)

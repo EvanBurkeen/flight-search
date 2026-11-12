@@ -2111,7 +2111,23 @@ app._execute_spec = lambda sub: {"type": "flights", "results": [],
 _bf_ref = app.backfill_piece(_bf_spec, {"origins": ["JFK"], "destinations": ["HAN"]}, _have)
 _bf_out = app.backfill_piece(_bf_spec, {"origins": ["BOS"], "destinations": ["HAN"]}, _have)
 _bf_rt = app.backfill_piece({**_bf_spec, "trip_type": "round_trip"}, {"origins": ["JFK"], "destinations": ["HAN"]}, _have)
+# odd attempts re-run the WHOLE search (a different request shape) and keep
+# only the piece's rows: prod answered JFK/LGA/EWR->HAN while JFK->HAN alone
+# was refused, minutes apart
+_shapes = []
+app._execute_spec = lambda sub: (_shapes.append(tuple(sub["origins"])),
+                                 {"type": "flights", "results": [dict(r) for r in _bf_jfk + _bf_ewr]}
+                                 if len(sub["origins"]) == 3 else {"results": []})[1]
+_bf_whole = app.backfill_piece(_bf_spec, {"origins": ["JFK"], "destinations": ["HAN"]}, _have, attempt=1)
+_bf_alone = app.backfill_piece(_bf_spec, {"origins": ["JFK"], "destinations": ["HAN"]}, _have, attempt=2)
+app._execute_spec = lambda sub: {"type": "flights", "results": [dict(r) for r in _bf_ewr]}
+_bf_lacks = app.backfill_piece(_bf_spec, {"origins": ["JFK"], "destinations": ["HAN"]}, _have, attempt=1)
 app._execute_spec = _real_exec
+check("backfill alternates the request's shape: alone, then the whole search",
+      _shapes == [("JFK", "LGA", "EWR"), ("JFK",)] and _bf_whole["status"] == "ok"
+      and _bf_whole["added"] == 2 and _bf_alone["status"] == "refused", str(_shapes))
+check("...and a whole search that comes back without the piece is not a success",
+      _bf_lacks["status"] == "refused" and _bf_lacks.get("shape") == "whole")
 check("backfill returns the merged list, the note, and what the next turn's memory should say",
       _bf_ok["status"] == "ok" and _bf_ok["added"] == 2
       and _bf_ok["results"][0]["legs"][0]["from"] == "JFK"
@@ -2162,18 +2178,21 @@ _via_log = []
 
 
 def _refuse_unless_direct(*a, **k):
-    _via_log.append(bool(app._local.identity.get("direct")))
+    _via_log.append((bool(app._local.identity.get("direct")), app._local.fli_timeout))
     app._local.last_wire = None
     return [result([leg("JFK", "HAN", future(60) + "T10:30", future(61) + "T22:25", "OZ", "221")], 442.0)] \
         if app._local.identity.get("direct") else []
 
 
+_dstats_saved = dict(app._attempt_stats["direct"])
 try:
     app._breaker.update(consecutive=0, open_until=0.0)
     _got = app.run_search(types.SimpleNamespace(search=_refuse_unless_direct), app.build_filters(
         {**_bf_spec, "origins": ["JFK"]}, *[app.resolve_airports(x)[0] for x in (["JFK"], ["HAN"])]),
         app.SortBy.CHEAPEST, top_n=10, budget_s=30)
     _d1 = app.search_verdict()["attempts"]
+    _direct_timeouts = [t for d, t in _via_log if d]
+    _dstats_after_ok = dict(app._attempt_stats["direct"])
     _sessions_direct = app._identity_session(app._direct["ident"]).proxies if app._direct["ident"] else None
     _via_log.clear()
     app._breaker.update(consecutive=0, open_until=0.0)
@@ -2194,6 +2213,14 @@ finally:
     app._direct.clear(); app._direct.update(_dir_saved)
     app.time.sleep = _sleep
     app._breaker.clear(); app._breaker.update(_br_saved)
+    _dstats_end = dict(app._attempt_stats["direct"])
+    app._attempt_stats["direct"].update(_dstats_saved)
+check("...a direct attempt is capped short, and prod can count how the route fares",
+      _direct_timeouts == [app.DIRECT_ATTEMPT_S] and app.DIRECT_ATTEMPT_S <= 12
+      and _dstats_after_ok["ok"] == _dstats_saved["ok"] + 1
+      and _dstats_end["refused"] == _dstats_saved["refused"] + 1
+      and '"direct_route"' in open(os.path.join(ROOT, "api", "index.py")).read(),
+      f"{_direct_timeouts} {_dstats_end}")
 check("after two proxied refusals the next attempt leaves directly, and says so",
       len(_got) == 1 and _d1[:3] == [_d1[0], _d1[1], "a3 direct ok 1"] and "refused" in _d1[0]
       and not _sessions_direct, str(_d1))
