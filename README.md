@@ -99,14 +99,20 @@ this file, then **"Lessons the hard way"** below before debugging anything.
      proxy-pool reputation problem, not a route problem, and our own
      request volume feeds it (Nov 12 cut: see Changelog). Next steps: read
      `debug_timings.attempt_outcomes` (refused vs ok per process) over a
-     few days. **IPRoyal's mobile (4G/5G) pool was trialed Nov 12 and is
-     WORSE**: 36 of 40 attempts refused (90%, the ~95-byte body), 2 of 12
-     searches answered first try, while the same four searches from a home
-     connection minutes later were all answered (2 of 6 attempts refused,
-     the ~325-byte cold-start kind the ladder absorbs). Two refusal types:
-     ~95B is the proxy-address one, ~325B the occasional fresh-session one.
-     Do not buy mobile for this. Remaining options: a licensed source, or
-     an exit Google treats like a home connection.
+     few days. **IPRoyal's "mobile" pool was trialed Nov 12: about the same
+     as residential, not better.** Paced like real use (one search per
+     25s, fresh session each) it answered 3 of 4 searches, ~5 of 8
+     attempts refused, prod's residential rate that night. Its exits are
+     mostly NOT mobile: 8 sessions gave 7 distinct addresses, only 2 on
+     T-Mobile, the rest home broadband (Cox, RCN, AT&T wireline). The
+     sticky-session suffix works on it unchanged. CAUTION, a test that
+     misled first: 40 attempts in two minutes with `breaker_wait`
+     disabled read 90% refused; a burst burns any pool, so pace proxy
+     tests like real traffic and run a home-connection control. Two
+     refusal types: ~95B is the proxy-address one, ~325B the occasional
+     fresh-session one (seen from home too, absorbed by the ladder).
+     Remaining options: a licensed source, or an exit Google treats like a
+     home connection.
      The only true prevention is a licensed source (SerpApi's Google
      Flights API was the candidate priced Nov 12; Amadeus self-service
      shut down July 2026).
