@@ -2390,6 +2390,43 @@ finally:
         os.environ.pop(_k)
     os.environ.update(_kv_saved)
 
+# Nov 12, first real send: Resend answered 403 "error code: 1010" (Cloudflare
+# refusing urllib's default Python-urllib signature) for every recipient.
+_sent_reqs, _real_urlopen = [], app._urlreq.urlopen
+
+
+class _FakeResp:
+    def __init__(self, body):
+        self._b = body
+
+    def read(self):
+        return self._b
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+app._urlreq.urlopen = lambda req, timeout=None: (_sent_reqs.append(req), _FakeResp(b'{"id": "x", "result": "OK"}'))[1]
+_env_keep = {k: os.environ.get(k) for k in ("RESEND_API_KEY", "KV_REST_API_URL", "KV_REST_API_TOKEN")}
+try:
+    os.environ["RESEND_API_KEY"] = "re_test"
+    app.send_email("a@example.com", "s", "<p>h</p>", "t", "https://x/u")
+    os.environ["KV_REST_API_URL"], os.environ["KV_REST_API_TOKEN"] = "https://kv.example", "tok"
+    app._kv(["GET", "watch:x"])
+finally:
+    app._urlreq.urlopen = _real_urlopen
+    for _k, _v in _env_keep.items():
+        if _v is None:
+            os.environ.pop(_k, None)
+        else:
+            os.environ[_k] = _v
+_uas = [r.get_header("User-agent") or "" for r in _sent_reqs]
+check("email and storage calls name themselves (Cloudflare 1010 blocks Python-urllib)",
+      len(_uas) == 2 and all(u.startswith("flight-assistant/") for u in _uas), str(_uas))
+
 # --------------------------------------------------------------------------
 section("README drift  — the doc must match the code it describes")
 # --------------------------------------------------------------------------

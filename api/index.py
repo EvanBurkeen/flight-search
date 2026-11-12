@@ -5669,6 +5669,11 @@ _ON_VERCEL = bool(os.environ.get("VERCEL"))
 _LOCAL_KV_PATH = os.environ.get("WATCH_LOCAL_STORE") or os.path.join(_tempfile.gettempdir(), "flight_watches.json")
 _LOCAL_OUTBOX = os.environ.get("WATCH_OUTBOX") or os.path.join(_tempfile.gettempdir(), "flight_outbox")
 _local_kv_lock = threading.Lock()
+# Nov 12, first real send: Resend answered 403 "error code: 1010" for every
+# recipient. That is Cloudflare (in front of Resend's API) refusing the
+# client's signature, and urllib's default "Python-urllib/3.x" is on its
+# list. Every outbound API call names itself instead.
+_HTTP_UA = "flight-assistant/1.0 (+https://flights.evanburkeen.com)"
 
 
 class WatchError(ValueError):
@@ -5710,7 +5715,7 @@ def _kv(cmd: list):
     url, tok = _kv_conf()
     if url:
         req = _urlreq.Request(url, data=json.dumps(cmd).encode(), method="POST", headers={
-            "Authorization": f"Bearer {tok}", "Content-Type": "application/json"})
+            "Authorization": f"Bearer {tok}", "Content-Type": "application/json", "User-Agent": _HTTP_UA})
         with _urlreq.urlopen(req, timeout=10) as r:
             out = json.loads(r.read().decode())
         if isinstance(out, dict) and out.get("error"):
@@ -6126,7 +6131,8 @@ def send_email(to: str, subject: str, html_doc: str, text: str, unsubscribe_url:
             "headers": {"List-Unsubscribe": f"<{unsubscribe_url}>",
                         "List-Unsubscribe-Post": "List-Unsubscribe=One-Click"}}
     req = _urlreq.Request("https://api.resend.com/emails", data=json.dumps(body).encode(), method="POST",
-                          headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+                          headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json",
+                                   "User-Agent": _HTTP_UA})
     try:
         with _urlreq.urlopen(req, timeout=15) as r:
             return json.loads(r.read().decode()).get("id") or "sent"

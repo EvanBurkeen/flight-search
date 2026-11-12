@@ -725,6 +725,15 @@ overrides) instead of being sent. Open one in a browser to review a briefing.
 
 ## Changelog
 
+**November 12, 2026 (first real briefing: Resend 403, error code 1010)**
+- Evan's first live briefing failed for all three recipients with "Resend
+  refused the email (403): error code: 1010". That is not Resend: it is
+  Cloudflare in front of Resend's API refusing the client's signature, and
+  urllib's default `Python-urllib/3.x` User-Agent is blocked. Verified with
+  no key at all: the default UA got 403/1010, a named UA reached Resend and
+  got its own 401 "Missing API Key". Email and storage calls now send
+  `flight-assistant/1.0` (`_HTTP_UA`); one check pins both.
+
 **November 11, 2026 (the airport Google turned away)**
 - Evan, with Google Flights side by side: "nyc to hanoi march 4 ... clearly
   these aren't the best flights. wtf happened?" Our list had LGA and EWR
