@@ -99,11 +99,14 @@ this file, then **"Lessons the hard way"** below before debugging anything.
      proxy-pool reputation problem, not a route problem, and our own
      request volume feeds it (Nov 12 cut: see Changelog). Next steps: read
      `debug_timings.attempt_outcomes` (refused vs ok per process) over a
-     few days; if waves keep recurring, trial a mobile (4G/5G) pool or
-     another provider by setting `FLI_PROXY` locally and running the
-     JFK->HAN / JFK->ORD battery through it (keep the `user:pass@host:port`
-     format; the sticky-session suffix is IPRoyal-gated in
-     `_make_proxy_url`, so another provider needs its own session syntax).
+     few days. **IPRoyal's mobile (4G/5G) pool was trialed Nov 12 and is
+     WORSE**: 36 of 40 attempts refused (90%, the ~95-byte body), 2 of 12
+     searches answered first try, while the same four searches from a home
+     connection minutes later were all answered (2 of 6 attempts refused,
+     the ~325-byte cold-start kind the ladder absorbs). Two refusal types:
+     ~95B is the proxy-address one, ~325B the occasional fresh-session one.
+     Do not buy mobile for this. Remaining options: a licensed source, or
+     an exit Google treats like a home connection.
      The only true prevention is a licensed source (SerpApi's Google
      Flights API was the candidate priced Nov 12; Amadeus self-service
      shut down July 2026).
