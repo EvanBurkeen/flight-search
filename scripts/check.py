@@ -2184,66 +2184,86 @@ app.execute_spec, app._start_ctx_for = _saved
 check("a result with a refused part is cached for seconds, not minutes",
       0 < _ttl_left <= 30 < app.SEARCH_CACHE_TTL, f"{_ttl_left:.0f}s")
 
-# the other way out: two proxied refusals, then one direct attempt
-_px_saved, _dir_saved, _sleep = app._proxy_base, dict(app._direct), app.time.sleep
-_br_saved = dict(app._breaker)
+# Nov 12: the direct-from-Vercel fallback was refused every time prod used
+# it (0 for 4), so it is gone: every attempt leaves through the proxy, and
+# every attempt's outcome is counted, because the refusal rate is the only
+# number that can say whether a proxy change helped
+_px_saved, _sleep, _br_saved = app._proxy_base, app.time.sleep, dict(app._breaker)
+_out_saved = dict(app._attempt_stats["outcomes"])
+_pool_saved = list(app._identities)
+app._identities.clear()  # prod builds its pool with the proxy already set
 app._proxy_base = "http://user:pass@geo.iproyal.com:12321"
-app._direct.update(ident=None, cool_until=0.0)
 app.time.sleep = lambda s: None
-_via_log = []
+_exits, _calls = [], {"n": 0}
 
 
-def _refuse_unless_direct(*a, **k):
-    _via_log.append((bool(app._local.identity.get("direct")), app._local.fli_timeout))
+def _refuse_twice(*a, **k):
+    _exits.append(app._local.identity.get("proxy"))
+    _calls["n"] += 1
     app._local.last_wire = None
     return [result([leg("JFK", "HAN", future(60) + "T10:30", future(61) + "T22:25", "OZ", "221")], 442.0)] \
-        if app._local.identity.get("direct") else []
+        if _calls["n"] == 3 else []
 
 
-_dstats_saved = dict(app._attempt_stats["direct"])
 try:
     app._breaker.update(consecutive=0, open_until=0.0)
-    _got = app.run_search(types.SimpleNamespace(search=_refuse_unless_direct), app.build_filters(
+    _got = app.run_search(types.SimpleNamespace(search=_refuse_twice), app.build_filters(
         {**_bf_spec, "origins": ["JFK"]}, *[app.resolve_airports(x)[0] for x in (["JFK"], ["HAN"])]),
         app.SortBy.CHEAPEST, top_n=10, budget_s=30)
-    _d1 = app.search_verdict()["attempts"]
-    _direct_timeouts = [t for d, t in _via_log if d]
-    _dstats_after_ok = dict(app._attempt_stats["direct"])
-    _sessions_direct = app._identity_session(app._direct["ident"]).proxies if app._direct["ident"] else None
-    _via_log.clear()
-    app._breaker.update(consecutive=0, open_until=0.0)
-    app._direct.update(ident=None, cool_until=0.0)
-    app.run_search(types.SimpleNamespace(search=lambda *a, **k: (setattr(app._local, "last_wire", None), [])[1]),
-                   app.build_filters({**_bf_spec, "origins": ["JFK"]},
-                                     *[app.resolve_airports(x)[0] for x in (["JFK"], ["HAN"])]),
-                   app.SortBy.CHEAPEST, top_n=10, budget_s=30)
-    _d2 = app.search_verdict()["attempts"]
-    _cooling = app._direct["cool_until"] > time.monotonic() + 200
-    _d3_direct = (app._breaker.update(consecutive=0, open_until=0.0), app.run_search(
-        types.SimpleNamespace(search=lambda *a, **k: (setattr(app._local, "last_wire", None), [])[1]),
-        app.build_filters({**_bf_spec, "origins": ["JFK"]},
-                          *[app.resolve_airports(x)[0] for x in (["JFK"], ["HAN"])]),
-        app.SortBy.CHEAPEST, top_n=10, budget_s=30), any("direct" in d for d in app.search_verdict()["attempts"]))[2]
+    _out_delta = {k: app._attempt_stats["outcomes"][k] - _out_saved[k] for k in _out_saved}
 finally:
-    app._proxy_base = _px_saved
-    app._direct.clear(); app._direct.update(_dir_saved)
-    app.time.sleep = _sleep
+    app._proxy_base, app.time.sleep = _px_saved, _sleep
     app._breaker.clear(); app._breaker.update(_br_saved)
-    _dstats_end = dict(app._attempt_stats["direct"])
-    app._attempt_stats["direct"].update(_dstats_saved)
-check("...a direct attempt is capped short, and prod can count how the route fares",
-      _direct_timeouts == [app.DIRECT_ATTEMPT_S] and app.DIRECT_ATTEMPT_S <= 12
-      and _dstats_after_ok["ok"] == _dstats_saved["ok"] + 1
-      and _dstats_end["refused"] == _dstats_saved["refused"] + 1
-      and '"direct_route"' in open(os.path.join(ROOT, "api", "index.py")).read(),
-      f"{_direct_timeouts} {_dstats_end}")
-check("after two proxied refusals the next attempt leaves directly, and says so",
-      len(_got) == 1 and _d1[:3] == [_d1[0], _d1[1], "a3 direct ok 1"] and "refused" in _d1[0]
-      and not _sessions_direct, str(_d1))
-check("...a refused direct attempt rests that route instead of hammering it",
-      any(d.startswith("a3 direct refused") for d in _d2) and _cooling and not _d3_direct, str(_d2))
-check("...and with no proxy configured nothing changes (every attempt is direct anyway)",
-      not app.direct_available() if not app._proxy_base else True)
+    app._attempt_stats["outcomes"].update(_out_saved)
+    app._identities[:] = _pool_saved
+check("every attempt leaves through the proxy (no direct fallback)",
+      len(_got) == 1 and len(_exits) == 3 and all(x and "iproyal" in x for x in _exits)
+      and "def direct_available" not in open(os.path.join(ROOT, "api", "index.py")).read(), str(_exits))
+check("...and every attempt's outcome is counted for debug_timings",
+      _out_delta == {"ok": 1, "refused": 2, "empty": 0, "error": 0}
+      and '"attempt_outcomes"' in open(os.path.join(ROOT, "api", "index.py")).read(), str(_out_delta))
+
+# Nov 12, measured from a home connection: a healthy JFK->ORD search made 5
+# requests to Google where 1 answers it, because the route's manifest lists
+# codeshare sellers (Iberia, Saudia, Gulf Air...) and the carrier probe
+# fired on 122 healthy rows; a round trip made 12 (10 expansions)
+_busy = [result([leg("JFK", "ORD", future(30) + "T09:00", future(30) + "T10:30", c, str(n))], 169.0 + n)
+         for n, c in enumerate(("AA", "DL", "UA", "B6") * 30)]
+_codeshare_manifest = {c: c for c in ("AA", "DL", "UA", "B6", "AS", "IB", "AT", "SV", "AD", "GF", "JX", "SY", "WS", "QR")}
+check("a busy route's codeshare-heavy manifest no longer re-asks Google",
+      not app.should_probe_missing(_busy, _codeshare_manifest)
+      and app.should_probe_missing(_busy[:12], _codeshare_manifest))
+_src_vol = open(os.path.join(ROOT, "api", "index.py")).read()
+# ...and a rescued round trip only buys its one-way insurance (two searches
+# plus their grids) when the late retry did not answer
+_legs_bought, _rt_calls = [], {"n": 0}
+
+
+def _refused_then_answered(search, filters, sort, top_n, **_k):
+    _rt_calls["n"] += 1
+    if _rt_calls["n"] == 1:   # the turn's own attempt: refused
+        app._local.search_diag = {"verdict": "refused", "attempts": ["a1 refused 96B 1s", "a2 refused 95B 1s"]}
+        return []
+    search.last_outbounds = list(_han_outs)   # the late retry: answered
+    app._local.search_diag = {"verdict": "ok", "attempts": ["a1 ok"]}
+    return []
+
+
+_saved_ins = (app.run_search, app.cached_execute_spec, app.RT_LATE_RETRY_AT_S)
+app.RT_LATE_RETRY_AT_S = 0.0
+app.run_search = _refused_then_answered
+app.cached_execute_spec = lambda spec: (_legs_bought.append(spec), {"results": []})[1]
+_one_rt = app.search_fixed_dates({"trip_type": "round_trip", "origins": ["JFK"], "destinations": ["HAN"],
+                                  "departure_date": future(110), "return_date": future(126)},
+                                 *[app.resolve_airports(x)[0] for x in (["JFK"], ["HAN"])], "USD")
+app.run_search, app.cached_execute_spec, app.RT_LATE_RETRY_AT_S = _saved_ins
+check("a rescued round trip buys its one-way insurance only if the late retry failed",
+      _legs_bought == [] and _rt_calls["n"] == 2 and len(_one_rt.get("more_outbounds") or []) == 2,
+      f"legs bought: {len(_legs_bought)}, ladders: {_rt_calls['n']}")
+check("round trips pre-price six outbounds, the rest price on tap",
+      "run_search(searcher, filters, sort, top_n=6," in _src_vol
+      and "run_search(searcher, f, sort, top_n=6," in _src_vol and "top_n=10" not in
+      _src_vol.split("def rescue_round_trip", 1)[1].split("\ndef ", 1)[0])
 
 _fe_bf = open(os.path.join(ROOT, "public", "index.html")).read()
 check("the page asks again after the turn, on both the streamed and the JSON path",
@@ -2514,8 +2534,8 @@ check("README states the adaptive request timeouts",
       "update the run_search description and Operations")
 for _ep in ("/api/returns", "/api/search/stream", "/api/backfill"):
     check(f"README documents {_ep}", _ep in _src and _ep in _readme)
-check("README states the direct-route cooldown the code uses",
-      f"{int(app.DIRECT_COOLDOWN_S)}s" in _readme, f"code rests it {app.DIRECT_COOLDOWN_S:.0f}s")
+check("README states the row count above which the carrier probe stands down",
+      f"{app.MANIFEST_PROBE_MAX_ROWS} rows" in _readme, f"code: {app.MANIFEST_PROBE_MAX_ROWS}")
 check("README and code agree on the Haiku first-call router",
       ("claude-haiku-4-5" in _src) == ("claude-haiku-4-5" in _readme))
 _n = _re.search(r"run_search\(searcher, filters, sort, top_n=(\d+)[,)]", _src)

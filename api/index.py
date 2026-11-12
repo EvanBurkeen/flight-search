@@ -137,27 +137,14 @@ def _identity_session(ident: dict):
     return s
 
 
-# A second WAY OUT, not just a second address. Nov 11, production: every
-# proxied attempt at JFK->HAN was refused (8 of 8, two turns, ~95-byte
-# bodies) while the same search from a home connection answered in 0.3s, and
-# LGA->HAN through the same proxy answered first time. Fresh residential
-# exits are all the same kind of visitor, so a refusal keyed on that kind
-# survives every rotation. After two refused proxy attempts in one ladder,
-# the next goes out directly from the function's own address. A refused
-# direct attempt rests it for DIRECT_COOLDOWN_S: the July lesson stands
-# (datacenter addresses burn under sustained volume), so it is a fallback
-# that is rarely used, never a second pool.
-DIRECT_COOLDOWN_S = 300.0
-DIRECT_ATTEMPT_S = 10.0
-_direct: dict = {"ident": None, "cool_until": 0.0}
+# No direct-from-Vercel fallback: tried Nov 11-12 as a third attempt after
+# two proxied refusals, and Google refused it every time it was used in
+# production (0 for 4, a 322-byte body unlike the proxy's ~95). Datacenter
+# addresses were already known to burn (July). The proxy is the only way out;
+# changing WHICH proxy is the lever (README, open bug 2).
 
 
-def direct_available() -> bool:
-    """Only meaningful when a proxy is the normal path."""
-    return bool(_proxy_base) and time.monotonic() >= _direct["cool_until"]
-
-
-def checkout_identity(direct: bool = False) -> dict:
+def checkout_identity() -> dict:
     """Bind a healthy identity to this thread for the duration of a search.
 
     Prefers the most recently SUCCESSFUL identity: its curl session still
@@ -167,13 +154,6 @@ def checkout_identity(direct: bool = False) -> dict:
     comes from retirement — a refused identity is destroyed and the next
     checkout necessarily picks a different one.
     """
-    if direct:
-        with _pool_lock:
-            if _direct["ident"] is None:
-                _direct["ident"] = {**_new_identity(-1), "proxy": "", "direct": True}
-            ident = _direct["ident"]
-        _local.identity = ident
-        return ident
     with _pool_lock:
         while len(_identities) < POOL_SIZE:
             _identities.append(_new_identity(len(_identities)))
@@ -214,12 +194,7 @@ def retire_identity() -> None:
         return
     with _pool_lock:
         _close_identity(ident)
-        if ident.get("direct"):
-            # the function's own address cannot be swapped for a new one;
-            # it rests instead, so a refusal wave never hammers it
-            _direct["ident"] = None
-            _direct["cool_until"] = time.monotonic() + DIRECT_COOLDOWN_S
-        elif ident in _identities:
+        if ident in _identities:
             _identities[_identities.index(ident)] = _new_identity(ident["idx"])
     _local.identity = None
 
@@ -279,9 +254,10 @@ _fli_client.Client.get = _get_as_identity
 # Sustained volume during a refusal wave is what escalates a cheap session
 # flag into an expensive IP burn, so consecutive refusals buy a pause rather
 # than a faster retry.
-# profiling: which try succeeded, and how the direct route fares (read from
-# debug_timings in prod: it is the only place that can answer that)
-_attempt_stats: dict = {"ok_on_attempt": [], "direct": {"ok": 0, "refused": 0, "error": 0}}
+# profiling: which try succeeded, and every attempt's outcome since the
+# process started (debug_timings.attempt_outcomes): the refusal rate is the
+# number that says whether a proxy change helped
+_attempt_stats: dict = {"ok_on_attempt": [], "outcomes": {"ok": 0, "refused": 0, "empty": 0, "error": 0}}
 
 BREAKER_TRIP_AT = 3          # consecutive refusals across the process
 BREAKER_COOLDOWN = 25.0      # seconds of quiet once tripped
@@ -2717,20 +2693,10 @@ def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy
         if i >= 2 and getattr(_local, "lean", False):
             break  # a backfill retry: the page asks again later, in another burst
         breaker_wait(1.5 if i == 0 else 6.0)
-        # two proxied refusals in a row: the third attempt leaves by the
-        # other door (see DIRECT_COOLDOWN_S), tagged so prod can say whether
-        # it helped
-        go_direct = (i >= 2 and direct_available() and len(diag) >= 2
-                     and not any(" ok " in d for d in diag[-2:]))
-        checkout_identity(direct=go_direct)
-        via = " direct" if go_direct else ""
+        checkout_identity()
         # attempt 1 fails fast into a fresh identity; retries get room for
         # Google's slow progressive streams to actually finish downloading
         _local.fli_timeout = 12.0 if i == 0 else 28.0
-        if go_direct:
-            # an answer comes back in seconds and a refusal in one; a slow
-            # datacenter route must never cost a turn the full 28s
-            _local.fli_timeout = DIRECT_ATTEMPT_S
         if max_attempt_s:  # a bounded caller (a rescue) caps every attempt
             _local.fli_timeout = min(_local.fli_timeout, max_attempt_s)
         search._attempt = i  # expansion patience scales with the attempt too
@@ -2741,28 +2707,28 @@ def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy
             results = search.search(attempt, top_n=top_n, currency="USD")
         except SearchClientError as e:
             last_exc = e
-            diag.append(f"a{i + 1}{via} {type(e).__name__} {time.monotonic() - _ta:.0f}s")
-            if go_direct:
-                _attempt_stats["direct"]["error"] += 1
+            diag.append(f"a{i + 1} {type(e).__name__} {time.monotonic() - _ta:.0f}s")
+            _attempt_stats["outcomes"]["error"] += 1
             retire_identity()
             note_search_outcome(False)
             time.sleep(0.5 + 0.4 * i + random.uniform(0, 0.4))
             continue
-        if go_direct:
-            _attempt_stats["direct"]["ok" if results else "refused"] += 1
         if results:
             note_search_outcome(True)
-            _attempt_stats["ok_on_attempt"].append(f"{i + 1}{via}" if via else i + 1)
+            _attempt_stats["outcomes"]["ok"] += 1
+            _attempt_stats["ok_on_attempt"].append(i + 1)
             del _attempt_stats["ok_on_attempt"][:-50]  # a long-lived process must not grow it
-            diag.append(f"a{i + 1}{via} ok {len(results)}")
+            diag.append(f"a{i + 1} ok {len(results)}")
             _local.search_diag = {"verdict": "ok", "attempts": diag}
             return results
         wire = getattr(_local, "last_wire", None) or {}
         if wire.get("parsed"):
             answered_empty = True
-            diag.append(f"a{i + 1}{via} answered-empty {wire.get('bytes', 0)}B")
+            diag.append(f"a{i + 1} answered-empty {wire.get('bytes', 0)}B")
+            _attempt_stats["outcomes"]["empty"] += 1
         else:
-            diag.append(f"a{i + 1}{via} refused {wire.get('bytes', 0)}B {time.monotonic() - _ta:.0f}s")
+            diag.append(f"a{i + 1} refused {wire.get('bytes', 0)}B {time.monotonic() - _ta:.0f}s")
+            _attempt_stats["outcomes"]["refused"] += 1
         retire_identity()
         note_search_outcome(False)
         # refusals arrive in BURSTS per request shape (Nov 11: the 3-airport
@@ -2915,6 +2881,9 @@ def missing_from_manifest(results: list, manifest: dict | None) -> dict:
     return {c: n for c, n in manifest.items() if c not in seen}
 
 
+MANIFEST_PROBE_MAX_ROWS = 40  # above this a session is not thin, whatever the manifest says
+
+
 def should_probe_missing(results: list, manifest: dict | None) -> bool:
     """Fire the supplemental search only when the gap is structural.
 
@@ -2928,7 +2897,13 @@ def should_probe_missing(results: list, manifest: dict | None) -> bool:
     if not missing:
         return False
     covered = 1 - len(missing) / len(manifest)
-    return covered < 0.5 or len(results) < 15
+    # Nov 12: on a busy route the manifest is mostly CODESHARE sellers
+    # (JFK->ORD lists Iberia, Saudia, Gulf Air...), so "covered < 0.5" held
+    # for 122 healthy rows and every such search paid a second ladder of
+    # requests, then told the model those airlines "serve this route". A
+    # thin session is a row-count fact; a big one is guarded by the
+    # completeness sentinel (the date grid's own price for the day).
+    return len(results) < 15 or (covered < 0.5 and len(results) < MANIFEST_PROBE_MAX_ROWS)
 
 
 def _rt_spec_echo(spec: dict, origins: list, destinations: list) -> dict:
@@ -3072,6 +3047,7 @@ def rescue_empty_multi_airport(spec: dict, origins: list, destinations: list, so
 
 
 RT_LATE_RETRY_AT_S = 12.0   # the full round trip is retried this long after the start: bursts pass
+RT_LEGS_GRACE_S = 8.0       # the one-way insurance waits this long past the late retry before it is bought
 RT_RESCUE_END_S = 48.0      # every rescue path is done by here (the agent waits 55s per batch)
 
 
@@ -3117,7 +3093,7 @@ def rescue_round_trip(spec: dict, origins: list, destinations: list, sort, filte
             {**spec, "origins": [a.name for a in o_list], "destinations": [a.name for a in d_list]},
             o_list, d_list, show_all_results=True)
         try:
-            combos = run_search(searcher, f, sort, top_n=10,
+            combos = run_search(searcher, f, sort, top_n=6,  # as search_fixed_dates: requests are the limit
                                 budget_s=max(1.0, remaining - per_attempt), max_attempt_s=per_attempt) or []
             verdict = search_verdict()
         except Exception as e:
@@ -3130,6 +3106,18 @@ def rescue_round_trip(spec: dict, origins: list, destinations: list, sort, filte
     try:
         late = pool.submit(rt_ladder, None, None, started + RT_LATE_RETRY_AT_S)
         pair_futs = [(o, d, pool.submit(rt_ladder, [o], [d])) for o, d in pairs]
+        # Nov 12: the one-way insurance costs two searches plus their date
+        # grids, and it was spent on every rescue even though the late retry
+        # usually answers within seconds of firing. It now waits for that
+        # retry (RT_LEGS_GRACE_S past it) and is bought only if it failed.
+        try:
+            early = late.result(timeout=max(0.1, started + RT_LATE_RETRY_AT_S + RT_LEGS_GRACE_S
+                                            - time.monotonic()))
+        except Exception:
+            early = None
+        if early and (early[0] or early[1]):
+            return {"combos": early[0], "outbounds": early[1], "legs": None,
+                    "note": " (Google refused this round trip at first; a retry moments later was answered.)"}
         leg_futs = [pool.submit(cached_execute_spec, _mc_leg_spec(legs_spec, seg)) for seg in raw_segs]
 
         def get(fu, until):
@@ -3238,14 +3226,18 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
     multi_rt = is_rt and (len(origins) > 1 or len(destinations) > 1)
     combined_exc = None
     # expansions run genuinely in parallel now (per-thread curl handles), so
-    # 10 costs about what 2 did serially; the July 25 multi-airport timeouts
-    # were the serialized fan-out, not the count
+    # time is not the limit; REQUESTS are. Nov 12: a round trip cost Google
+    # 12 requests (1 list + 10 expansions + the grid) while production was
+    # being refused in waves. Six expansions cover what the picker keeps
+    # (top picks, each airport, a nonstop, the fastest, departure spread)
+    # and all the model ever sees; every other outbound still ships
+    # from-priced and prices on tap via /api/returns
     try:
         # a healthy search succeeds in seconds; a multi-airport one-way that
         # is being refused gives up sooner so the per-pair rescue has time
         # every round trip and multi-airport one-way has a decomposition
         # waiting, so a refusal burst hands over after two attempts
-        results = run_search(searcher, filters, sort, top_n=10,
+        results = run_search(searcher, filters, sort, top_n=6,
                              budget_s=MULTI_COMBINED_BUDGET_S if (multi_ow or multi_rt) else 35.0,
                              refusal_exit=2 if (multi_ow or is_rt) else None)
     except SearchClientError as e:
@@ -5615,9 +5607,7 @@ async def search(request: Request):
                 "model": ASSISTANT_MODEL,
                 "phases": result.get("timings") or [],
                 "search_ok_on_attempt": _attempt_stats["ok_on_attempt"][-6:],
-                # this process's direct-route record, and whether it is resting
-                "direct_route": {**_attempt_stats["direct"],
-                                 "resting_s": max(0, round(_direct["cool_until"] - time.monotonic()))},
+                "attempt_outcomes": dict(_attempt_stats["outcomes"]),
                 "cached_specs": len(_search_cache),
             }
         return JSONResponse(payload)

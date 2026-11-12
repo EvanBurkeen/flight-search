@@ -90,17 +90,23 @@ this file, then **"Lessons the hard way"** below before debugging anything.
      Nov 11: SGN→JFK, then JFK→HAN, refused on every proxied attempt while
      neighbors on the same proxy passed and a home connection got them in
      0.3s. JFK pairs are refused far more than others through the proxy.
-     Mitigated three ways, not fixed: a multi-airport search routes around
-     a refused pair; the refused part is asked for again after the turn
-     (backfill) and merged in; and the third attempt of a refused ladder
-     goes out directly. Later that night prod was refused on EVERY shape
-     (JFK->ORD control too) while a home connection answered in 0.3s, and
-     the direct route was refused as well (0 for 2). So this is a
-     proxy-pool reputation problem, not a route problem. Next steps, in
-     order: watch `debug_timings.direct_route` and `search_ok_on_attempt`
-     over a few days; if waves keep recurring, trial a different residential
-     pool or provider (keep the `user:pass@host:port` format; the sticky
-     session suffix is IPRoyal-gated in `_make_proxy_url`).
+     Mitigated, not fixed: a multi-airport search routes around a refused
+     pair, and the refused part is asked for again after the turn
+     (backfill, and server-side before a briefing) and merged in. Later
+     that night prod was refused on EVERY shape (JFK->ORD control too)
+     while a home connection answered in 0.3s. Going out directly from
+     Vercel was tried and refused 0 for 4, then removed. So this is a
+     proxy-pool reputation problem, not a route problem, and our own
+     request volume feeds it (Nov 12 cut: see Changelog). Next steps: read
+     `debug_timings.attempt_outcomes` (refused vs ok per process) over a
+     few days; if waves keep recurring, trial a mobile (4G/5G) pool or
+     another provider by setting `FLI_PROXY` locally and running the
+     JFK->HAN / JFK->ORD battery through it (keep the `user:pass@host:port`
+     format; the sticky-session suffix is IPRoyal-gated in
+     `_make_proxy_url`, so another provider needs its own session syntax).
+     The only true prevention is a licensed source (SerpApi's Google
+     Flights API was the candidate priced Nov 12; Amadeus self-service
+     shut down July 2026).
   (The Aug 6 list's other two — the multi-city separate-vs-combined
   comparison that never fired, and the passenger count that never reached
   the Book link — were fixed Aug 7; see the Changelog. `leg_price_index`
@@ -168,8 +174,11 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
   refused 8/8 through the residential proxy (fresh exits, fresh
   fingerprints) and answered in 0.3s from a home connection, while LGA→HAN
   passed through the same proxy first time. Rotating within one kind of
-  visitor cannot escape a refusal keyed on that kind; a different way out
-  (direct) or a different TIME (backfill, after the burst) can. When a
+  visitor cannot escape a refusal keyed on that kind; a different TIME
+  (backfill, after the burst) can, and a different KIND of exit might (the
+  Vercel datacenter address did not: 0 for 4). Even from home about 1 in 4
+  FIRST attempts is refused at random, across every fingerprint (tested Nov
+  12, so do not chase fingerprints). When a
   shape is refused, run it from this laptop as the control before
   concluding anything about the request itself.
 - **A partial answer must not look or live like a whole one.** The NYC to
@@ -482,9 +491,7 @@ Google traffic through a proxy (see Operations).
    **whole ladder bounded by `budget_s`**, 35s default / 45s
    multi-city, because a retry re-runs the entire search including any
    fan-out; each failed attempt RETIRES the identity — cookies + exit IP +
-   fingerprint — because refusals are session-sticky; after two proxied
-   refusals the third attempt goes out DIRECTLY (no proxy; rested 300s if
-   refused, see Operations); a process-wide circuit
+   fingerprint — because refusals are session-sticky; a process-wide circuit
    breaker imposes quiet after repeated refusals, capped at 1.5s on a user's
    first attempt. No warmup page-load: the study found warmed sessions did
    not outperform fresh ones) →
@@ -498,7 +505,7 @@ Google traffic through a proxy (see Operations).
      warnings. Cutting first would discard options never scored — see Changelog
      July 24. The cut always keeps up to 8 nonstops plus the outright cheapest
      and fastest, because the client-side filters run over what we ship.
-   - serialize up to 50 one-ways / ~10 round-trip OUTBOUND groups (a
+   - serialize up to 50 one-ways / ~6 round-trip OUTBOUND groups (a
      REPRESENTATIVE set — cheapest anchors, nonstops, fastest, departure-time
      spread via `representative_outbounds`, because fli expands `flights[:top_n]`
      in sort order and "the 10 cheapest" once hid every nonstop; each group
@@ -672,15 +679,11 @@ overrides) instead of being sent. Open one in a browser to review a briefing.
   fingerprint, cookies cloned from its primary jar): a single shared handle
   silently serialized every parallel code path in fli — see Changelog July 25,
   round trips v2 — so never "simplify" back to one session per identity.
-  One extra identity sits outside the pool: **direct** (no proxy). A ladder
-  uses it only for its third attempt after two proxied refusals, capped at
-  10s (`DIRECT_ATTEMPT_S`); a refused direct attempt rests it for 300s
-  (`DIRECT_COOLDOWN_S`), because datacenter addresses burn under volume (the
-  July lesson above). Attempts that used it read `a3 direct ok` /
-  `a3 direct refused` in `search_diag`, `search_ok_on_attempt` shows
-  `3 direct`, and `debug_timings.direct_route` counts the process's
-  ok/refused/error and how long it is resting; that is how to tell from
-  prod whether it helps. Any refusal RETIRES that identity, so the retry is a genuinely new
+  Every identity leaves through the proxy: a direct-from-Vercel fallback was
+  tried Nov 11-12 and refused 0 for 4, then removed. `debug_timings.attempt_outcomes`
+  counts every attempt's ok/refused/empty/error since the process started;
+  the refused share is the number to watch when judging a proxy change.
+  Any refusal RETIRES that identity, so the retry is a genuinely new
   visitor. Do not "fix" a refusal by retrying on the same session: refusals are
   session-sticky (a flagged session failed 64/64 while fresh ones passed 20/32
   in the same window — see Changelog July 24).
@@ -731,6 +734,39 @@ overrides) instead of being sent. Open one in a browser to review a briefing.
   refusal wave; that is the price of never mailing half a trip.
 
 ## Changelog
+
+**November 12, 2026 (ask Google less)**
+- Evan: "what do I need to change to prevent google from refusing
+  production... do what you think is best". Nothing in code can prevent it
+  while we scrape; what we control is how much we ask. Measured from a
+  home connection with every request counted: a healthy one-way JFK->ORD
+  made 5 requests to Google where 1-2 answer it, and a round trip made 12.
+- The carrier probe now fires only on a THIN session (fewer than 15 rows,
+  or under half the route's carriers with fewer than 40 rows,
+  `MANIFEST_PROBE_MAX_ROWS`). On busy routes Google's manifest is mostly
+  codeshare sellers (JFK->ORD lists Iberia, Saudia, Gulf Air...), so the
+  old "covered < 0.5" rule fired on 122 healthy rows, cost a second
+  ladder, and produced the misleading "Iberia... serves this route" note.
+  The Beijing case it was built for (6 rows) still probes; big routes are
+  guarded by the completeness sentinel (the grid's price for the day).
+- Round trips pre-price 6 outbounds, not 10 (12 requests became 8): the
+  picker still keeps top picks, each airport, a nonstop, the fastest and a
+  departure spread, which is all the model ever sees; every other
+  outbound ships from-priced and prices on tap.
+- A refused round trip's one-way insurance (two searches plus their date
+  grids) used to fire at once, and was thrown away whenever the late retry
+  answered, which is usually. It now waits for that retry
+  (`RT_LEGS_GRACE_S`, 8s past it) and is bought only if it failed.
+- Re-measured after: JFK->ORD 1 search request (plus the grid), a round
+  trip 8 instead of 12.
+- The direct-from-Vercel fallback is gone: Google refused it every time
+  prod used it (0 for 4). `debug_timings.attempt_outcomes` now counts every
+  attempt's ok/refused/empty/error per process, the number to watch when
+  judging a proxy change.
+- Tested and ruled out: a bad browser fingerprint. Safari looked guilty
+  (refused 2/2) but passed 3/4 on another route while plain Chrome was
+  refused once; about 1 in 4 first attempts is refused at random even from
+  home, which the ladder absorbs.
 
 **November 12, 2026 (a briefing never prices half a trip as the whole)**
 - Evan's first delivered briefing, "New York to Hanoi: $817 best value",
