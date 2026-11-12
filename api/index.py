@@ -5394,10 +5394,34 @@ class WatchError(ValueError):
     """A request the owner can fix (bad email, nothing to watch, not configured)."""
 
 
+_KV_PAIRS = (("KV_REST_API_URL", "KV_REST_API_TOKEN"),
+             ("UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN"))
+
+
 def _kv_conf() -> tuple:
-    url = os.environ.get("KV_REST_API_URL") or os.environ.get("UPSTASH_REDIS_REST_URL")
-    tok = os.environ.get("KV_REST_API_TOKEN") or os.environ.get("UPSTASH_REDIS_REST_TOKEN")
-    return (url.rstrip("/"), tok) if url and tok else (None, None)
+    """Upstash REST credentials. Vercel's connect dialog can prefix the
+    names (STORAGE_KV_REST_API_URL), so match on the suffix; the shortest
+    name wins, so an unprefixed pair beats a prefixed one."""
+    env = os.environ
+    for url_sfx, tok_sfx in _KV_PAIRS:
+        for name in sorted((n for n in env if n.endswith(url_sfx)), key=len):
+            tok = env.get(name[: -len(url_sfx)] + tok_sfx)
+            if env.get(name) and tok:
+                return env[name].rstrip("/"), tok
+    return None, None
+
+
+def _kv_missing_hint() -> str:
+    """What this deployment can see, by NAME only (never values), so the
+    'not connected' error says which setup step went wrong."""
+    names = sorted(n for n in os.environ if any(k in n for k in ("KV_", "REDIS", "UPSTASH")))
+    if not names:
+        return (" This deployment has no storage variables at all: connect the store to this "
+                "project with Production ticked, then redeploy.")
+    if any(n.endswith("REDIS_URL") or n.endswith("KV_URL") for n in names):
+        return (f" It can see {', '.join(names)}, but no REST URL and token pair. If this is "
+                "Redis Cloud rather than Upstash, connect Upstash for Redis instead.")
+    return f" It can see {', '.join(names)}, but no REST URL and token pair."
 
 
 def _kv(cmd: list):
@@ -5415,7 +5439,7 @@ def _kv(cmd: list):
         # an instance's /tmp is ephemeral: silently "saving" there would lose
         # every watch on the next cold start
         raise WatchError("Briefing storage isn't connected yet: add Upstash Redis to this "
-                         "project in Vercel (Storage tab), then redeploy.")
+                         "project in Vercel (Storage tab), then redeploy." + _kv_missing_hint())
     with _local_kv_lock:
         try:
             with open(_LOCAL_KV_PATH) as fh:

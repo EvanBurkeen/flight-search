@@ -667,7 +667,11 @@ overrides) instead of being sent. Open one in a browser to review a briefing.
      address, so friends get nothing. Free tier: 3,000 emails a month, 100 a day.
   2. Vercel project, Storage tab: add Upstash Redis (free tier is plenty).
      It injects `KV_REST_API_URL` and `KV_REST_API_TOKEN`; the code also
-     accepts `UPSTASH_REDIS_REST_URL` / `_TOKEN`.
+     accepts `UPSTASH_REDIS_REST_URL` / `_TOKEN`, and either pair under a
+     custom prefix from the connect dialog (`STORAGE_KV_REST_API_URL`).
+     Tick Production when connecting, and redeploy after. If it still says
+     "isn't connected", the error lists the storage variable NAMES the
+     deployment can see (never values), which tells you which step failed.
   3. Set `OWNER_KEY` (a long random string, e.g. `openssl rand -hex 32`) and
      `CRON_SECRET` (another one; Vercel sends it as `Authorization: Bearer`
      to the cron), then redeploy.
@@ -679,6 +683,16 @@ overrides) instead of being sent. Open one in a browser to review a briefing.
   watch that misses the budget is simply due again tomorrow.
 
 ## Changelog
+
+**November 11, 2026 (briefing storage setup, first real run)**
+- Evan's first setup hit "Briefing storage isn't connected yet" with
+  Upstash added. The code only read the exact names `KV_REST_API_URL` /
+  `UPSTASH_REDIS_REST_URL`, and Vercel's connect dialog can prefix them;
+  the error gave no way to tell a prefix from a missing redeploy or an
+  unticked Production box. `_kv_conf` now matches either pair by suffix
+  (unprefixed wins), and the error lists the storage variable names the
+  deployment can see, never values, and says when it sees none at all or a
+  plain Redis URL with no REST pair. Three checks pin it.
 
 **November 11, 2026 (trip briefings by email)**
 - Evan: "I want a button which will allow me to get X frequency emails

@@ -2178,6 +2178,33 @@ _vj = json.load(open(os.path.join(ROOT, "vercel.json")))
 check("a daily cron drives the briefings (Hobby allows once a day)",
       any(c["path"] == "/api/watches/run" and c["schedule"].split()[2:] == ["*", "*", "*"]
           and c["schedule"].split()[1].isdigit() for c in _vj.get("crons", [])))
+# Nov 11, first real setup: "Briefing storage isn't connected yet" after
+# Upstash was added. Vercel's connect dialog can prefix the variable names,
+# and the bare error gave no way to tell which setup step went wrong.
+_kv_saved = {k: os.environ.pop(k) for k in list(os.environ)
+             if any(s in k for s in ("KV_", "REDIS", "UPSTASH"))}
+try:
+    os.environ["STORAGE_KV_REST_API_URL"] = "https://prefixed.example/"
+    os.environ["STORAGE_KV_REST_API_TOKEN"] = "tok-prefixed"
+    _pref = app._kv_conf()
+    os.environ["KV_REST_API_URL"], os.environ["KV_REST_API_TOKEN"] = "https://plain.example", "tok-plain"
+    _plain = app._kv_conf()
+    check("storage variables are found under a Vercel prefix, and an unprefixed pair wins",
+          _pref == ("https://prefixed.example", "tok-prefixed")
+          and _plain == ("https://plain.example", "tok-plain"), f"{_pref[0]} / {_plain[0]}")
+    for _k in ("STORAGE_KV_REST_API_URL", "STORAGE_KV_REST_API_TOKEN", "KV_REST_API_URL", "KV_REST_API_TOKEN"):
+        os.environ.pop(_k)
+    os.environ["REDIS_URL"] = "rediss://default:hunter2@db.example:6379"
+    _hint = app._kv_missing_hint()
+    check("the 'not connected' error names what it can see, never a value",
+          "REDIS_URL" in _hint and "hunter2" not in _hint and "Upstash" in _hint, _hint)
+    os.environ.pop("REDIS_URL")
+    check("...and says when the deployment has no storage variables at all",
+          "no storage variables" in app._kv_missing_hint())
+finally:
+    for _k in [k for k in os.environ if any(s in k for s in ("KV_", "REDIS", "UPSTASH"))]:
+        os.environ.pop(_k)
+    os.environ.update(_kv_saved)
 
 # --------------------------------------------------------------------------
 section("README drift  — the doc must match the code it describes")
