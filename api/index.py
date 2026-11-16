@@ -93,6 +93,10 @@ def proxy_url_from(raw: str | None) -> str:
 
 
 _proxy_base = proxy_url_from(os.environ.get("FLI_PROXY"))
+# which FORM the setting was pasted in (never any part of it): after a
+# switch in Vercel, debug_timings.proxy_form says the new value is live
+_PROXY_FORM = ("none" if not _proxy_base else "dashboard line"
+               if "@" not in (os.environ.get("FLI_PROXY") or "") else "url")
 
 # Distinct, current fingerprints. Identical clones from one address are a
 # pattern; a varied handful is not.
@@ -6162,6 +6166,7 @@ async def search(request: Request):
                 "phases": result.get("timings") or [],
                 "search_ok_on_attempt": _attempt_stats["ok_on_attempt"][-6:],
                 "attempt_outcomes": dict(_attempt_stats["outcomes"]),
+                "proxy_form": _PROXY_FORM,
                 # the second way in: how often Google's refusal was answered elsewhere
                 "serpapi": serp_status(),
                 "cached_specs": len(_search_cache),

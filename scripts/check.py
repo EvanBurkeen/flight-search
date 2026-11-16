@@ -2645,6 +2645,9 @@ check("a full URL, or one without the scheme, is kept as a URL",
       _pu("http://u:p@h.example:8080") == "http://u:p@h.example:8080"
       and _pu("u:p@h.example:8080") == "http://u:p@h.example:8080")
 check("an empty setting means no proxy", _pu("") == "" and _pu(None) == "")
+check("debug_timings names the proxy FORM, never its value",
+      '"proxy_form": _PROXY_FORM' in open(os.path.join(ROOT, "api", "index.py")).read()
+      and app._PROXY_FORM in ("none", "url", "dashboard line"))
 check("IPRoyal's sticky session still attaches to a pasted dashboard line",
       "iproyal" in _pu("geo.iproyal.com:12321:u:p") and "@" in _pu("geo.iproyal.com:12321:u:p"))
 check("the module reads FLI_PROXY through the parser",

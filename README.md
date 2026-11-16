@@ -818,7 +818,9 @@ overrides) instead of being sent. Open one in a browser to review a briefing.
   were answered first time with every airport (JFK to ORD was refused 4 of
   4 and goes to the page's retry). One earlier attempt hit IPRoyal-side
   "CONNECT tunnel failed, response 500" on every exit for a minute; that is
-  the provider, not Google, and passed on its own. 6 checks.
+  the provider, not Google, and passed on its own. `debug_timings.proxy_form`
+  says which form is live (`url` / `dashboard line` / `none`, never the
+  value), so a Vercel switch is confirmable from outside. 7 checks.
 
 **November 16, 2026 (the airport the merge threw away)**
 - Evan: "this is entirely new that entire airports are being excluded from
