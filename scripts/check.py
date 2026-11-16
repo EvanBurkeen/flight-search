@@ -2556,6 +2556,82 @@ finally:
         app._breaker.update(_s_breaker_before)
 
 # --------------------------------------------------------------------------
+section("Every airport that answered ships  — Changelog: 'the airport the merge threw away'")
+# --------------------------------------------------------------------------
+# Nov 16, prod, NYC -> LAX: the combined search was refused, each airport was
+# searched alone and ANSWERED (JFK 93, LGA 114, EWR 118), and a positional
+# `results[:120]` before ranking kept JFK's 93 + 27 of LGA's. EWR (United's
+# hub, the day's cheapest fare at $155) vanished with no note, and the model
+# was told "JFK 93, LGA 27".
+def _ap_rows(frm, n, base, carrier, start=0):
+    return [result([leg(frm, "LAX", future(40) + f"T{6 + (i % 14):02d}:{(i * 7) % 60:02d}",
+                        future(40) + f"T{12 + (i % 10):02d}:00", carrier, str(1000 + start + i))],
+                   base + i, stops=0 if i % 3 == 0 else 1, duration=380 + (i % 5) * 30)
+            for i in range(n)]
+
+
+_ap_pairs = {"JFK": _ap_rows("JFK", 93, 169.0, "B6"), "LGA": _ap_rows("LGA", 114, 171.0, "AA"),
+             "EWR": _ap_rows("EWR", 118, 155.0, "UA")}
+_ap_real = app.run_search
+
+
+def _ap_refuse_combined(search, filters, sort, top_n, **_k):
+    origins = {a[0].name for a in filters.flight_segments[0].departure_airport}
+    if len(origins) > 1:
+        app._local.search_diag = {"verdict": "refused", "attempts": ["a1 refused 95B 1s", "a2 refused 95B 1s"]}
+        return []
+    app._local.search_diag = {"verdict": "ok", "attempts": ["a1 ok"]}
+    return list(_ap_pairs[next(iter(origins))])
+
+
+_ap_spec = {"trip_type": "one_way", "departure_date": future(40),
+            "origins": ["JFK", "LGA", "EWR"], "destinations": ["LAX"]}
+_ap_o, _ap_d = app.resolve_airports(_ap_spec["origins"])[0], app.resolve_airports(["LAX"])[0]
+app.run_search = _ap_refuse_combined
+try:
+    _ap_pay = app.search_fixed_dates(_ap_spec, _ap_o, _ap_d, "USD")
+finally:
+    app.run_search = _ap_real
+_ap_ship = {r["legs"][0]["from"] for r in _ap_pay.get("results") or []}
+check("airports searched one by one ALL ship, the last one included",
+      _ap_ship == {"JFK", "LGA", "EWR"}, f"shipped {sorted(_ap_ship)}")
+check("...and the model is told every airport's true count",
+      "EWR (Newark, US) 118" in _ap_pay["message"] and "LGA (New York, US) 114" in _ap_pay["message"])
+check("...so the day's cheapest fare, from the last airport, is on screen",
+      min(r["price"] for r in _ap_pay["results"]) == 155.0)
+
+# the same erasure through the probe: Google's combined list fills the pool
+# and the dedicated EWR search's rows are appended after it
+_ap_combined = _ap_rows("JFK", 70, 120.0, "B6") + _ap_rows("LGA", 70, 125.0, "AA")
+
+
+def _ap_thin_combined(search, filters, sort, top_n, **_k):
+    origins = {a[0].name for a in filters.flight_segments[0].departure_airport}
+    app._local.search_diag = {"verdict": "ok", "attempts": ["a1 ok"]}
+    return list(_ap_pairs["EWR"][:6]) if origins == {"EWR"} else list(_ap_combined)
+
+
+app.run_search = _ap_thin_combined
+try:
+    _ap_pay2 = app.search_fixed_dates(_ap_spec, _ap_o, _ap_d, "USD")
+finally:
+    app.run_search = _ap_real
+check("an airport the probe recovers is never cut behind Google's own list",
+      "EWR" in {r["legs"][0]["from"] for r in _ap_pay2.get("results") or []}
+      and "EWR (Newark, US) 6" in _ap_pay2["message"])
+
+# over the safety bound, the trim is by fare and keeps every airport and carrier
+_ap_cat = _ap_pairs["JFK"] + _ap_pairs["LGA"] + _ap_pairs["EWR"] + [_ap_pairs["JFK"][0]]
+_ap_pool = app.rank_pool(_ap_cat, cap=20)
+check("rank_pool trims by fare, never by position, and drops exact duplicates",
+      len(app.rank_pool(_ap_cat)) == 325
+      and {app._orig_of_result(r) for r in _ap_pool} == {"JFK", "LGA", "EWR"}
+      and {r.legs[0].airline.name for r in _ap_pool} == {"B6", "AA", "UA"}
+      and min(r.price for r in _ap_pool) == 155.0)
+check("no positional cut survives in front of the ranking",
+      "results[:RANK_POOL]" not in open(os.path.join(ROOT, "api", "index.py")).read())
+
+# --------------------------------------------------------------------------
 section("Trip briefings  — Changelog: 'trip briefings by email'")
 # --------------------------------------------------------------------------
 # Evan, Nov 11: a Watch button that emails a briefing on a schedule (best,

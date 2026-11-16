@@ -2288,7 +2288,7 @@ PREVIEW_GUARANTEE = 4      # the cheapest fare never falls below this position
 # an explicitly requested axis wins over our ranking, and when it does we must
 # not claim the top row is "best value" — we did not rank by value at all
 EXPLICIT_SORTS = ("cheapest", "fastest", "departure_time")
-RANK_POOL = 120            # how many raw results we score before cutting
+RANK_POOL = 600            # safety bound on rows scored before the cut; rank_pool() trims airport-safely
 SHIP_LIMIT = 50            # how many we send to the browser after ranking
 COMBO_POOL = 30            # same idea for round-trip combinations
 NONSTOP_QUOTA = 8          # nonstops guaranteed a place in what we ship
@@ -4042,7 +4042,8 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
     # than the 50th-cheapest fare — on BOS->FLL Nov 22 that meant 12 nonstops
     # existed but 11 sat at price ranks 83-98, so the list we shipped (and the
     # summary Claude saw) contained exactly one. Score the whole set, then cut.
-    flights = [serialize_flight(r, spec.get("cabin"), **spec_pax(spec)) for r in results[:RANK_POOL]]
+    # ...and "the whole set" means every airport's rows: see rank_pool
+    flights = [serialize_flight(r, spec.get("cabin"), **spec_pax(spec)) for r in rank_pool(results)]
     flights, ranked_all = rank_and_cut_one_way(flights, spec)
     total_found, total_nonstop = len(ranked_all), sum(1 for f in ranked_all if f["stops"] == 0)
     cheapest_nonstop = min((f["price"] for f in ranked_all
@@ -4075,6 +4076,44 @@ def search_fixed_dates(spec: dict, origins: list, destinations: list, currency: 
         "message": message,
         "results": flights,
     }, spec), spec)
+
+
+def rank_pool(results: list, cap: int = RANK_POOL) -> list:
+    """The raw rows scored before any cut, deduplicated, never cut by POSITION.
+
+    Rows do not always arrive in Google's cheapest-first order: the
+    per-airport rescue concatenates pair by pair, and the airport and carrier
+    probes append after Google's own list. Nov 16, prod, NYC->LAX: the
+    combined search was refused, each airport answered alone (JFK 93, LGA
+    114, EWR 118), and `results[:120]` kept JFK's 93 plus 27 of LGA's, so
+    EWR, United's hub with 118 flights Google had just returned, was erased
+    and the model was told "JFK 93, LGA 27". Under the cap, everything is
+    scored. Over it, the cheapest `cap` by fare are kept PLUS each origin,
+    destination and carrier's best row, so no cut can erase one of them.
+    """
+    seen, uniq = set(), []
+    for r in results:
+        legs = getattr(r, "legs", None) or []
+        sig = (flight_signature(r), legs[0].departure_datetime if legs else None)
+        if sig in seen:
+            continue
+        seen.add(sig)
+        uniq.append(r)
+    if len(uniq) <= cap:
+        return uniq
+    by_fare = sorted(uniq, key=lambda r: (r.price is None, r.price or 0))
+    keep = by_fare[:cap]
+    kept = {id(r) for r in keep}
+    carrier = lambda r: airline_code(r.legs[0].airline) if getattr(r, "legs", None) else None  # noqa: E731
+    for side in (_orig_of_result, _dest_of_result, carrier):
+        have = {side(r) for r in keep}
+        for r in by_fare:
+            k = side(r)
+            if k is not None and k not in have and id(r) not in kept:
+                keep.append(r)
+                kept.add(id(r))
+                have.add(k)
+    return keep
 
 
 def rank_and_cut_one_way(flights: list, spec: dict) -> tuple[list, list]:

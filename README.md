@@ -337,6 +337,12 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
 - **Rank BEFORE truncating.** Google returns results cheapest-first, so cutting
   first silently discards options that were never scored (12 nonstops existed; 11
   priced above the 50th-cheapest fare and vanished).
+- **A cut by POSITION assumes an order the rows may not have.** Nov 16: the
+  per-airport rescue concatenates JFK's rows, then LGA's, then EWR's, and a
+  `results[:120]` "pool" before ranking erased EWR whole (118 flights, the
+  day's cheapest fare) on every refused NYC search. Every pre-ranking bound
+  now goes through `rank_pool`: dedupe, trim by fare if at all, and keep
+  each origin, destination and carrier's best row.
 - **Client-side filters only filter what the server shipped**, so the shipped set
   must represent the option space or "Nonstop only" lies.
 - **The model only sees `compact_for_model`'s top 6**, so a ranking bug is an
@@ -790,6 +796,29 @@ overrides) instead of being sent. Open one in a browser to review a briefing.
   refusal wave; that is the price of never mailing half a trip.
 
 ## Changelog
+
+**November 16, 2026 (the airport the merge threw away)**
+- Evan: "this is entirely new that entire airports are being excluded from
+  the search. what has changed?" Two things, one of them ours.
+- Ours: when Google refuses the combined multi-airport search, each airport
+  is searched alone (the Nov 11 rescue) and the lists are joined airport by
+  airport. A leftover `results[:RANK_POOL]` (120) then cut that joined list
+  by POSITION before ranking. Prod, NYC to LAX: JFK 93 + LGA 114 + EWR 118
+  flights all answered, the cut kept JFK's 93 and 27 of LGA's, and EWR,
+  with the day's cheapest fare ($155), vanished with no note while the
+  model was told "JFK 93, LGA 27". Rows the airport probe recovers were
+  appended after Google's list and exposed to the same cut.
+- `rank_pool` replaces it: every row is scored (bound raised to 600), exact
+  duplicates are dropped, and if a trim is ever needed it is by fare and
+  keeps every origin, destination and carrier's best row. Reproduced
+  before and after with live data (before: JFK 93, LGA 27; after: EWR 118
+  from $155, LGA 114, JFK 93). 6 checks under "Every airport that answered
+  ships".
+- Not ours, and why the bug surfaced now: Google is refusing production's
+  proxy far more than it did (82% of attempts in today's prod process; in
+  July refusals were a 5-10% flicker), so the rescue path that had the bug
+  went from rare to routine. The cure for that half is the second way in
+  (Nov 12), which is still inert: `SERPAPI_KEY` is not set in Vercel.
 
 **November 12, 2026 (a second way in)**
 - Evan: "I need to fix this production issue. There is no reliability
