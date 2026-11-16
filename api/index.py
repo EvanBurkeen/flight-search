@@ -8,6 +8,7 @@ import time
 
 _PROCESS_START = time.monotonic()
 _process_served = 0  # 0 while this process has not yet answered a request
+from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
 from concurrent.futures import wait as futures_wait
@@ -92,11 +93,104 @@ def proxy_url_from(raw: str | None) -> str:
     return s  # unrecognized: passed through, so a bad value fails loudly at curl, not silently here
 
 
-_proxy_base = proxy_url_from(os.environ.get("FLI_PROXY"))
-# which FORM the setting was pasted in (never any part of it): after a
-# switch in Vercel, debug_timings.proxy_form says the new value is live
-_PROXY_FORM = ("none" if not _proxy_base else "dashboard line"
-               if "@" not in (os.environ.get("FLI_PROXY") or "") else "url")
+# Up to two proxy pools, each pasted as-is. Nov 16, Evan: "why dont we do
+# both" (residential with 1.9 GB left, plus the mobile month already paid
+# for). Every retry already gets a fresh exit, so a second pool of similar
+# quality does not double the odds. What it buys: the paid month used,
+# failover when one provider's tunnel breaks (Nov 16: IPRoyal mobile
+# answered CONNECT with a 500 on every exit for a minute), and a lean toward
+# whichever pool Google is answering today. Each NEW identity picks a pool
+# weighted by its recent answer rate, never below POOL_EXPLORE (so a pool
+# that recovers is noticed); POOL_BENCH_AFTER proxy-level failures in a row
+# bench a pool, for longer each time, so a lapsed plan benches itself
+# instead of failing searches.
+PROXY_ENV_NAMES = ("FLI_PROXY", "FLI_PROXY_2")
+POOL_WINDOW = 30          # recent attempts per pool that set its weight
+POOL_EXPLORE = 0.2        # the least weight a live pool gets
+POOL_BENCH_AFTER = 3      # proxy-level failures in a row before a pool sits out
+POOL_BENCH_S = 600.0      # the first bench; doubles per repeat, up to POOL_BENCH_MAX_S
+POOL_BENCH_MAX_S = 6 * 3600.0
+_PROXY_FAULTS = ("ProxyError", "CONNECT tunnel failed", "Proxy Authentication")
+_proxy_pool_lock = threading.Lock()
+
+
+def _proxy_form(raw: str | None) -> str:
+    """Which FORM a setting was pasted in, never any part of it: after a
+    switch in Vercel, debug_timings says the new value is live."""
+    raw = (raw or "").strip()
+    return "none" if not raw else ("url" if "@" in raw else "dashboard line")
+
+
+def load_proxy_pools() -> list[dict]:
+    pools = []
+    for name in PROXY_ENV_NAMES:
+        raw = os.environ.get(name)
+        base = proxy_url_from(raw)
+        if base:
+            pools.append({"name": name, "base": base, "form": _proxy_form(raw),
+                          "recent": deque(maxlen=POOL_WINDOW),
+                          "counts": {"ok": 0, "refused": 0, "empty": 0, "error": 0},
+                          "proxy_fail_run": 0, "benches": 0, "benched_until": 0.0})
+    return pools
+
+
+_proxy_pools: list[dict] = load_proxy_pools()
+# the primary pool's URL (tests and probes set it directly when no pool is configured)
+_proxy_base = _proxy_pools[0]["base"] if _proxy_pools else ""
+_PROXY_FORM = _proxy_pools[0]["form"] if _proxy_pools else "none"
+
+
+def _pool_rate(p: dict) -> float:
+    r = p["recent"]
+    return (sum(r) + 1) / (len(r) + 2)  # smoothed: an unmeasured pool starts at 0.5
+
+
+def pick_proxy_pool() -> dict | None:
+    if not _proxy_pools:
+        return None
+    now = time.monotonic()
+    live = [p for p in _proxy_pools if p["benched_until"] <= now] or list(_proxy_pools)
+    if len(live) == 1:
+        return live[0]
+    return random.choices(live, weights=[max(POOL_EXPLORE, _pool_rate(p)) for p in live], k=1)[0]
+
+
+def note_pool_outcome(kind: str, exc: BaseException | None = None) -> None:
+    """Credit the pool of this thread's identity with one attempt's outcome.
+    An answer (rows or a real 'no flights') counts for the pool, a refusal
+    against it; an error counts only if the PROXY failed (a slow Google
+    stream says nothing about the exit)."""
+    name = (getattr(_local, "identity", None) or {}).get("pool")
+    pool = next((p for p in _proxy_pools if p["name"] == name), None) if name else None
+    if pool is None:
+        return
+    fault = exc is not None and any(m in f"{exc!r} {exc.__cause__!r}" for m in _PROXY_FAULTS)
+    benched = None
+    with _proxy_pool_lock:
+        pool["counts"][kind] = pool["counts"].get(kind, 0) + 1
+        if kind in ("ok", "empty", "refused"):
+            pool["recent"].append(0 if kind == "refused" else 1)
+            pool["proxy_fail_run"] = 0  # the tunnel worked, whatever Google said
+            if kind != "refused":
+                pool["benches"] = 0
+        elif fault:
+            pool["proxy_fail_run"] += 1
+            if pool["proxy_fail_run"] >= POOL_BENCH_AFTER:
+                pool["benches"] += 1
+                benched = min(POOL_BENCH_MAX_S, POOL_BENCH_S * 2 ** (pool["benches"] - 1))
+                pool["benched_until"] = time.monotonic() + benched
+                pool["proxy_fail_run"] = 0
+    if benched:
+        print(f"[proxy-pool] {name} benched {benched:.0f}s after {POOL_BENCH_AFTER} proxy failures in a row")
+
+
+def proxy_pool_status() -> list[dict]:
+    """For debug_timings: names, forms and counts only, never a value."""
+    now = time.monotonic()
+    with _proxy_pool_lock:
+        return [{"name": p["name"], "form": p["form"], **p["counts"],
+                 "answered_recent": f"{sum(p['recent'])}/{len(p['recent'])}",
+                 "benched_s": max(0, round(p["benched_until"] - now))} for p in _proxy_pools]
 
 # Distinct, current fingerprints. Identical clones from one address are a
 # pattern; a varied handful is not.
@@ -110,20 +204,23 @@ _pool_lock = threading.Lock()
 _local = threading.local()
 
 
-def _make_proxy_url() -> str:
+def _make_proxy_url(base: str | None = None) -> str:
     """A fresh residential exit. IPRoyal takes a sticky-session suffix in the
     credentials; each identity gets its own so they don't share an IP."""
-    if "iproyal" in _proxy_base and "@" in _proxy_base:
-        creds, host = _proxy_base.rsplit("@", 1)
+    base = _proxy_base if base is None else base
+    if "iproyal" in base and "@" in base:
+        creds, host = base.rsplit("@", 1)
         return f"{creds}_session-{secrets.token_hex(4)}_lifetime-30m@{host}"
-    return _proxy_base
+    return base
 
 
 def _new_identity(idx: int) -> dict:
+    pool = pick_proxy_pool()
     return {
         "idx": idx,
         "uid": secrets.token_hex(4),  # stable handle for logs and tests
-        "proxy": _make_proxy_url(),
+        "proxy": _make_proxy_url(pool["base"] if pool else None),
+        "pool": pool["name"] if pool else None,
         "impersonate": random.choice(_IMPERSONATIONS),
         "session": None,   # built lazily on first use
         "strikes": 0,
@@ -3201,6 +3298,7 @@ def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy
             last_exc = e
             diag.append(f"a{i + 1} {type(e).__name__} {time.monotonic() - _ta:.0f}s")
             _attempt_stats["outcomes"]["error"] += 1
+            note_pool_outcome("error", e)
             retire_identity()
             note_search_outcome(False)
             refusals += 1
@@ -3212,6 +3310,7 @@ def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy
             continue
         if results:
             note_search_outcome(True)
+            note_pool_outcome("ok")
             _attempt_stats["outcomes"]["ok"] += 1
             _attempt_stats["ok_on_attempt"].append(i + 1)
             del _attempt_stats["ok_on_attempt"][:-50]  # a long-lived process must not grow it
@@ -3223,9 +3322,11 @@ def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy
             answered_empty = True
             diag.append(f"a{i + 1} answered-empty {wire.get('bytes', 0)}B")
             _attempt_stats["outcomes"]["empty"] += 1
+            note_pool_outcome("empty")
         else:
             diag.append(f"a{i + 1} refused {wire.get('bytes', 0)}B {time.monotonic() - _ta:.0f}s")
             _attempt_stats["outcomes"]["refused"] += 1
+            note_pool_outcome("refused")
             refusals += 1
         retire_identity()
         note_search_outcome(False)
@@ -6167,6 +6268,7 @@ async def search(request: Request):
                 "search_ok_on_attempt": _attempt_stats["ok_on_attempt"][-6:],
                 "attempt_outcomes": dict(_attempt_stats["outcomes"]),
                 "proxy_form": _PROXY_FORM,
+                "proxy_pools": proxy_pool_status(),
                 # the second way in: how often Google's refusal was answered elsewhere
                 "serpapi": serp_status(),
                 "cached_specs": len(_search_cache),

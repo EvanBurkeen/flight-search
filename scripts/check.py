@@ -2650,8 +2650,94 @@ check("debug_timings names the proxy FORM, never its value",
       and app._PROXY_FORM in ("none", "url", "dashboard line"))
 check("IPRoyal's sticky session still attaches to a pasted dashboard line",
       "iproyal" in _pu("geo.iproyal.com:12321:u:p") and "@" in _pu("geo.iproyal.com:12321:u:p"))
-check("the module reads FLI_PROXY through the parser",
-      '_proxy_base = proxy_url_from(os.environ.get("FLI_PROXY"))' in open(os.path.join(ROOT, "api", "index.py")).read())
+check("both proxy settings are read through the parser",
+      "base = proxy_url_from(raw)" in open(os.path.join(ROOT, "api", "index.py")).read()
+      and app.PROXY_ENV_NAMES == ("FLI_PROXY", "FLI_PROXY_2"))
+
+# Nov 16, Evan: "why dont we do both" (residential + the mobile month paid
+# for). Each new identity picks a pool by its recent answer rate; a pool
+# whose TUNNEL keeps failing benches itself (a lapsed plan must not fail
+# searches), while Google being slow or refusing never benches a pool.
+import collections as _col_p
+import random as _rnd_p
+_pp_env = {k: os.environ.pop(k, None) for k in app.PROXY_ENV_NAMES}
+_pp_saved, _pp_ident = list(app._proxy_pools), getattr(app._local, "identity", None)
+try:
+    os.environ["FLI_PROXY"] = "http://resuser:respass@geo.iproyal.com:12321"
+    os.environ["FLI_PROXY_2"] = "geo.iproyal.com:12321:mobuser:mobpass_country-us"
+    app._proxy_pools[:] = app.load_proxy_pools()
+    check("both pools load, each in the form it was pasted",
+          [(p["name"], p["form"]) for p in app._proxy_pools]
+          == [("FLI_PROXY", "url"), ("FLI_PROXY_2", "dashboard line")])
+    _pp_ids = [app._new_identity(i) for i in range(40)]
+    check("new identities draw from both pools, each leaving through its own pool",
+          {i["pool"] for i in _pp_ids} == {"FLI_PROXY", "FLI_PROXY_2"}
+          and all(("mobuser" in i["proxy"]) == (i["pool"] == "FLI_PROXY_2") for i in _pp_ids)
+          and all("_session-" in i["proxy"] for i in _pp_ids))
+    _pa, _pb = app._proxy_pools
+    _pa["recent"].extend([0] * 30)
+    _pb["recent"].extend([1] * 30)
+    _rnd_p.seed(7)
+    _picks = _col_p.Counter(app.pick_proxy_pool()["name"] for _ in range(2000))
+    check("traffic leans toward the pool Google is answering, and the other keeps a share",
+          _picks["FLI_PROXY_2"] > 1400 and _picks["FLI_PROXY"] > 200, str(dict(_picks)))
+    app._local.identity = {"pool": "FLI_PROXY_2"}
+    for _ in range(5):
+        app.note_pool_outcome("error", app.SearchClientError("POST request to Google Flights failed: Timeout"))
+    check("Google being slow never benches a pool", app.proxy_pool_status()[1]["benched_s"] == 0)
+    for _ in range(3):
+        app.note_pool_outcome("error", app.SearchClientError("POST request to Google Flights failed: ProxyError"))
+    _b1 = app.proxy_pool_status()[1]["benched_s"]
+    check("three tunnel failures in a row bench the pool, and new identities avoid it",
+          590 <= _b1 <= app.POOL_BENCH_S
+          and {app.pick_proxy_pool()["name"] for _ in range(200)} == {"FLI_PROXY"})
+    _pb["benched_until"] = 0.0
+    for _ in range(3):
+        app.note_pool_outcome("error", app.SearchClientError("POST request to Google Flights failed: ProxyError"))
+    check("a pool that keeps failing sits out longer each time (a lapsed plan goes quiet)",
+          app.proxy_pool_status()[1]["benched_s"] > app.POOL_BENCH_S)
+    app.note_pool_outcome("ok")
+    check("...and one answer through it resets the escalation", _pb["benches"] == 0)
+    _pst = json.dumps(app.proxy_pool_status())
+    check("pool status names and counts, never a credential",
+          not any(x in _pst for x in ("resuser", "respass", "mobuser", "mobpass")) and '"FLI_PROXY_2"' in _pst)
+    _pa["recent"].clear(); _pb["recent"].clear(); _pb["benched_until"] = 0.0
+    for _p in (_pa, _pb):
+        _p["counts"].update(ok=0, refused=0, empty=0, error=0)
+    _pp_sleep, _pp_brk = time.sleep, dict(app._breaker)
+    time.sleep = lambda s: None
+    _pp_saved_ids = list(app._identities)
+    app._identities.clear()
+    _pp_n = {"n": 0}
+
+    def _pp_refuse_then_answer(*a, **k):
+        _pp_n["n"] += 1
+        app._local.last_wire = None
+        return [result([leg("JFK", "ORD", future(30) + "T08:00", future(30) + "T10:00", "AA", "1")], 99.0)] \
+            if _pp_n["n"] == 3 else []
+
+    try:
+        app._breaker.update(consecutive=0, open_until=0.0)
+        app.run_search(types.SimpleNamespace(search=_pp_refuse_then_answer), app.build_filters(
+            {"departure_date": future(30)}, *[app.resolve_airports(x)[0] for x in (["JFK"], ["ORD"])]),
+            app.SortBy.CHEAPEST, top_n=10, budget_s=30, fallback=False)
+    finally:
+        time.sleep = _pp_sleep
+        app._breaker.clear(); app._breaker.update(_pp_brk)
+        app._identities[:] = _pp_saved_ids
+    _pp_tot = _col_p.Counter()
+    for _p in app._proxy_pools:
+        _pp_tot.update({k: _p["counts"][k] for k in ("ok", "refused")})
+    check("every attempt of the ladder is credited to the pool it left through",
+          _pp_tot["refused"] == 2 and _pp_tot["ok"] == 1, str(dict(_pp_tot)))
+finally:
+    for _k, _v in _pp_env.items():
+        if _v is None:
+            os.environ.pop(_k, None)
+        else:
+            os.environ[_k] = _v
+    app._proxy_pools[:] = _pp_saved
+    app._local.identity = _pp_ident
 
 # --------------------------------------------------------------------------
 section("Trip briefings  — Changelog: 'trip briefings by email'")
@@ -2972,6 +3058,8 @@ check("README states the cadences the code offers",
       all(label in _readme for label in ("Daily", "Every 3 days", "Weekly")))
 # The second way in: the env vars Evan sets, and the numbers that decide
 # when a paid search is spent and how many.
+for _env in ("FLI_PROXY", "FLI_PROXY_2"):
+    check(f"README names the proxy env var {_env}", f'"{_env}"' in _src and _env in _readme)
 for _env in ("SERPAPI_KEY", "SERPAPI_DAILY_MAX", "SERPAPI_DEEP_SEARCH"):
     check(f"README names the SerpApi env var {_env}", f'"{_env}"' in _src and _env in _readme)
 check("README states when the question goes to SerpApi",

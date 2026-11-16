@@ -53,6 +53,8 @@ this file, then **"Lessons the hard way"** below before debugging anything.
   data gap (small airports, or genuinely no service).
 - **Env (Vercel only, never in git):** `ANTHROPIC_API_KEY`, `FLI_PROXY`
   (IPRoyal rotating US-residential proxy; the fix for Google throttling),
+  optional `FLI_PROXY_2` (a second pool, e.g. IPRoyal mobile; see
+  Operations, "Two proxy pools"),
   `SERPAPI_KEY` (the second way in: SerpApi answers what Google refuses us;
   optional `SERPAPI_DAILY_MAX`, default 30, and `SERPAPI_DEEP_SEARCH=0` to
   trade fidelity for speed; see Operations).
@@ -743,6 +745,19 @@ overrides) instead of being sent. Open one in a browser to review a briefing.
   browser; `SERPAPI_DEEP_SEARCH=0` trades that for speed. No sort is sent,
   so the board's tap-to-price repeats the turn's exact outbound question
   and SerpApi's free one-hour cache answers it.
+- **Two proxy pools (Nov 16).** `FLI_PROXY` and optional `FLI_PROXY_2`,
+  each pasted as-is (dashboard line or URL). Each NEW identity picks a pool
+  weighted by that pool's answer rate over its last 30 attempts (smoothed,
+  never below 0.2, so a recovering pool is noticed); warm identities are
+  reused as before. A pool whose TUNNEL fails 3 times in a row (curl
+  ProxyError: "CONNECT tunnel failed", proxy auth) is benched for 10
+  minutes, doubling per repeat up to 6 hours, and one answer through it
+  resets that; Google refusing or being slow never benches a pool.
+  `debug_timings.proxy_pools` reports each pool's form, counts, recent
+  answer rate and bench time, never a value. A second pool of similar
+  quality does not double the odds (every retry is already a fresh exit);
+  it buys failover and the lean. When a plan lapses (the mobile one on Dec
+  11 unless renewed), it benches itself, but delete its variable anyway.
 - **Identity pool (supersedes the old single sticky session).** Each identity
   bundles its own cookie jar, proxy exit (`_session-<random>_lifetime-30m`) and
   browser fingerprint. `checkout_identity()` prefers the most recently
@@ -807,6 +822,24 @@ overrides) instead of being sent. Open one in a browser to review a briefing.
   refusal wave; that is the price of never mailing half a trip.
 
 ## Changelog
+
+**November 16, 2026 (both proxy pools)**
+- Evan, with 1.9 GB of residential left and a mobile month paid through Dec
+  11: "why dont we do both". Measured the same day they answer at about
+  the same rate, so this is not a doubling (every retry already gets a
+  fresh exit). It is failover (minutes earlier the mobile tunnel had
+  answered CONNECT with 500 on every exit), the paid month used, and a
+  lean toward whichever pool Google answers more.
+- `FLI_PROXY_2` adds a second pool. Each new identity picks a pool by its
+  recent answer rate (floor 0.2); 3 tunnel failures in a row bench a pool
+  (10 min, doubling to 6 h; an answer resets it), so the mobile plan
+  lapsing benches itself instead of failing searches. Every ladder attempt
+  is credited to its pool; `debug_timings.proxy_pools` shows the split. 10
+  checks. Live smoke test (the mobile line in both slots, so mechanics
+  only): identities spread across pools and every attempt was credited,
+  but Google answered 1 of 17 attempts that hour, the same picture prod's
+  residential showed (1 answer after 11 refusals). Two pools cannot fix a
+  wave that refuses both.
 
 **November 16, 2026 (paste the proxy line as IPRoyal shows it)**
 - Evan: "can we switch the proxy to the mobile I paid for???" The switch
