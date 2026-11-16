@@ -719,10 +719,11 @@ overrides) instead of being sent. Open one in a browser to review a briefing.
   providers, `FLI_PROXY` takes the line exactly as IPRoyal's dashboard shows
   it (`HOST:PORT:USER:PASS`) or a URL (`http://user:pass@host:port`), parsed
   by `proxy_url_from`; the sticky session suffix is IPRoyal-gated in code.
-  Nov 16: Evan chose to move production to the IPRoyal mobile pool (paid
-  through Dec 11; residential credit nearly spent). Paced test through it: NYC to LAX and
-  NYC to Hanoi answered first try with all three airports, JFK to ORD refused
-  4 of 4, about the residential rate. When the proxy is refused
+  Nov 16: residential has 1.9 GB left (months at 100-300KB a search), so
+  production stays on it. The IPRoyal mobile pool (paid through Dec 11) was
+  re-tested the same day: NYC to LAX and NYC to Hanoi answered first try
+  with all three airports, JFK to ORD refused 4 of 4, about the residential
+  rate, so it buys nothing extra. When the proxy is refused
   anyway (69% of attempts on Nov 12), SerpApi answers: next bullet.
 - **The second way in: SerpApi (Nov 12).** When Google refuses our own
   request twice, `run_search` asks SerpApi's Google Flights API instead
