@@ -2441,7 +2441,7 @@ try:
     _s_d2 = _s_ladder(budget_s=30)
     _s_v = app.search_verdict()
     check("when SerpApi fails, the ladder finishes and the refusal stays a refusal",
-          _s_d2 == [] and _s_fli["n"] == 4 and len(_s_calls) == 1 and _s_v["verdict"] == "refused"
+          _s_d2 == [] and _s_fli["n"] == app.LADDER_ATTEMPTS and len(_s_calls) == 1 and _s_v["verdict"] == "refused"
           and any("serpapi error" in a for a in _s_v["attempts"]), f"{_s_v}")
 
     # call sites that run only because the main search had its chance
@@ -2630,6 +2630,48 @@ check("rank_pool trims by fare, never by position, and drops exact duplicates",
       and min(r.price for r in _ap_pool) == 155.0)
 check("no positional cut survives in front of the ranking",
       "results[:RANK_POOL]" not in open(os.path.join(ROOT, "api", "index.py")).read())
+
+# --------------------------------------------------------------------------
+section("A refusal is a coin flip now  — Changelog: 'what changed: refusals stopped sticking'")
+# --------------------------------------------------------------------------
+# Nov 16: through rented addresses each request is answered 40-55% of the
+# time, the SAME proven session flipping between answered and refused, and a
+# 12-request burst was answered as often as paced requests. A ladder that
+# quit after 4 fast refusals failed ~13% of pieces at 40%; 8 fail under 2%.
+_cf_n = {"n": 0}
+
+
+def _cf_refuse_six(*a, **k):
+    _cf_n["n"] += 1
+    app._local.last_wire = {"bytes": 95, "parsed": False, "rows": 0}
+    if _cf_n["n"] == 7:
+        return [result([leg("JFK", "ORD", future(30) + "T08:00", future(30) + "T10:00", "AA", "7")], 99.0)]
+    return None
+
+
+_cf_sleep = time.sleep
+time.sleep = lambda s: None
+try:
+    with app._breaker_lock:
+        _cf_brk = dict(app._breaker)
+        app._breaker.update(consecutive=0, open_until=0.0)
+    _cf_got = app.run_search(types.SimpleNamespace(search=_cf_refuse_six), app.build_filters(
+        {"departure_date": future(30)}, *[app.resolve_airports(x)[0] for x in (["JFK"], ["ORD"])]),
+        app.SortBy.CHEAPEST, top_n=10, budget_s=30, fallback=False)
+finally:
+    time.sleep = _cf_sleep
+    with app._breaker_lock:
+        app._breaker.clear(); app._breaker.update(_cf_brk)
+check("six fast refusals no longer lose the search: the seventh try is answered",
+      len(_cf_got) == 1 and _cf_n["n"] == 7 and app.LADDER_ATTEMPTS >= 7, f"{_cf_n['n']} attempts")
+_cf_src = open(os.path.join(ROOT, "api", "index.py")).read()
+check("the ladder's length is bounded by the same time budget (slow attempts still end it)",
+      "if i > 0 and time.monotonic() - started > budget_s:" in _cf_src)
+check("the breaker's pause before a retry is capped for the coin-flip era",
+      _cf_src.count("breaker_wait(1.5 if i == 0 else LADDER_RETRY_PAUSE_CAP_S)") == 2
+      and app.LADDER_RETRY_PAUSE_CAP_S <= 2.0 and "else 6.0)" not in _cf_src)
+check("a refused tap-to-price gets four fast tries inside a tap's patience",
+      "for i in range(4):" in _cf_src.split("def fetch_returns_for_outbound", 1)[1].split("\ndef ", 1)[0])
 
 # --------------------------------------------------------------------------
 section("Proxy setting, pasted as shown  — Changelog: 'paste the proxy line as IPRoyal shows it'")
@@ -3058,6 +3100,8 @@ check("README states the cadences the code offers",
       all(label in _readme for label in ("Daily", "Every 3 days", "Weekly")))
 # The second way in: the env vars Evan sets, and the numbers that decide
 # when a paid search is spent and how many.
+check("README states the ladder's attempt count",
+      f"up to {app.LADDER_ATTEMPTS} attempts" in " ".join(_readme.split()))
 for _env in ("FLI_PROXY", "FLI_PROXY_2"):
     check(f"README names the proxy env var {_env}", f'"{_env}"' in _src and _env in _readme)
 for _env in ("SERPAPI_KEY", "SERPAPI_DAILY_MAX", "SERPAPI_DEEP_SEARCH"):

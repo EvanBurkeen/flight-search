@@ -3230,6 +3230,18 @@ def serp_returns_for(filters, sel_legs) -> list | None:
     return [r for r, _o in rets]
 
 
+# Nov 16: refusals stopped being session-sticky. Through rented addresses a
+# request is now a coin flip (40-55% answered on the day, the SAME proven
+# session flipping between answered and refused), refused in about a second,
+# and 12 attempts fired in 4 seconds were answered at the same rate as paced
+# ones. So a fast refusal is worth another try: up to LADDER_ATTEMPTS inside
+# the SAME budget_s (slow attempts still end a ladder early), and the
+# breaker's pause before a retry is capped at LADDER_RETRY_PAUSE_CAP_S (6s
+# was sized for the July era, when a refusal predicted the next one).
+LADDER_ATTEMPTS = 8
+LADDER_RETRY_PAUSE_CAP_S = 2.0
+
+
 def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy,
                top_n: int, budget_s: float = 35.0, max_attempt_s: float | None = None,
                refusal_exit: int | None = None, fallback: bool = True):
@@ -3276,12 +3288,13 @@ def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy
         serp_tried = True
         return serp_fallback(search, filters, diag)
 
-    for i, attempt_sort in enumerate((sort, sort, SortBy.CHEAPEST, SortBy.CHEAPEST)):
+    sorts = ((sort, sort, SortBy.CHEAPEST, SortBy.CHEAPEST) * LADDER_ATTEMPTS)[:LADDER_ATTEMPTS]
+    for i, attempt_sort in enumerate(sorts):
         if i > 0 and time.monotonic() - started > budget_s:
             break  # out of time: surface what we have rather than dig the hole deeper
         if i >= 2 and getattr(_local, "lean", False):
             break  # a backfill retry: the page asks again later, in another burst
-        breaker_wait(1.5 if i == 0 else 6.0)
+        breaker_wait(1.5 if i == 0 else LADDER_RETRY_PAUSE_CAP_S)
         checkout_identity()
         # attempt 1 fails fast into a fresh identity; retries get room for
         # Google's slow progressive streams to actually finish downloading
@@ -3306,7 +3319,7 @@ def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy
                 got = second_way_in()
                 if got is not None:
                     return got
-            time.sleep(0.5 + 0.4 * i + random.uniform(0, 0.4))
+            time.sleep(0.4 + random.uniform(0, 0.4))
             continue
         if results:
             note_search_outcome(True)
@@ -3342,7 +3355,7 @@ def run_search(search: SearchFlights, filters: FlightSearchFilters, sort: SortBy
         if refusal_exit and len(diag) >= refusal_exit \
                 and all(" refused " in d for d in diag[-refusal_exit:]):
             break
-        time.sleep(0.4 * (i + 1) + random.uniform(0, 0.4))
+        time.sleep(0.3 + random.uniform(0, 0.4))  # each retry is a new address: no need to back off
     if not answered_empty:
         # the ladder ran out of time or attempts before the threshold (one
         # slow refusal can spend a whole budget): last chance, same rules
@@ -6114,8 +6127,11 @@ def fetch_returns_for_outbound(spec: dict, legs_in: list, from_total=None) -> di
 
     searcher = RepresentativeSearch()
     rows, last_exc, answered = None, None, False
-    for i in range(2):
-        breaker_wait(1.5 if i == 0 else 6.0)
+    _tap_started = time.monotonic()
+    for i in range(4):
+        if i > 0 and time.monotonic() - _tap_started > 25.0:
+            break  # same coin-flip doctrine as run_search, inside a tap's patience
+        breaker_wait(1.5 if i == 0 else LADDER_RETRY_PAUSE_CAP_S)
         checkout_identity()
         _local.fli_timeout = 12.0 if i == 0 else 24.0
         _local.last_wire = None

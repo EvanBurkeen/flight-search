@@ -267,13 +267,26 @@ counterintuitive enough that a fresh assistant will otherwise repeat the bug.
   named so their gaps never read as no-service; and an incurably short
   grid ships with a coverage warning. `grid_probe` in the payload says
   what happened.
-- **Refusals are SESSION-STICKY soft blocks, not random flakiness.** HTTP 200 with a
-  ~94-byte body (gRPC code 13). A flagged session failed 64/64 consecutive requests
-  while brand-new sessions in the same seconds passed 20/32. Retrying on the same
-  cookie jar cannot escape it: retire the identity.
-- **Retrying harder makes it worse.** Sustained volume escalates a cheap session
-  flag into an IP-level block. That is what the circuit breaker is for; do not
-  "fix" refusals by adding attempts.
+- **Refusals WERE session-sticky soft blocks (July); since early November they
+  are a per-request coin flip.** HTTP 200 with a ~94-byte body (gRPC code 13).
+  July: a flagged session failed 64/64 consecutive requests while brand-new
+  sessions in the same seconds passed 20/32, so a session that got through kept
+  getting through, and reusing it is what made searches fast and reliable.
+  Nov 16, re-measured through the proxy: a session that had just been answered
+  went on to be answered 3 of 6 and 2 of 6 times, flipping between ok and
+  refused. Retiring a refused identity is still right; expecting a proven one
+  to stay proven is not. Google tightened around Nov 6 (fli issue #270, "All
+  searches return empty", other users confirming; fli's own canary failed Nov
+  14), and our code had not changed since Sep 5.
+- **Retrying harder made it worse, in July; in November it does not.** July:
+  sustained volume from ONE address escalated a cheap session flag into an
+  IP-level block, so the rule was "do not fix refusals by adding attempts".
+  Every retry now leaves from a fresh address, and Nov 16 measured 12 attempts
+  fired in 4 seconds answered at the same rate as attempts 10 seconds apart
+  (6/12 vs 9/16). A refusal costs about a second, so the ladder now takes up
+  to 8 attempts inside the same time budget, with the breaker's pause before
+  a retry capped at 2s. If a future measurement shows bursts escalating again,
+  this is the lesson to revisit, with a paced control.
 - **Multi-leg prices are cumulative, not per-leg.** In an expansion the first leg
   carries the best achievable total ("from") and the later leg carries that
   pairing's total. And Google's *joint* fare can sit far above buying the legs
@@ -527,7 +540,7 @@ Google traffic through a proxy (see Operations).
 3. `execute_spec` per search: roll past dates forward (with a visible note) →
    resolve airports (multi-airport cities supported) → build fli filters
    (cabin, stops, airlines, alliances, price cap, times, currency pinned USD) →
-   `run_search` (4-attempt ladder: sort, sort, CHEAPEST, CHEAPEST; adaptive
+   `run_search` (a ladder of up to 8 attempts, `LADDER_ATTEMPTS`: sort, sort, CHEAPEST, CHEAPEST, repeated; adaptive
    per-attempt timeouts — 12s fail-fast first, 28s on retries so Google's
    slow progressive streams can finish, 12s/22s for expansions;
    **whole ladder bounded by `budget_s`**, 35s default / 45s
@@ -787,7 +800,7 @@ overrides) instead of being sent. Open one in a browser to review a briefing.
   diagnosis cost a probe cycle because the status was visible nowhere.
 - **Google backend transience:** ~5-10% of search POSTs return HTTP 200 with a
   tiny `travel.frontend.flights.ErrorResponse` body (parses to empty), in
-  bursts. Handled by the 4-attempt jittered ladder in `run_search` — do not
+  bursts. Handled by the jittered ladder (up to 8 attempts) in `run_search` — do not
   mistake these for IP throttling (throttling = persistent, this = flicker).
 - fli quirks: `SortBy.BEST` intermittently returns None (fallback to CHEAPEST);
   multi-city is slow (fan-out capped at `top_n=4`, `maxDuration` 300s).
@@ -822,6 +835,30 @@ overrides) instead of being sent. Open one in a browser to review a briefing.
   refusal wave; that is the price of never mailing half a trip.
 
 ## Changelog
+
+**November 16, 2026 (what changed: refusals stopped sticking)**
+- Evan: "literally, this wasnt a problem a month ago. wtf is the problem
+  now". Ours first: no code changed between Sep 5 and Nov 11, and the
+  fli version (0.9.0, `>=0.9.0,<1.0` since July) never changed; the Nov 11
+  pin was a no-op. Outside: fli issue #270 (Nov 6, open, others
+  confirming), "All searches return empty", and fli's own live canary
+  failed Nov 14. Google tightened something around Nov 6.
+- What it changed for us, measured through the mobile proxy today: Google
+  serves the Flights PAGE to every browser identity we use (no
+  `/unsupported` redirect, home or proxy), loading the page first does not
+  help (cold 4/8 vs warmed 5/8), and bursts do not hurt (12 in 4s answered
+  6/12, paced 9/16). The change is stickiness: in July a session that got
+  through kept getting through, and the app is built on reusing it; now the
+  SAME proven session is answered 2-3 times in 6. Every request is a coin
+  flip, and a 4-attempt ladder with 6s breaker pauses was sized for the old
+  world: at 40% it loses ~13% of pieces, which on a 3-airport search is
+  usually an airport.
+- So the ladder takes up to 8 attempts (`LADDER_ATTEMPTS`) inside the SAME
+  budgets, flat 0.3-0.7s gaps (each retry is a new address), the breaker's
+  pause before a retry capped at 2s (`LADDER_RETRY_PAUSE_CAP_S`), and a
+  refused tap-to-price gets 4 fast tries inside 25s instead of 2. Lessons
+  "session-sticky" and "retrying harder" amended with the evidence, not
+  deleted. 4 checks plus a drift check.
 
 **November 16, 2026 (both proxy pools)**
 - Evan, with 1.9 GB of residential left and a mobile month paid through Dec
