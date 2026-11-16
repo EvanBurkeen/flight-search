@@ -70,7 +70,29 @@ import threading
 from fli.search import client as _fli_client
 from fli.search._concurrency import get_executor as _get_executor
 
-_proxy_base = os.environ.get("FLI_PROXY") or ""
+def proxy_url_from(raw: str | None) -> str:
+    """FLI_PROXY as a curl proxy URL, whichever way it was pasted.
+
+    IPRoyal's dashboard shows HOST:PORT:USER:PASS, while curl needs
+    http://USER:PASS@HOST:PORT; Nov 12, rearranging it by hand was the step
+    that stalled switching to the mobile pool. Accepted as-is: that line, a
+    full URL, or USER:PASS@HOST:PORT without the scheme. The password may
+    itself contain colons, so the dashboard line splits at most 3 times."""
+    s = (raw or "").strip().strip('"').strip("'").strip()
+    if not s:
+        return ""
+    if "://" in s:
+        return s
+    if "@" in s:
+        return "http://" + s
+    parts = s.split(":", 3)
+    if len(parts) == 4 and parts[1].isdigit():
+        host, port, user, pw = parts
+        return f"http://{user}:{pw}@{host}:{port}"
+    return s  # unrecognized: passed through, so a bad value fails loudly at curl, not silently here
+
+
+_proxy_base = proxy_url_from(os.environ.get("FLI_PROXY"))
 
 # Distinct, current fingerprints. Identical clones from one address are a
 # pattern; a varied handful is not.

@@ -2632,6 +2632,25 @@ check("no positional cut survives in front of the ranking",
       "results[:RANK_POOL]" not in open(os.path.join(ROOT, "api", "index.py")).read())
 
 # --------------------------------------------------------------------------
+section("Proxy setting, pasted as shown  — Changelog: 'paste the proxy line as IPRoyal shows it'")
+# --------------------------------------------------------------------------
+# Nov 12 and 16: switching to the mobile pool stalled on rearranging the
+# dashboard's HOST:PORT:USER:PASS into a URL. FLI_PROXY now takes either.
+_pu = app.proxy_url_from
+check("the dashboard line becomes a proxy URL",
+      _pu("geo.example.com:12321:user1:pw_country-us") == "http://user1:pw_country-us@geo.example.com:12321")
+check("...even when the password contains a colon, or the paste has quotes and spaces",
+      _pu("  'geo.example.com:12321:user1:p:w'\n") == "http://user1:p:w@geo.example.com:12321")
+check("a full URL, or one without the scheme, is kept as a URL",
+      _pu("http://u:p@h.example:8080") == "http://u:p@h.example:8080"
+      and _pu("u:p@h.example:8080") == "http://u:p@h.example:8080")
+check("an empty setting means no proxy", _pu("") == "" and _pu(None) == "")
+check("IPRoyal's sticky session still attaches to a pasted dashboard line",
+      "iproyal" in _pu("geo.iproyal.com:12321:u:p") and "@" in _pu("geo.iproyal.com:12321:u:p"))
+check("the module reads FLI_PROXY through the parser",
+      '_proxy_base = proxy_url_from(os.environ.get("FLI_PROXY"))' in open(os.path.join(ROOT, "api", "index.py")).read())
+
+# --------------------------------------------------------------------------
 section("Trip briefings  — Changelog: 'trip briefings by email'")
 # --------------------------------------------------------------------------
 # Evan, Nov 11: a Watch button that emails a briefing on a schedule (best,

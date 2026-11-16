@@ -716,8 +716,13 @@ overrides) instead of being sent. Open one in a browser to review a briefing.
   Vercel env holds an IPRoyal rotating US-residential proxy URL (account:
   evanburkeen@gmail.com; ~2GB non-expiring credit bought July 2026; top up in
   their dashboard when low; searches use ~100-300KB each). If switching
-  providers keep the URL format `http://user:pass@host:port`; the sticky
-  session suffix is IPRoyal-gated in code. When the proxy is refused
+  providers, `FLI_PROXY` takes the line exactly as IPRoyal's dashboard shows
+  it (`HOST:PORT:USER:PASS`) or a URL (`http://user:pass@host:port`), parsed
+  by `proxy_url_from`; the sticky session suffix is IPRoyal-gated in code.
+  Nov 16: Evan chose to move production to the IPRoyal mobile pool (paid
+  through Dec 11; residential credit nearly spent). Paced test through it: NYC to LAX and
+  NYC to Hanoi answered first try with all three airports, JFK to ORD refused
+  4 of 4, about the residential rate. When the proxy is refused
   anyway (69% of attempts on Nov 12), SerpApi answers: next bullet.
 - **The second way in: SerpApi (Nov 12).** When Google refuses our own
   request twice, `run_search` asks SerpApi's Google Flights API instead
@@ -801,6 +806,19 @@ overrides) instead of being sent. Open one in a browser to review a briefing.
   refusal wave; that is the price of never mailing half a trip.
 
 ## Changelog
+
+**November 16, 2026 (paste the proxy line as IPRoyal shows it)**
+- Evan: "can we switch the proxy to the mobile I paid for???" The switch
+  is a Vercel setting, and it had stalled twice on rearranging IPRoyal's
+  `HOST:PORT:USER:PASS` into `http://USER:PASS@HOST:PORT`. `FLI_PROXY` now
+  accepts either (`proxy_url_from`; passwords may contain colons, stray
+  quotes and spaces are stripped). Tested with the real mobile line through
+  this exact path before shipping (never printed): sticky sessions attach,
+  the tunnel to Google opened on 6 of 6 exits, and 2 of 3 paced searches
+  were answered first time with every airport (JFK to ORD was refused 4 of
+  4 and goes to the page's retry). One earlier attempt hit IPRoyal-side
+  "CONNECT tunnel failed, response 500" on every exit for a minute; that is
+  the provider, not Google, and passed on its own. 6 checks.
 
 **November 16, 2026 (the airport the merge threw away)**
 - Evan: "this is entirely new that entire airports are being excluded from
