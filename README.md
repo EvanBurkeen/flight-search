@@ -122,7 +122,12 @@ this file, then **"Lessons the hard way"** below before debugging anything.
      (one, mid-wave) the same question goes to SerpApi's Google Flights
      API, and its rows are converted into fli's own objects (Changelog, "a
      second way in"). Live once `SERPAPI_KEY` is set in Vercel; until then
-     behavior is exactly as before. What it does not cover: flexible-date
+     behavior is exactly as before. **Evan declined SerpApi on Nov 16**: the
+     code stays inert and tested, so do not propose it again without a new
+     reason. Without it, a piece Google refuses outright shows as STILL
+     LOADING and is retried by the page (backfill); the remaining free
+     option is an exit Google treats like a home connection (a relay on an
+     always-on machine at home). What it does not cover: flexible-date
      grids and the price-context grid (SerpApi has no date grid), and
      multi-city combined pricing (each leg is covered as a one-way). Watch
      `debug_timings.serpapi` (ok vs errors, the day's count) alongside
